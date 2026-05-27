@@ -16,41 +16,34 @@ limitations under the License.
 
 package scheduling
 
-import "sync"
+import (
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+)
 
 // PutAttribute stores value at key in the request's attribute store.
-// The backing store is lazily allocated on first write.
-// Callers must not write concurrently to the same request from multiple goroutines.
 func (r *InferenceRequest) PutAttribute(key string, value any) {
-	if r.attributes == nil {
-		r.attributes = &sync.Map{}
+	if r.Attributes == nil {
+		r.Attributes = fwkdl.NewAttributes()
 	}
-	r.attributes.Store(key, value)
+	r.Attributes.Put(key, value)
 }
 
 // GetAttribute returns the value stored at key, or nil and false if absent.
 // Prefer ReadRequestAttribute for type-safe access.
 func (r *InferenceRequest) GetAttribute(key string) (any, bool) {
-	if r.attributes == nil {
+	if r.Attributes == nil {
 		return nil, false
 	}
-	return r.attributes.Load(key)
+	return r.Attributes.Get(key)
 }
 
 // AttributeKeys returns the keys currently present in the request's attribute store.
 // The order is unspecified.
 func (r *InferenceRequest) AttributeKeys() []string {
-	keys := make([]string, 0)
-	if r.attributes == nil {
-		return keys
+	if r.Attributes == nil {
+		return nil
 	}
-	r.attributes.Range(func(k, _ any) bool {
-		if s, ok := k.(string); ok {
-			keys = append(keys, s)
-		}
-		return true
-	})
-	return keys
+	return r.Attributes.Keys()
 }
 
 // ReadRequestAttribute returns the value stored at key, type-asserted to T.
@@ -58,13 +51,8 @@ func (r *InferenceRequest) AttributeKeys() []string {
 // is not of type T.
 func ReadRequestAttribute[T any](r *InferenceRequest, key string) (T, bool) {
 	var zero T
-	v, ok := r.GetAttribute(key)
-	if !ok {
+	if r.Attributes == nil {
 		return zero, false
 	}
-	t, ok := v.(T)
-	if !ok {
-		return zero, false
-	}
-	return t, true
+	return fwkdl.ReadAttribute[T](r.Attributes, key)
 }

@@ -213,6 +213,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		FairnessID:       fairnessID,
 		Objectives:       requestObjectives,
 		RequestSizeBytes: reqCtx.RequestSize,
+		Attributes:       fwkdl.NewAttributes(),
 	}
 
 	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName, "priority", infObjective.Spec.Priority)
@@ -361,11 +362,19 @@ func (d *Director) prepareRequest(ctx context.Context, reqCtx *handlers.RequestC
 	if result == nil || len(result.ProfileResults) == 0 {
 		return reqCtx, errcommon.Error{Code: errcommon.Internal, Msg: "results must be greater than zero"}
 	}
+	primaryProfile, ok := result.ProfileResults[result.PrimaryProfileName]
+	if !ok || primaryProfile == nil || len(primaryProfile.TargetEndpoints) == 0 {
+		return reqCtx, errcommon.Error{
+			Code: errcommon.Internal,
+			Msg:  fmt.Sprintf("primary profile %q has no target endpoints", result.PrimaryProfileName),
+		}
+	}
+
 	// primary profile is used to set destination
 	targetMetadatas := []*fwkdl.EndpointMetadata{}
 	targetEndpoints := []string{}
 
-	for _, pod := range result.ProfileResults[result.PrimaryProfileName].TargetEndpoints {
+	for _, pod := range primaryProfile.TargetEndpoints {
 		curMetadata := pod.GetMetadata()
 		curEndpoint := net.JoinHostPort(curMetadata.GetIPAddress(), curMetadata.GetPort())
 		targetMetadatas = append(targetMetadatas, curMetadata)

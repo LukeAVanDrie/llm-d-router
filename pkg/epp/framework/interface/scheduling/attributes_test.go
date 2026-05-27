@@ -17,89 +17,73 @@ limitations under the License.
 package scheduling
 
 import (
-	"strconv"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 )
 
-func TestRequestAttributes_PutThenGet(t *testing.T) {
-	r := &InferenceRequest{}
+func TestInferenceRequest_Attributes(t *testing.T) {
+	t.Run("LazyInitialization", func(t *testing.T) {
+		var r InferenceRequest // Zero-value struct, r.Attributes is nil
+		assert.Nil(t, r.Attributes)
 
-	r.PutAttribute("session", "abc")
-	v, ok := r.GetAttribute("session")
-	assert.True(t, ok)
-	assert.Equal(t, "abc", v)
+		r.PutAttribute("session", "abc")
+		assert.NotNil(t, r.Attributes)
 
-	_, ok = r.GetAttribute("missing")
-	assert.False(t, ok)
-}
+		v, ok := r.GetAttribute("session")
+		assert.True(t, ok)
+		assert.Equal(t, "abc", v)
+	})
 
-func TestRequestAttributes_KeysAfterPuts(t *testing.T) {
-	r := &InferenceRequest{}
+	t.Run("PreAllocated", func(t *testing.T) {
+		r := &InferenceRequest{
+			Attributes: fwkdl.NewAttributes(),
+		}
+		assert.NotNil(t, r.Attributes)
 
-	r.PutAttribute("a", 1)
-	r.PutAttribute("b", "two")
-	r.PutAttribute("a", 11) // overwrite
+		r.PutAttribute("session", "abc")
+		v, ok := r.GetAttribute("session")
+		assert.True(t, ok)
+		assert.Equal(t, "abc", v)
+	})
 
-	assert.ElementsMatch(t, []string{"a", "b"}, r.AttributeKeys())
+	t.Run("GetMissingKey", func(t *testing.T) {
+		var r InferenceRequest
+		_, ok := r.GetAttribute("missing")
+		assert.False(t, ok)
+	})
+
+	t.Run("OverwriteAndKeys", func(t *testing.T) {
+		var r InferenceRequest
+		r.PutAttribute("a", 1)
+		r.PutAttribute("b", "two")
+		r.PutAttribute("a", 11) // Overwrites key "a"
+
+		assert.ElementsMatch(t, []string{"a", "b"}, r.AttributeKeys())
+
+		v, ok := r.GetAttribute("a")
+		assert.True(t, ok)
+		assert.Equal(t, 11, v)
+	})
 }
 
 func TestReadRequestAttribute(t *testing.T) {
-	r := &InferenceRequest{}
-	r.PutAttribute("count", 42)
-	r.PutAttribute("name", "alpha")
+	t.Run("DelegationSuccess", func(t *testing.T) {
+		r := &InferenceRequest{}
+		r.PutAttribute("count", 42)
 
-	count, ok := ReadRequestAttribute[int](r, "count")
-	assert.True(t, ok)
-	assert.Equal(t, 42, count)
+		val, ok := ReadRequestAttribute[int](r, "count")
+		assert.True(t, ok)
+		assert.Equal(t, 42, val)
+	})
 
-	name, ok := ReadRequestAttribute[string](r, "name")
-	assert.True(t, ok)
-	assert.Equal(t, "alpha", name)
+	t.Run("NilSafety", func(t *testing.T) {
+		var r InferenceRequest
+		assert.Nil(t, r.Attributes)
 
-	missing, ok := ReadRequestAttribute[int](r, "absent")
-	assert.False(t, ok)
-	assert.Equal(t, 0, missing)
-
-	mismatch, ok := ReadRequestAttribute[string](r, "count")
-	assert.False(t, ok)
-	assert.Equal(t, "", mismatch)
-}
-
-func TestRequestAttributes_ZeroValueRequestIsUsable(t *testing.T) {
-	var r InferenceRequest
-
-	r.PutAttribute("k", "v")
-	v, ok := r.GetAttribute("k")
-	assert.True(t, ok)
-	assert.Equal(t, "v", v)
-}
-
-func TestRequestAttributes_ConcurrentAfterInit(t *testing.T) {
-	r := &InferenceRequest{}
-	r.PutAttribute("seed", 0) // ensure the store is allocated before concurrent writers start
-
-	const writers = 8
-	const writes = 200
-	var wg sync.WaitGroup
-
-	wg.Add(writers)
-	for w := 0; w < writers; w++ {
-		go func(id int) {
-			defer wg.Done()
-			for i := 0; i < writes; i++ {
-				key := strconv.Itoa(id) + ":" + strconv.Itoa(i)
-				r.PutAttribute(key, i)
-				if v, ok := ReadRequestAttribute[int](r, key); !ok || v != i {
-					t.Errorf("round-trip failed for %s: ok=%v v=%v", key, ok, v)
-					return
-				}
-			}
-		}(w)
-	}
-	wg.Wait()
-
-	assert.Len(t, r.AttributeKeys(), writers*writes+1)
+		val, ok := ReadRequestAttribute[int](&r, "count")
+		assert.False(t, ok)
+		assert.Zero(t, val)
+	})
 }

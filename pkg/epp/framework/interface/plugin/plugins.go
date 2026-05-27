@@ -40,3 +40,17 @@ type ProducerPlugin interface {
 	// the data type of the key (represented as data with default value casted as any field).
 	Produces() map[DataKey]any
 }
+
+// OptionalConsumerPlugin defines the interface for a consumer plugin that has optional inputs.
+type OptionalConsumerPlugin interface {
+	ConsumerPlugin
+	// OptionalConsumes returns a list of DataKeys that this plugin optionally consumes.
+	OptionalConsumes() []DataKey
+}
+
+// EagerProducerPlugin defines the interface for a producer plugin that should be executed eagerly.
+type EagerProducerPlugin interface {
+	ProducerPlugin
+	// Eager returns true if the plugin should be executed eagerly (even if no active consumer requests it).
+	Eager() bool
+}

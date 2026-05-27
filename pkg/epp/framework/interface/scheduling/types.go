@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"reflect"
-	"sync"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -61,10 +60,9 @@ type InferenceRequest struct {
 	// SchedulingResult captures the scheduling decisions made during the cycle.
 	SchedulingResult *SchedulingResult
 
-	// attributes holds per-request data produced and consumed across plugins.
+	// Attributes holds per-request data produced and consumed across plugins.
 	// Access via PutAttribute, GetAttribute, AttributeKeys, and ReadRequestAttribute.
-	// A nil pointer is valid; the store is lazily allocated on first write.
-	attributes *sync.Map
+	Attributes fwkdl.AttributeMap
 }
 
 func (r *InferenceRequest) String() string {
@@ -80,8 +78,8 @@ type Endpoint interface {
 	GetMetadata() *fwkdl.EndpointMetadata
 	GetMetrics() *fwkdl.Metrics
 	String() string
-	Get(string) (fwkdl.Cloneable, bool)
-	Put(string, fwkdl.Cloneable)
+	Get(string) (any, bool)
+	Put(string, any)
 	Keys() []string
 	Clone() fwkdl.AttributeMap
 }

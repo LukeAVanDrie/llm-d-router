@@ -235,8 +235,8 @@ func (f *stubSchedulingEndpoint) GetMetrics() *datalayer.Metrics             { r
 func (f *stubSchedulingEndpoint) UpdateMetrics(*datalayer.Metrics)           {}
 func (f *stubSchedulingEndpoint) GetAttributes() datalayer.AttributeMap      { return f.attr }
 func (f *stubSchedulingEndpoint) String() string                             { return "" }
-func (f *stubSchedulingEndpoint) Put(key string, val datalayer.Cloneable)    { f.attr.Put(key, val) }
-func (f *stubSchedulingEndpoint) Get(key string) (datalayer.Cloneable, bool) {
+func (f *stubSchedulingEndpoint) Put(key string, val any)    { f.attr.Put(key, val) }
+func (f *stubSchedulingEndpoint) Get(key string) (any, bool) {
 	return f.attr.Get(key)
 }
 func (f *stubSchedulingEndpoint) Keys() []string { return f.attr.Keys() }
