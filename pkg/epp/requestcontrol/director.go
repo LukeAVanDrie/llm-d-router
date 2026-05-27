@@ -21,6 +21,7 @@ package requestcontrol
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net"
@@ -213,20 +214,41 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		FairnessID:       fairnessID,
 		Objectives:       requestObjectives,
 		RequestSizeBytes: reqCtx.RequestSize,
-		Attributes:       fwkdl.NewAttributes(),
+		Attributes:       fwkdl.NewLocalAttributes(), // Lockless map confined to the main request-handling goroutine
 	}
 
 	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName, "priority", infObjective.Spec.Priority)
 	ctx = log.IntoContext(ctx, logger)
 	logger.V(logutil.DEBUG).Info("LLM request assembled")
 
-	if err := d.runPreAdmissionPlugins(ctx, reqCtx.SchedulingRequest); err != nil {
-		return reqCtx, err
+	// --- Pre-Admission Data Production (Pre-Queue) ---
+	if err := d.runPreAdmissionDataProducers(ctx, reqCtx.SchedulingRequest); err != nil {
+		var e errcommon.Error
+		if errors.As(err, &e) {
+			return reqCtx, e
+		}
+		return reqCtx, errcommon.Error{
+			Code: errcommon.ServiceUnavailable,
+			Msg:  fmt.Sprintf("pre-admission data production failed: %v", err),
+		}
 	}
+
+	if err := d.runPreAdmissionPlugins(ctx, reqCtx.SchedulingRequest); err != nil {
+		var e errcommon.Error
+		if errors.As(err, &e) {
+			return reqCtx, e
+		}
+		return reqCtx, errcommon.Error{
+			Code: errcommon.ServiceUnavailable,
+			Msg:  fmt.Sprintf("pre-admission plugins execution failed: %v", err),
+		}
+	}
+
 	if reqCtx.SchedulingRequest.FairnessID == "" {
 		reqCtx.SchedulingRequest.FairnessID = metadata.DefaultFairnessID
 	}
 
+	// --- Admission Control Queuing (The Queue Boundary) ---
 	// Admit may block until flow control admits the request.
 	if err := d.admissionController.Admit(ctx, reqCtx, priority); err != nil {
 		return reqCtx, err
@@ -241,11 +263,12 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 	}
 
 	snapshotOfCandidatePods := d.toSchedulerEndpoints(endpointCandidates)
-	// Prepare per request data by running DataProducer plugins.
-	err = d.runDataProducerPlugins(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
+	// Prepare per request data by running Post-Admission DataProducer plugins sequentially on the
+	// main request-handling goroutine
+	err = d.runPostAdmissionDataProducers(ctx, reqCtx.SchedulingRequest, snapshotOfCandidatePods)
 	if err != nil {
-		// Don't fail the request if DataProducer plugins fail.
-		logger.Error(err, "failed to prepare per request data")
+		// Don't fail the request if Post-Admission DataProducer plugins fail.
+		logger.Error(err, "failed to prepare post-admission per request data")
 	}
 
 	// Run admit request plugins
@@ -523,12 +546,19 @@ func (d *Director) runPreAdmissionPlugins(ctx context.Context, request *fwksched
 	return nil
 }
 
-func (d *Director) runDataProducerPlugins(ctx context.Context,
-	request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
-	if len(d.requestControlPlugins.dataProducerPlugins) == 0 {
+func (d *Director) runPreAdmissionDataProducers(ctx context.Context, request *fwksched.InferenceRequest) error {
+	if len(d.requestControlPlugins.preAdmissionDataProducers) == 0 {
 		return nil
 	}
-	return dataProducerPluginsWithTimeout(ctx, dataProducerTimeout, d.requestControlPlugins.dataProducerPlugins, request, endpoints)
+	emptyEndpoints := []fwksched.Endpoint{}
+	return dataProducerPluginsWithTimeout(ctx, dataProducerTimeout, d.requestControlPlugins.preAdmissionDataProducers, request, emptyEndpoints)
+}
+
+func (d *Director) runPostAdmissionDataProducers(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	if len(d.requestControlPlugins.postAdmissionDataProducers) == 0 {
+		return nil
+	}
+	return dataProducerPluginsWithTimeout(ctx, dataProducerTimeout, d.requestControlPlugins.postAdmissionDataProducers, request, endpoints)
 }
 
 func (d *Director) runAdmissionPlugins(ctx context.Context,

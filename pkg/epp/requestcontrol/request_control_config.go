@@ -24,23 +24,27 @@ import (
 // NewConfig creates a new Config object and returns its pointer.
 func NewConfig() *Config {
 	return &Config{
-		preAdmissionPlugins:      []fwkrc.PreAdmitter{},
-		admissionPlugins:         []fwkrc.Admitter{},
-		dataProducerPlugins:      []fwkrc.DataProducer{},
-		preRequestPlugins:        []fwkrc.PreRequest{},
-		responseReceivedPlugins:  []fwkrc.ResponseHeaderProcessor{},
-		responseStreamingPlugins: []fwkrc.ResponseBodyProcessor{},
+		preAdmissionPlugins:        []fwkrc.PreAdmitter{},
+		admissionPlugins:           []fwkrc.Admitter{},
+		dataProducerPlugins:        []fwkrc.DataProducer{},
+		preAdmissionDataProducers:  []fwkrc.DataProducer{},
+		postAdmissionDataProducers: []fwkrc.DataProducer{},
+		preRequestPlugins:          []fwkrc.PreRequest{},
+		responseReceivedPlugins:    []fwkrc.ResponseHeaderProcessor{},
+		responseStreamingPlugins:   []fwkrc.ResponseBodyProcessor{},
 	}
 }
 
 // Config provides a configuration for the requestcontrol plugins.
 type Config struct {
-	preAdmissionPlugins      []fwkrc.PreAdmitter
-	admissionPlugins         []fwkrc.Admitter
-	dataProducerPlugins      []fwkrc.DataProducer
-	preRequestPlugins        []fwkrc.PreRequest
-	responseReceivedPlugins  []fwkrc.ResponseHeaderProcessor
-	responseStreamingPlugins []fwkrc.ResponseBodyProcessor
+	preAdmissionPlugins        []fwkrc.PreAdmitter
+	admissionPlugins           []fwkrc.Admitter
+	dataProducerPlugins        []fwkrc.DataProducer // Flat repository to keep backward-compatibility
+	preAdmissionDataProducers  []fwkrc.DataProducer
+	postAdmissionDataProducers []fwkrc.DataProducer
+	preRequestPlugins          []fwkrc.PreRequest
+	responseReceivedPlugins    []fwkrc.ResponseHeaderProcessor
+	responseStreamingPlugins   []fwkrc.ResponseBodyProcessor
 }
 
 // WithPreAdmissionPlugins sets the given plugins as the PreAdmitter plugins.
@@ -73,6 +77,19 @@ func (c *Config) WithResponseStreamingPlugins(plugins ...fwkrc.ResponseBodyProce
 // WithDataProducerPlugins sets the given plugins as the DataProducer plugins.
 func (c *Config) WithDataProducerPlugins(plugins ...fwkrc.DataProducer) *Config {
 	c.dataProducerPlugins = plugins
+	c.postAdmissionDataProducers = plugins
+	return c
+}
+
+// WithPreAdmissionDataProducers sets the Pre-Admission data producer plugins.
+func (c *Config) WithPreAdmissionDataProducers(plugins ...fwkrc.DataProducer) *Config {
+	c.preAdmissionDataProducers = plugins
+	return c
+}
+
+// WithPostAdmissionDataProducers sets the Post-Admission data producer plugins.
+func (c *Config) WithPostAdmissionDataProducers(plugins ...fwkrc.DataProducer) *Config {
+	c.postAdmissionDataProducers = plugins
 	return c
 }
 
@@ -108,17 +125,46 @@ func (c *Config) AddPlugins(pluginObjects ...plugin.Plugin) {
 	}
 }
 
-// OrderDataProducerPlugins reorders the DataProducer plugins in the Config based on the given sorted plugin names.
-func (c *Config) OrderDataProducerPlugins(sortedPluginNames []string) {
-	sortedPlugins := make([]fwkrc.DataProducer, 0, len(sortedPluginNames))
+// OrderPreAdmissionDataProducers filters and orders Pre-Admission DataProducer plugins based on compiled names.
+func (c *Config) OrderPreAdmissionDataProducers(sortedPluginNames []string) {
+	c.preAdmissionDataProducers = make([]fwkrc.DataProducer, 0, len(sortedPluginNames))
 	nameToPlugin := make(map[string]fwkrc.DataProducer)
 	for _, plugin := range c.dataProducerPlugins {
 		nameToPlugin[plugin.TypedName().String()] = plugin
 	}
 	for _, name := range sortedPluginNames {
 		if plugin, ok := nameToPlugin[name]; ok {
-			sortedPlugins = append(sortedPlugins, plugin)
+			c.preAdmissionDataProducers = append(c.preAdmissionDataProducers, plugin)
 		}
 	}
-	c.dataProducerPlugins = sortedPlugins
+}
+
+// OrderPostAdmissionDataProducers filters and orders Post-Admission DataProducer plugins based on compiled names.
+func (c *Config) OrderPostAdmissionDataProducers(sortedPluginNames []string) {
+	c.postAdmissionDataProducers = make([]fwkrc.DataProducer, 0, len(sortedPluginNames))
+	nameToPlugin := make(map[string]fwkrc.DataProducer)
+	for _, plugin := range c.dataProducerPlugins {
+		nameToPlugin[plugin.TypedName().String()] = plugin
+	}
+	for _, name := range sortedPluginNames {
+		if plugin, ok := nameToPlugin[name]; ok {
+			c.postAdmissionDataProducers = append(c.postAdmissionDataProducers, plugin)
+		}
+	}
+}
+
+// OrderDataProducerPlugins reorders the DataProducer plugins in the Config based on the given sorted plugin names.
+// This preserves maximum backward compatibility for legacy callers/tests.
+func (c *Config) OrderDataProducerPlugins(sortedPluginNames []string) {
+	c.preAdmissionDataProducers = []fwkrc.DataProducer{}
+	c.postAdmissionDataProducers = make([]fwkrc.DataProducer, 0, len(sortedPluginNames))
+	nameToPlugin := make(map[string]fwkrc.DataProducer)
+	for _, plugin := range c.dataProducerPlugins {
+		nameToPlugin[plugin.TypedName().String()] = plugin
+	}
+	for _, name := range sortedPluginNames {
+		if plugin, ok := nameToPlugin[name]; ok {
+			c.postAdmissionDataProducers = append(c.postAdmissionDataProducers, plugin)
+		}
+	}
 }

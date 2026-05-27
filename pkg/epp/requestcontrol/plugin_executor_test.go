@@ -94,8 +94,7 @@ func (p *ctxObservingPlugin) Produces() map[fwkplugin.DataKey]any { return nil }
 // child context passed to plugins is cancelled with DeadlineExceeded when the
 // timeout fires. Without this cancellation, a slow plugin would continue
 // executing past the director's deadline and potentially commit state after
-// downstream hooks have already observed an "empty" state — the root cause of
-// the orphan-decrement drift we're fixing in the predicted-latency producer.
+// downstream hooks have already observed an "empty" state, preventing state drift.
 func TestDataProducerPluginsWithTimeout_CancelsPluginContext(t *testing.T) {
 	plugin := &ctxObservingPlugin{name: "slow", block: time.Second}
 	plugin.wg.Add(1)
@@ -348,4 +347,39 @@ func TestExecutePluginsAsDAG(t *testing.T) {
 			}
 		})
 	}
+}
+
+type panickingDataProducerPlugin struct {
+	name     string
+	executed bool
+}
+
+func (m *panickingDataProducerPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "mock", Name: m.name}
+}
+
+func (m *panickingDataProducerPlugin) Produce(context.Context, *fwksched.InferenceRequest, []fwksched.Endpoint) error {
+	m.executed = true
+	panic("simulate database connection failure")
+}
+
+func (m *panickingDataProducerPlugin) Produces() map[fwkplugin.DataKey]any {
+	return nil
+}
+
+func TestExecutePluginsAsDAG_PanicRecovery(t *testing.T) {
+	panicker := &panickingDataProducerPlugin{name: "panicker"}
+	nextPlugin := &executorMockDataProducerPlugin{name: "next"}
+
+	err := executePluginsAsDAG(
+		context.Background(),
+		[]fwkrc.DataProducer{panicker, nextPlugin},
+		&fwksched.InferenceRequest{},
+		nil,
+	)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "panic in DataProducer \"panicker/mock\": simulate database connection failure")
+	assert.True(t, panicker.executed)
+	assert.False(t, nextPlugin.executed, "Subsequent plugin should not be executed after a panic")
 }

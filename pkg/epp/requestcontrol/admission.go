@@ -27,6 +27,7 @@ import (
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/types"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
@@ -154,6 +155,17 @@ func (fcac *FlowControlAdmissionController) Admit(
 	logger := log.FromContext(ctx)
 	logger.V(logutil.TRACE).Info("Executing FlowControlAdmissionController",
 		"requestID", reqCtx.SchedulingRequest.RequestID, "priority", priority, "fairnessID", reqCtx.SchedulingRequest.FairnessID)
+
+	// Wrap attributes in read-only snapshot for thread-safety during queue blocking.
+	var localAttributesSnapshot fwkdl.AttributeMap
+	if reqCtx.SchedulingRequest != nil {
+		localAttributesSnapshot = reqCtx.SchedulingRequest.Attributes
+		reqCtx.SchedulingRequest.Attributes = fwkdl.NewReadOnlyAttributes(localAttributesSnapshot)
+		defer func() {
+			// Restore original writable map post-admission
+			reqCtx.SchedulingRequest.Attributes = localAttributesSnapshot
+		}()
+	}
 
 	fcReq := &flowControlRequest{
 		fairnessID:        reqCtx.SchedulingRequest.FairnessID,

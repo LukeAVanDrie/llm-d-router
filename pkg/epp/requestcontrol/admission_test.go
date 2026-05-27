@@ -68,12 +68,6 @@ func (m *mockFlowController) EnqueueAndWait(
 func TestLegacyAdmissionController_Admit(t *testing.T) {
 	t.Parallel()
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
-	reqCtx := &handlers.RequestContext{
-		SchedulingRequest: &fwksched.InferenceRequest{RequestID: "test-req"},
-		Request: &handlers.Request{
-			Metadata: map[string]any{},
-		},
-	}
 
 	mockPods := []fwkdl.Endpoint{&backendmetrics.FakePodMetrics{}}
 
@@ -123,6 +117,12 @@ func TestLegacyAdmissionController_Admit(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			reqCtx := &handlers.RequestContext{
+				SchedulingRequest: &fwksched.InferenceRequest{RequestID: "test-req"},
+				Request: &handlers.Request{
+					Metadata: map[string]any{},
+				},
+			}
 			mockDetector := &mockSaturationDetector{
 				SaturationFunc: func(_ context.Context, _ []fwkdl.Endpoint) float64 {
 					if tc.isSaturated {
@@ -194,12 +194,6 @@ func TestFlowControlRequestAdapter(t *testing.T) {
 func TestFlowControlAdmissionController_Admit(t *testing.T) {
 	t.Parallel()
 	ctx := logutil.NewTestLoggerIntoContext(context.Background())
-	reqCtx := &handlers.RequestContext{
-		SchedulingRequest: &fwksched.InferenceRequest{RequestID: "test-req"},
-		Request: &handlers.Request{
-			Metadata: map[string]any{},
-		},
-	}
 
 	testCases := []struct {
 		name            string
@@ -281,6 +275,12 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			reqCtx := &handlers.RequestContext{
+				SchedulingRequest: &fwksched.InferenceRequest{RequestID: "test-req"},
+				Request: &handlers.Request{
+					Metadata: map[string]any{},
+				},
+			}
 			fc := &mockFlowController{outcome: tc.fcOutcome, err: tc.fcErr}
 			ac := NewFlowControlAdmissionController(fc, "pool")
 
@@ -301,4 +301,60 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			}
 		})
 	}
+}
+
+type mockFlowControllerForWrapping struct {
+	enqueueAndWaitFunc func(ctx context.Context, req flowcontrol.FlowControlRequest) (fctypes.QueueOutcome, error)
+}
+
+func (m *mockFlowControllerForWrapping) EnqueueAndWait(ctx context.Context, req flowcontrol.FlowControlRequest) (fctypes.QueueOutcome, error) {
+	return m.enqueueAndWaitFunc(ctx, req)
+}
+
+func TestFlowControlAdmissionController_ReadOnlyWrapping(t *testing.T) {
+	t.Parallel()
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+	
+	originalAttributes := fwkdl.NewLocalAttributes()
+	originalAttributes.Put("test_key", "test_val")
+
+	reqCtx := &handlers.RequestContext{
+		SchedulingRequest: &fwksched.InferenceRequest{
+			RequestID:  "test-req",
+			Attributes: originalAttributes,
+		},
+		Request: &handlers.Request{
+			Metadata: map[string]any{},
+		},
+	}
+
+	mockFC := &mockFlowControllerForWrapping{}
+	mockFC.enqueueAndWaitFunc = func(ctx context.Context, req flowcontrol.FlowControlRequest) (fctypes.QueueOutcome, error) {
+		infReq := req.InferenceRequest()
+		
+		// Assert writing panics because the map is a ReadOnlyAttributes wrapper
+		assert.PanicsWithValue(t, "cannot write to ReadOnlyAttributes", func() {
+			infReq.Attributes.Put("illegal_key", "illegal_val")
+		})
+		
+		// Assert pre-admission values are readable
+		val, ok := infReq.Attributes.Get("test_key")
+		assert.True(t, ok)
+		assert.Equal(t, "test_val", val)
+		
+		return fctypes.QueueOutcomeDispatched, nil
+	}
+
+	ac := NewFlowControlAdmissionController(mockFC, "pool")
+	err := ac.Admit(ctx, reqCtx, 0)
+	assert.NoError(t, err)
+
+	// Assert original writable map is fully restored post-admission
+	assert.NotPanics(t, func() {
+		reqCtx.SchedulingRequest.Attributes.Put("writable_now", "success")
+	})
+	
+	val, ok := reqCtx.SchedulingRequest.Attributes.Get("writable_now")
+	assert.True(t, ok)
+	assert.Equal(t, "success", val)
 }

@@ -690,15 +690,16 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 		}
 	}
 
-	// Sort data plugins in DAG order (topological sort). Also check DAG for cycles.
+	// Sort and partition data plugins into Pre-Admission and Post-Admission in DAG order.
 	// This must run after auto-created producers are added so they are included in the ordering.
-	dag, err := datalayer.ValidateAndOrderDataDependencies(handle.GetAllPlugins())
+	preAdmission, postAdmission, err := datalayer.CompilePipeline(handle.GetAllPlugins())
 	if err != nil {
 		return nil, fmt.Errorf("failed to load the configuration - %w", err)
 	}
 
-	// The plugins will be executed in topologically sorted order to ensure that data is produced before it is consumed.
-	r.requestControlConfig.OrderDataProducerPlugins(dag)
+	// Map and register the topologically sorted pre-admission and post-admission data producers.
+	r.requestControlConfig.OrderPreAdmissionDataProducers(preAdmission)
+	r.requestControlConfig.OrderPostAdmissionDataProducers(postAdmission)
 
 	r.parser = handlers.NewParser(cfg.ParserConfig)
 	logger.Info("loaded configuration from file/text successfully")

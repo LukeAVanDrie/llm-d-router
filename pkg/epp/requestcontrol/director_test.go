@@ -65,10 +65,14 @@ var (
 // --- Mocks ---
 
 type mockAdmissionController struct {
-	admitErr error
+	admitErr      error
+	admitCallback func(request *fwksched.InferenceRequest)
 }
 
-func (m *mockAdmissionController) Admit(context.Context, *handlers.RequestContext, int) error {
+func (m *mockAdmissionController) Admit(ctx context.Context, reqCtx *handlers.RequestContext, priority int) error {
+	if m.admitCallback != nil {
+		m.admitCallback(reqCtx.SchedulingRequest)
+	}
 	return m.admitErr
 }
 
@@ -139,6 +143,27 @@ func newMockDataProducerPlugin(name string) *mockDataProducerPlugin {
 		produces: map[fwkplugin.DataKey]any{mockProducedDataKey: 0},
 		consumes: map[fwkplugin.DataKey]any{},
 	}
+}
+
+type mockDataProducer struct {
+	name            string
+	produces        map[fwkplugin.DataKey]any
+	produceCallback func(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error
+}
+
+func (m *mockDataProducer) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "mock-data-producer", Name: m.name}
+}
+
+func (m *mockDataProducer) Produces() map[fwkplugin.DataKey]any {
+	return m.produces
+}
+
+func (m *mockDataProducer) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	if m.produceCallback != nil {
+		return m.produceCallback(ctx, request, endpoints)
+	}
+	return nil
 }
 
 type mockAdmissionPlugin struct {
@@ -328,7 +353,10 @@ func TestDirector_HandleRequest(t *testing.T) {
 		preRequestPlugin        *mockPreRequestPlugin
 		wantMutatedBody         map[string]any
 		fairnessIDHeader        string // If non-empty, set as metadata.FlowFairnessIDKey on the incoming request.
+		preAdmissionProducers   []fwkrc.DataProducer
+		postAdmissionProducers  []fwkrc.DataProducer
 		wantFairnessID          string // If non-empty, asserted against returnedReqCtx.SchedulingRequest.FairnessID.
+		checkFn                 func(t *testing.T, reqCtx *handlers.RequestContext)
 	}{
 		{
 			name: "successful completions request",
@@ -734,6 +762,28 @@ func TestDirector_HandleRequest(t *testing.T) {
 			wantErrCode:            errcommon.Internal,
 			inferenceObjectiveName: objectiveName,
 		},
+		{
+			name: "pre-admission data producer failure aborts request",
+			reqBodyMap: map[string]any{
+				"model":  model,
+				"prompt": "prompt with failed pre-producer",
+			},
+			mockAdmissionController: &mockAdmissionController{admitErr: nil},
+			inferenceObjectiveName:  objectiveName,
+			preAdmissionProducers: []fwkrc.DataProducer{
+				&mockDataProducer{
+					name: "failed-pre-producer",
+					produceCallback: func(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+						return errcommon.Error{
+							Code: errcommon.Internal,
+							Msg:  "simulated pre-admission data producer error",
+						}
+					},
+				},
+			},
+			wantErrCode: errcommon.Internal,
+		},
+
 	}
 
 	period := time.Second
@@ -781,6 +831,12 @@ func TestDirector_HandleRequest(t *testing.T) {
 					test.schedulerMockSetup(mockSched)
 				}
 				config := NewConfig()
+				if len(test.preAdmissionProducers) > 0 {
+					config = config.WithPreAdmissionDataProducers(test.preAdmissionProducers...)
+				}
+				if len(test.postAdmissionProducers) > 0 {
+					config = config.WithPostAdmissionDataProducers(test.postAdmissionProducers...)
+				}
 				if test.dataProducerPlugin != nil {
 					config = config.WithDataProducerPlugins(test.dataProducerPlugin)
 				}
@@ -869,6 +925,9 @@ func TestDirector_HandleRequest(t *testing.T) {
 					if diff := cmp.Diff(test.wantMutatedBody, updatedBodyMap); diff != "" {
 						t.Errorf("reqCtx.Request.RawBody mismatch (-want +got):\n%s", diff)
 					}
+				}
+				if test.checkFn != nil {
+					test.checkFn(t, returnedReqCtx)
 				}
 				assert.Equal(t, len(reqCtx.Request.RawBody), reqCtx.RequestSize)
 			})
@@ -1448,7 +1507,7 @@ type testResponseStreaming struct {
 	respsOnStreaming      []*fwkrc.Response
 	targetPodsOnStreaming []string
 
-	// Legacy fields for existing tests if any, but better to update them
+	// Legacy fields maintained for backward compatibility.
 	lastRespOnStreaming      *fwkrc.Response
 	lastTargetPodOnStreaming string
 }
