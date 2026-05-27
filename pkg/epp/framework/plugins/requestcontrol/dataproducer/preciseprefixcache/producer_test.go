@@ -297,7 +297,7 @@ func TestProduces_DeclaresPrefixCacheMatchInfo(t *testing.T) {
 		typedName: plugin.TypedName{Type: PluginType, Name: "x"},
 		dk:        attrprefix.PrefixCacheMatchInfoDataKey.WithNonEmptyProducerName("x"),
 	}
-	expected := plugin.NewDataKey("PrefixCacheMatchInfoDataKey", "approx-prefix-cache-producer").
+	expected := plugin.NewEndpointDataKey("PrefixCacheMatchInfoDataKey", "approx-prefix-cache-producer").
 		WithNonEmptyProducerName("x")
 	_, ok := p.Produces()[expected]
 	require.True(t, ok)
@@ -305,7 +305,7 @@ func TestProduces_DeclaresPrefixCacheMatchInfo(t *testing.T) {
 
 func TestConsumes_DeclaresTokenizedPrompt(t *testing.T) {
 	p := &Producer{typedName: plugin.TypedName{Type: PluginType, Name: "x"}}
-	expected := plugin.NewDataKey("TokenizedPrompt", "token-producer")
+	expected := plugin.NewRequestDataKey("TokenizedPrompt", "token-producer")
 	_, ok := p.Consumes()[expected]
 	require.True(t, ok)
 }

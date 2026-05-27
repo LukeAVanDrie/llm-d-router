@@ -24,7 +24,7 @@ import (
 var (
 	// EncoderCacheMatchInfoKey is attached to endpoints by the multimodal data
 	// producer and consumed by scorer/latency plugins that need encoder-cache locality.
-	EncoderCacheMatchInfoKey = plugin.NewDataKey("MultiModalEncoderCacheMatchInfoKey", "mm-embeddings-cache-producer")
+	EncoderCacheMatchInfoKey = plugin.NewEndpointDataKey("MultiModalEncoderCacheMatchInfoKey", "mm-embeddings-cache-producer")
 )
 
 // MatchItem describes one unique multimodal item involved in encoder-cache
