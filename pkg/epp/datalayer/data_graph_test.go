@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -36,120 +37,35 @@ import (
 
 const mockProducedDataKey = "mockProducedData"
 
-type mockDataProducerP struct {
-	name     string
-	produces map[fwkplugin.DataKey]any
-	consumes map[fwkplugin.DataKey]any
-}
-
-type mockProducedDataType struct {
-	value int
-}
-
-func (m *mockProducedDataType) Clone() fwkdl.Cloneable {
-	return &mockProducedDataType{value: m.value}
-}
-
-func (m *mockDataProducerP) TypedName() fwkplugin.TypedName {
-	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
-}
-
-func (m *mockDataProducerP) Produces() map[fwkplugin.DataKey]any {
-	return m.produces
-}
-
-func (m *mockDataProducerP) Consumes() map[fwkplugin.DataKey]any {
-	return m.consumes
-}
-
-func (m *mockDataProducerP) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
-	endpoints[0].Put(mockProducedDataKey, &mockProducedDataType{value: 42})
-	return nil
-}
-
-// typedMockPlugin is a DataProducer whose TypedName.Type can be set explicitly,
-// allowing tests to simulate a plugin whose registry type is already present.
-type typedMockPlugin struct {
-	typeName string
-	produces map[fwkplugin.DataKey]any
-}
-
-func (m *typedMockPlugin) TypedName() fwkplugin.TypedName {
-	return fwkplugin.TypedName{Name: m.typeName, Type: m.typeName}
-}
-
-func (m *typedMockPlugin) Produces() map[fwkplugin.DataKey]any { return m.produces }
-func (m *typedMockPlugin) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
-	return nil
-}
-
-type MockConsumerFairnessPolicy struct {
-	fwkfcmocks.MockFairnessPolicy
-	consumes map[fwkplugin.DataKey]any
-}
-
-func (m *MockConsumerFairnessPolicy) Consumes() map[fwkplugin.DataKey]any {
-	return m.consumes
-}
-
-type MockSchedulingPlugin struct {
-	fwksched.Scorer
-	consumes map[fwkplugin.DataKey]any
-}
-
-func (m *MockSchedulingPlugin) TypedName() fwkplugin.TypedName {
-	return fwkplugin.TypedName{Name: "MockSchedulingPlugin", Type: "mock"}
-}
-
-func (m *MockSchedulingPlugin) Consumes() map[fwkplugin.DataKey]any {
-	return m.consumes
-}
-
 func TestValidatePluginExecutionOrder(t *testing.T) {
-	dkA := fwkplugin.NewDataKey("keyA", "mock")
-	// Request control plugin that produces data.
-	pluginA := &mockDataProducerP{name: "A", produces: map[fwkplugin.DataKey]any{dkA: nil}}
-	// Flow control plugin.
-	consumerFairnessPolicyPlugin := MockConsumerFairnessPolicy{consumes: map[fwkplugin.DataKey]any{dkA: nil}}
-	// Scheduling plugin.
-	consumerSchedulingPlugin := MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{dkA: nil}}
-	if _, ok := any(pluginA).(fwkrc.DataProducer); !ok {
-		t.Fatalf("pluginA should implement DataProducer")
-	}
+	dkReq := fwkplugin.NewRequestDataKey("keyReq", "mock")
+	dkEp := fwkplugin.NewEndpointDataKey("keyEp", "mock")
 
-	testCases := []struct {
-		name        string
-		plugins     []fwkplugin.Plugin
-		expectedErr string
-	}{
-		{
-			name:        "Plugins with no dependencies",
-			plugins:     []fwkplugin.Plugin{pluginA},
-			expectedErr: "",
-		},
-		{
-			name:        "FC depends on a request control plugin (invalid layer execution order)",
-			plugins:     []fwkplugin.Plugin{pluginA, &consumerFairnessPolicyPlugin},
-			expectedErr: "invalid plugin layer execution order",
-		},
-		{
-			name:        "Scheduling plugin depends on a request control plugin",
-			plugins:     []fwkplugin.Plugin{pluginA, &consumerSchedulingPlugin},
-			expectedErr: "",
+	pluginA := &mockDataProducerP{
+		name: "A",
+		produces: map[fwkplugin.DataKey]any{
+			dkReq: nil,
+			dkEp:  nil,
 		},
 	}
+	consumerFairnessPolicyPlugin := MockConsumerFairnessPolicy{consumes: map[fwkplugin.DataKey]any{dkReq: nil}}
+	consumerSchedulingPlugin := MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{dkReq: nil}}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := ValidateAndOrderDataDependencies(tc.plugins)
-			if tc.expectedErr != "" {
-				assert.Error(t, err)
-				assert.Contains(t, err.Error(), tc.expectedErr)
-				return
-			}
-			assert.NoError(t, err)
-		})
-	}
+	t.Run("PluginsWithNoDependencies", func(t *testing.T) {
+		_, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{pluginA})
+		assert.NoError(t, err)
+	})
+
+	t.Run("InvalidLayerExecutionOrder", func(t *testing.T) {
+		_, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{pluginA, &consumerFairnessPolicyPlugin})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid plugin layer execution order")
+	})
+
+	t.Run("ValidSchedulingPluginDependency", func(t *testing.T) {
+		_, err := ValidateAndOrderDataDependencies([]fwkplugin.Plugin{pluginA, &consumerSchedulingPlugin})
+		assert.NoError(t, err)
+	})
 }
 
 func TestDAGAndTopologicalOrder(t *testing.T) {
@@ -164,17 +80,14 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 	pluginB := &mockDataProducerP{name: "B", consumes: map[fwkplugin.DataKey]any{dkA: nil}, produces: map[fwkplugin.DataKey]any{dkB: nil}}
 	pluginC := &mockDataProducerP{name: "C", consumes: map[fwkplugin.DataKey]any{dkB: nil}}
 	pluginD := &mockDataProducerP{name: "D", consumes: map[fwkplugin.DataKey]any{dkA: nil}}
-	pluginE := &mockDataProducerP{name: "E"} // No dependencies
+	pluginE := &mockDataProducerP{name: "E"}
 
-	// Cycle plugins
 	pluginX := &mockDataProducerP{name: "X", produces: map[fwkplugin.DataKey]any{dkX: nil}, consumes: map[fwkplugin.DataKey]any{dkY: nil}}
 	pluginY := &mockDataProducerP{name: "Y", produces: map[fwkplugin.DataKey]any{dkY: nil}, consumes: map[fwkplugin.DataKey]any{dkX: nil}}
 
-	// Data type mismatch plugin.
 	pluginZ1 := &mockDataProducerP{name: "Z1", produces: map[fwkplugin.DataKey]any{dkZ: int(0)}}
 	pluginZ2 := &mockDataProducerP{name: "Z2", consumes: map[fwkplugin.DataKey]any{dkZ: string("")}}
 
-	// Same type different pointers.
 	pluginP1 := &mockDataProducerP{name: "P1", produces: map[fwkplugin.DataKey]any{dkP: &mockProducedDataType{}}}
 	pluginP2 := &mockDataProducerP{name: "P2", consumes: map[fwkplugin.DataKey]any{dkP: &mockProducedDataType{}}}
 
@@ -185,32 +98,29 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 		expectedErr string
 	}{
 		{
-			name:        "No plugins",
+			name:        "NoPlugins",
 			plugins:     []fwkrc.DataProducer{},
 			expectedDAG: map[string][]string{},
-			expectedErr: "",
 		},
 		{
-			name:    "Plugins with no dependencies",
+			name:    "PluginsWithNoDependencies",
 			plugins: []fwkrc.DataProducer{pluginA, pluginE},
 			expectedDAG: map[string][]string{
 				"A/mock": {},
 				"E/mock": {},
 			},
-			expectedErr: "",
 		},
 		{
-			name:    "Simple linear dependency (C -> B -> A)",
+			name:    "LinearDependency",
 			plugins: []fwkrc.DataProducer{pluginA, pluginB, pluginC},
 			expectedDAG: map[string][]string{
 				"A/mock": {},
 				"B/mock": {"A/mock"},
 				"C/mock": {"B/mock"},
 			},
-			expectedErr: "",
 		},
 		{
-			name:    "DAG with multiple dependencies (B -> A, D -> A, E independent)",
+			name:    "MultipleDependencies",
 			plugins: []fwkrc.DataProducer{pluginA, pluginB, pluginD, pluginE},
 			expectedDAG: map[string][]string{
 				"A/mock": {},
@@ -218,28 +128,24 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 				"D/mock": {"A/mock"},
 				"E/mock": {},
 			},
-			expectedErr: "",
 		},
 		{
-			name:        "Graph with a cycle (X -> Y, Y -> X)",
+			name:        "GraphWithCycle",
 			plugins:     []fwkrc.DataProducer{pluginX, pluginY},
-			expectedDAG: nil,
 			expectedErr: "cycle detected",
 		},
 		{
-			name:        "Data type mismatch between produced and consumed data",
+			name:        "DataTypeMismatch",
 			plugins:     []fwkrc.DataProducer{pluginZ1, pluginZ2},
-			expectedDAG: nil,
 			expectedErr: "data type mismatch between produced and consumed data",
 		},
 		{
-			name:    "Same type different pointers (should succeed)",
+			name:    "SameTypeDifferentPointers",
 			plugins: []fwkrc.DataProducer{pluginP1, pluginP2},
 			expectedDAG: map[string][]string{
 				"P1/mock": {},
 				"P2/mock": {"P1/mock"},
 			},
-			expectedErr: "",
 		},
 	}
 
@@ -255,7 +161,7 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 					consumers[p.TypedName().String()] = cp
 				}
 			}
-			dag, err := buildDAG(producers, consumers)
+			dag, err := buildDAG(producers, consumers, nil)
 			if err != nil {
 				if tc.expectedErr != "" {
 					assert.Error(t, err)
@@ -273,7 +179,6 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 			}
 			assert.NoError(t, err)
 
-			// Normalize the slices in the maps for consistent comparison
 			normalizedDAG := make(map[string][]string)
 			maps.Copy(normalizedDAG, dag)
 			normalizedExpectedDAG := make(map[string][]string)
@@ -288,6 +193,465 @@ func TestDAGAndTopologicalOrder(t *testing.T) {
 	}
 }
 
+func TestCompilePipeline_Validations(t *testing.T) {
+	t.Run("DuplicateProducers_UnspecifiedScope", func(t *testing.T) {
+		dkA := fwkplugin.NewDataKey("keyA", "mock")
+		p1 := &mockDataProducerP{name: "P1", produces: map[fwkplugin.DataKey]any{dkA: nil}}
+		p2 := &mockDataProducerP{name: "P2", produces: map[fwkplugin.DataKey]any{dkA: nil}}
+
+		_, _, err := CompilePipeline([]fwkplugin.Plugin{p1, p2})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "duplicate producers detected")
+		assert.Contains(t, err.Error(), "keyA")
+	})
+
+	t.Run("DuplicateProducers_RequestScope", func(t *testing.T) {
+		dkReq1 := fwkplugin.NewRequestDataKey("sharedKey", "mock")
+		dkReq2 := fwkplugin.NewRequestDataKey("sharedKey", "mock")
+		pReq1 := &mockDataProducerP{name: "PReq1", produces: map[fwkplugin.DataKey]any{dkReq1: nil}}
+		pReq2 := &mockDataProducerP{name: "PReq2", produces: map[fwkplugin.DataKey]any{dkReq2: nil}}
+
+		_, _, err := CompilePipeline([]fwkplugin.Plugin{pReq1, pReq2})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "duplicate producers detected")
+	})
+
+	t.Run("DuplicateProducers_EndpointScope", func(t *testing.T) {
+		dkEp1 := fwkplugin.NewEndpointDataKey("sharedKey", "mock")
+		dkEp2 := fwkplugin.NewEndpointDataKey("sharedKey", "mock")
+		pEp1 := &mockDataProducerP{name: "PEp1", produces: map[fwkplugin.DataKey]any{dkEp1: nil}}
+		pEp2 := &mockDataProducerP{name: "PEp2", produces: map[fwkplugin.DataKey]any{dkEp2: nil}}
+
+		_, _, err := CompilePipeline([]fwkplugin.Plugin{pEp1, pEp2})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "duplicate producers detected")
+	})
+
+	t.Run("MultipleKeysTypeMismatch", func(t *testing.T) {
+		dkA := fwkplugin.NewDataKey("keyA", "mock")
+		dkB := fwkplugin.NewDataKey("keyB", "mock")
+
+		pluginA := &mockDataProducerP{
+			name: "A",
+			produces: map[fwkplugin.DataKey]any{
+				dkA: int(0),
+				dkB: string(""),
+			},
+		}
+		pluginB := &mockDataProducerP{
+			name: "B",
+			consumes: map[fwkplugin.DataKey]any{
+				dkA: int(0),
+				dkB: int(0), // Mismatch!
+			},
+		}
+
+		_, _, err := CompilePipeline([]fwkplugin.Plugin{pluginA, pluginB})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "data type mismatch between produced and consumed data")
+	})
+
+	t.Run("KeyCollisionScopeIsolation_Disallowed", func(t *testing.T) {
+		dkReq1 := fwkplugin.NewRequestDataKey("sharedKey", "mock")
+		dkEp1 := fwkplugin.NewEndpointDataKey("sharedKey", "mock")
+
+		pReq := &mockDataProducerP{name: "PReq", produces: map[fwkplugin.DataKey]any{dkReq1: nil}}
+		pEp := &mockDataProducerP{name: "PEp", produces: map[fwkplugin.DataKey]any{dkEp1: nil}}
+		admitterReq := &MockPreAdmitter{name: "PreAdmitter", consumes: map[fwkplugin.DataKey]any{dkReq1: nil}}
+		admitterEp := &MockAdmitter{name: "Admitter", consumes: map[fwkplugin.DataKey]any{dkEp1: nil}}
+
+		_, _, err := CompilePipeline([]fwkplugin.Plugin{pReq, pEp, admitterReq, admitterEp})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "duplicate producers detected")
+		assert.Contains(t, err.Error(), "sharedKey")
+	})
+
+	t.Run("ScopeMismatchBetweenProducerAndConsumer_HaltsBoot", func(t *testing.T) {
+		dkReq := fwkplugin.NewRequestDataKey("keyA", "mock")
+		dkEp := fwkplugin.NewEndpointDataKey("keyA", "mock")
+
+		pReq := &mockDataProducerP{name: "PReq", produces: map[fwkplugin.DataKey]any{dkReq: nil}}
+		admitterEp := &MockAdmitter{name: "AdmitterEp", consumes: map[fwkplugin.DataKey]any{dkEp: nil}}
+
+		_, _, err := CompilePipeline([]fwkplugin.Plugin{pReq, admitterEp})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "scope mismatch detected for key")
+		assert.Contains(t, err.Error(), "PReq")
+		assert.Contains(t, err.Error(), "AdmitterEp")
+	})
+
+	t.Run("OptionalScopeMismatchBetweenProducerAndConsumer_HaltsBoot", func(t *testing.T) {
+		dkReq := fwkplugin.NewRequestDataKey("keyA", "mock")
+		dkEp := fwkplugin.NewEndpointDataKey("keyA", "mock")
+
+		pReq := &mockDataProducerP{name: "PReq", produces: map[fwkplugin.DataKey]any{dkReq: nil}}
+		admitterEp := &MockOptionalAdmitter{
+			MockAdmitter:     MockAdmitter{name: "AdmitterEp"},
+			optionalConsumes: []fwkplugin.DataKey{dkEp},
+		}
+
+		_, _, err := CompilePipeline([]fwkplugin.Plugin{pReq, admitterEp})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "scope mismatch detected for optional key")
+		assert.Contains(t, err.Error(), "PReq")
+		assert.Contains(t, err.Error(), "AdmitterEp")
+	})
+}
+
+func TestCompilePipeline_CycleDetection(t *testing.T) {
+	t.Run("PreAdmissionCycle", func(t *testing.T) {
+		dkReqA := fwkplugin.NewRequestDataKey("keyReqA", "mock")
+		dkReqB := fwkplugin.NewRequestDataKey("keyReqB", "mock")
+
+		pA := &mockEagerProducer{
+			mockDataProducerP: mockDataProducerP{
+				name:     "PA",
+				produces: map[fwkplugin.DataKey]any{dkReqA: nil},
+				consumes: map[fwkplugin.DataKey]any{dkReqB: nil},
+			},
+			eager: true,
+		}
+		pB := &mockEagerProducer{
+			mockDataProducerP: mockDataProducerP{
+				name:     "PB",
+				produces: map[fwkplugin.DataKey]any{dkReqB: nil},
+				consumes: map[fwkplugin.DataKey]any{dkReqA: nil},
+			},
+			eager: true,
+		}
+
+		_, _, err := CompilePipeline([]fwkplugin.Plugin{pA, pB})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to sort Pre-Admission slice")
+		assert.Contains(t, err.Error(), "cycle detected")
+	})
+
+	t.Run("PostAdmissionCycle", func(t *testing.T) {
+		dkA := fwkplugin.NewDataKey("keyA", "mock")
+		dkB := fwkplugin.NewDataKey("keyB", "mock")
+
+		pA := &mockDataProducerP{
+			name:     "PA",
+			produces: map[fwkplugin.DataKey]any{dkA: nil},
+			consumes: map[fwkplugin.DataKey]any{dkB: nil},
+		}
+		pB := &mockDataProducerP{
+			name:     "PB",
+			produces: map[fwkplugin.DataKey]any{dkB: nil},
+			consumes: map[fwkplugin.DataKey]any{dkA: nil},
+		}
+		admitter := &MockAdmitter{
+			name:     "Admitter",
+			consumes: map[fwkplugin.DataKey]any{dkA: nil},
+		}
+
+		_, _, err := CompilePipeline([]fwkplugin.Plugin{pA, pB, admitter})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to sort Post-Admission slice")
+		assert.Contains(t, err.Error(), "cycle detected")
+	})
+
+	t.Run("KahnDFSCyclePathReconstruction", func(t *testing.T) {
+		dkX := fwkplugin.NewDataKey("keyX", "mock")
+		dkY := fwkplugin.NewDataKey("keyY", "mock")
+		dkZ := fwkplugin.NewDataKey("keyZ", "mock")
+
+		pX := &mockEagerProducer{
+			mockDataProducerP: mockDataProducerP{
+				name:     "X",
+				produces: map[fwkplugin.DataKey]any{dkX: nil},
+				consumes: map[fwkplugin.DataKey]any{dkY: nil},
+			},
+			eager: true,
+		}
+		pY := &mockDataProducerP{name: "Y", produces: map[fwkplugin.DataKey]any{dkY: nil}, consumes: map[fwkplugin.DataKey]any{dkZ: nil}}
+		pZ := &mockDataProducerP{name: "Z", produces: map[fwkplugin.DataKey]any{dkZ: nil}, consumes: map[fwkplugin.DataKey]any{dkX: nil}}
+
+		_, _, err := CompilePipeline([]fwkplugin.Plugin{pX, pY, pZ})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "cycle detected")
+		errStr := err.Error()
+		assert.True(t,
+			strings.Contains(errStr, "X/mock -> Y/mock -> Z/mock -> X/mock") ||
+				strings.Contains(errStr, "Y/mock -> Z/mock -> X/mock -> Y/mock") ||
+				strings.Contains(errStr, "Z/mock -> X/mock -> Y/mock -> Z/mock"),
+			"expected cycle path in error, got: %s", errStr,
+		)
+	})
+
+	t.Run("MultipleIndependentCycles", func(t *testing.T) {
+		dkX := fwkplugin.NewDataKey("keyX", "mock")
+		dkY := fwkplugin.NewDataKey("keyY", "mock")
+		dkU := fwkplugin.NewDataKey("keyU", "mock")
+		dkV := fwkplugin.NewDataKey("keyV", "mock")
+
+		pX := &mockEagerProducer{
+			mockDataProducerP: mockDataProducerP{
+				name:     "X",
+				produces: map[fwkplugin.DataKey]any{dkX: nil},
+				consumes: map[fwkplugin.DataKey]any{dkY: nil},
+			},
+			eager: true,
+		}
+		pY := &mockDataProducerP{name: "Y", produces: map[fwkplugin.DataKey]any{dkY: nil}, consumes: map[fwkplugin.DataKey]any{dkX: nil}}
+
+		pU := &mockEagerProducer{
+			mockDataProducerP: mockDataProducerP{
+				name:     "U",
+				produces: map[fwkplugin.DataKey]any{dkU: nil},
+				consumes: map[fwkplugin.DataKey]any{dkV: nil},
+			},
+			eager: true,
+		}
+		pV := &mockDataProducerP{name: "V", produces: map[fwkplugin.DataKey]any{dkV: nil}, consumes: map[fwkplugin.DataKey]any{dkU: nil}}
+
+		_, _, err := CompilePipeline([]fwkplugin.Plugin{pX, pY, pU, pV})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "cycle detected")
+
+		errStr := err.Error()
+		hasCycle1 := strings.Contains(errStr, "X/mock -> Y/mock -> X/mock") || strings.Contains(errStr, "Y/mock -> X/mock -> Y/mock")
+		hasCycle2 := strings.Contains(errStr, "U/mock -> V/mock -> U/mock") || strings.Contains(errStr, "V/mock -> U/mock -> V/mock")
+		assert.True(t, hasCycle1 || hasCycle2, "expected at least one cycle path formatted in error, got: %s", errStr)
+	})
+}
+
+func TestCompilePipeline_Pruning(t *testing.T) {
+	t.Run("PruneUnusedProducers", func(t *testing.T) {
+		dkA := fwkplugin.NewDataKey("keyA", "mock")
+		dkB := fwkplugin.NewDataKey("keyB", "mock")
+		dkC := fwkplugin.NewDataKey("keyC", "mock")
+
+		pUsed := &mockDataProducerP{name: "P_used", produces: map[fwkplugin.DataKey]any{dkA: nil}}
+		pUnused := &mockDataProducerP{name: "P_unused", produces: map[fwkplugin.DataKey]any{dkB: nil}}
+		pEager := &mockEagerProducer{
+			mockDataProducerP: mockDataProducerP{name: "P_eager", produces: map[fwkplugin.DataKey]any{dkC: nil}},
+			eager:             true,
+		}
+
+		admitter := &MockAdmitter{name: "Admitter", consumes: map[fwkplugin.DataKey]any{dkA: nil}}
+
+		preAdmission, postAdmission, err := CompilePipeline([]fwkplugin.Plugin{pUsed, pUnused, pEager, admitter})
+		assert.NoError(t, err)
+
+		allKept := append(preAdmission, postAdmission...)
+
+		assert.Contains(t, allKept, "P_used/mock")
+		assert.Contains(t, allKept, "P_eager/mock")
+		assert.Contains(t, allKept, "Admitter/mock")
+		assert.NotContains(t, allKept, "P_unused/mock")
+	})
+
+	t.Run("KeepEagerProducersDependencies", func(t *testing.T) {
+		dkDep := fwkplugin.NewRequestDataKey("depKey", "mock")
+		dkEager := fwkplugin.NewRequestDataKey("eagerKey", "mock")
+
+		pDep := &mockDataProducerP{name: "P_dep", produces: map[fwkplugin.DataKey]any{dkDep: nil}}
+		pEager := &mockEagerProducer{
+			mockDataProducerP: mockDataProducerP{
+				name:     "P_eager",
+				produces: map[fwkplugin.DataKey]any{dkEager: nil},
+				consumes: map[fwkplugin.DataKey]any{dkDep: nil},
+			},
+			eager: true,
+		}
+
+		preAdmission, postAdmission, err := CompilePipeline([]fwkplugin.Plugin{pDep, pEager})
+		assert.NoError(t, err)
+
+		allKept := append(preAdmission, postAdmission...)
+		assert.Contains(t, allKept, "P_eager/mock")
+		assert.Contains(t, allKept, "P_dep/mock")
+	})
+
+	t.Run("DeepDependencyPruningChain", func(t *testing.T) {
+		dkA := fwkplugin.NewRequestDataKey("keyA", "mock")
+		dkB := fwkplugin.NewRequestDataKey("keyB", "mock")
+		dkC := fwkplugin.NewRequestDataKey("keyC", "mock")
+		dkD := fwkplugin.NewRequestDataKey("keyD", "mock")
+		dkE := fwkplugin.NewRequestDataKey("keyE", "mock")
+		dkUnused := fwkplugin.NewRequestDataKey("keyUnused", "mock")
+
+		pA := &mockDataProducerP{name: "PA", produces: map[fwkplugin.DataKey]any{dkA: nil}}
+		pB := &mockDataProducerP{name: "PB", consumes: map[fwkplugin.DataKey]any{dkA: nil}, produces: map[fwkplugin.DataKey]any{dkB: nil}}
+		pC := &mockDataProducerP{name: "PC", consumes: map[fwkplugin.DataKey]any{dkB: nil}, produces: map[fwkplugin.DataKey]any{dkC: nil}}
+		pD := &mockDataProducerP{name: "PD", consumes: map[fwkplugin.DataKey]any{dkC: nil}, produces: map[fwkplugin.DataKey]any{dkD: nil}}
+		pE := &mockDataProducerP{name: "PE", consumes: map[fwkplugin.DataKey]any{dkD: nil}, produces: map[fwkplugin.DataKey]any{dkE: nil}}
+
+		pUnused := &mockDataProducerP{name: "PUnused", produces: map[fwkplugin.DataKey]any{dkUnused: nil}}
+
+		admitter := &MockAdmitter{name: "Admitter", consumes: map[fwkplugin.DataKey]any{dkE: nil}}
+
+		preAdmission, postAdmission, err := CompilePipeline([]fwkplugin.Plugin{pA, pB, pC, pD, pE, pUnused, admitter})
+		assert.NoError(t, err)
+
+		allKept := append(preAdmission, postAdmission...)
+
+		assert.Contains(t, allKept, "PA/mock")
+		assert.Contains(t, allKept, "PB/mock")
+		assert.Contains(t, allKept, "PC/mock")
+		assert.Contains(t, allKept, "PD/mock")
+		assert.Contains(t, allKept, "PE/mock")
+		assert.Contains(t, allKept, "Admitter/mock")
+		assert.NotContains(t, allKept, "PUnused/mock")
+	})
+}
+
+func TestCompilePipeline_PipelineSlicing(t *testing.T) {
+	t.Run("PrePostAdmissionSplit", func(t *testing.T) {
+		dkReqA := fwkplugin.NewRequestDataKey("reqKeyA", "mock")
+		dkEpB := fwkplugin.NewEndpointDataKey("epKeyB", "mock")
+
+		pPre := &mockDataProducerP{name: "P_pre", produces: map[fwkplugin.DataKey]any{dkReqA: nil}}
+		preAdmitter := &MockPreAdmitter{name: "PreAdmitter", consumes: map[fwkplugin.DataKey]any{dkReqA: nil}}
+
+		pPost := &mockDataProducerP{name: "P_post", produces: map[fwkplugin.DataKey]any{dkEpB: nil}}
+		admitter := &MockAdmitter{name: "Admitter", consumes: map[fwkplugin.DataKey]any{dkEpB: nil}}
+
+		preAdmission, postAdmission, err := CompilePipeline([]fwkplugin.Plugin{pPre, preAdmitter, pPost, admitter})
+		assert.NoError(t, err)
+
+		assert.Contains(t, preAdmission, "PreAdmitter/mock")
+		assert.Contains(t, preAdmission, "P_pre/mock")
+		assert.NotContains(t, preAdmission, "Admitter/mock")
+		assert.NotContains(t, preAdmission, "P_post/mock")
+
+		assert.Contains(t, postAdmission, "Admitter/mock")
+		assert.Contains(t, postAdmission, "P_post/mock")
+		assert.NotContains(t, postAdmission, "PreAdmitter/mock")
+		assert.NotContains(t, postAdmission, "P_pre/mock")
+	})
+
+	t.Run("PreAdmissionRootsAndClosure", func(t *testing.T) {
+		dkReqA := fwkplugin.NewRequestDataKey("reqKeyA", "mock")
+		dkReqB := fwkplugin.NewRequestDataKey("reqKeyB", "mock")
+		dkEpC := fwkplugin.NewEndpointDataKey("epKeyC", "mock")
+
+		pPreA := &mockDataProducerP{name: "P_pre_A", produces: map[fwkplugin.DataKey]any{dkReqA: nil}}
+		pPreB := &mockDataProducerP{name: "P_pre_B", produces: map[fwkplugin.DataKey]any{dkReqB: nil}}
+
+		fairness := &MockConsumerFairnessPolicy{
+			MockFairnessPolicy: fwkfcmocks.MockFairnessPolicy{
+				TypedNameV: fwkplugin.TypedName{Name: "MyFairnessPolicy", Type: "mock"},
+			},
+			consumes: map[fwkplugin.DataKey]any{dkReqA: nil},
+		}
+		ordering := &MockConsumerOrderingPolicy{
+			MockOrderingPolicy: fwkfcmocks.MockOrderingPolicy{
+				TypedNameV: fwkplugin.TypedName{Name: "MyOrderingPolicy", Type: "mock"},
+			},
+			consumes: map[fwkplugin.DataKey]any{dkReqB: nil},
+		}
+
+		pPost := &mockDataProducerP{name: "P_post", produces: map[fwkplugin.DataKey]any{dkEpC: nil}}
+		admitter := &MockAdmitter{name: "Admitter", consumes: map[fwkplugin.DataKey]any{dkEpC: nil}}
+
+		preAdmission, postAdmission, err := CompilePipeline([]fwkplugin.Plugin{pPreA, pPreB, fairness, ordering, pPost, admitter})
+		assert.NoError(t, err)
+
+		assert.Contains(t, preAdmission, "MyFairnessPolicy/mock")
+		assert.Contains(t, preAdmission, "P_pre_A/mock")
+		assert.Contains(t, preAdmission, "MyOrderingPolicy/mock")
+		assert.Contains(t, preAdmission, "P_pre_B/mock")
+
+		assert.Contains(t, postAdmission, "P_post/mock")
+		assert.Contains(t, postAdmission, "Admitter/mock")
+	})
+
+	t.Run("EagerRequestScopedProducersArePreAdmissionRoots", func(t *testing.T) {
+		dkReq := fwkplugin.NewRequestDataKey("reqKey", "mock")
+		dkEp := fwkplugin.NewEndpointDataKey("epKey", "mock")
+
+		pEagerReq := &mockEagerProducer{
+			mockDataProducerP: mockDataProducerP{name: "PEagerReq", produces: map[fwkplugin.DataKey]any{dkReq: nil}},
+			eager:             true,
+		}
+		pEagerEp := &mockEagerProducer{
+			mockDataProducerP: mockDataProducerP{name: "PEagerEp", produces: map[fwkplugin.DataKey]any{dkEp: nil}},
+			eager:             true,
+		}
+
+		preAdmission, postAdmission, err := CompilePipeline([]fwkplugin.Plugin{pEagerReq, pEagerEp})
+		assert.NoError(t, err)
+
+		assert.Contains(t, preAdmission, "PEagerReq/mock")
+		assert.NotContains(t, preAdmission, "PEagerEp/mock")
+
+		assert.Contains(t, postAdmission, "PEagerEp/mock")
+		assert.NotContains(t, postAdmission, "PEagerReq/mock")
+	})
+
+	t.Run("TransitiveClosureRequestScopedDependencies", func(t *testing.T) {
+		dkReqA := fwkplugin.NewRequestDataKey("reqKeyA", "mock")
+		dkReqB := fwkplugin.NewRequestDataKey("reqKeyB", "mock")
+
+		pA := &mockDataProducerP{name: "PA", produces: map[fwkplugin.DataKey]any{dkReqA: nil}}
+		pB := &mockDataProducerP{name: "PB", produces: map[fwkplugin.DataKey]any{dkReqB: nil}, consumes: map[fwkplugin.DataKey]any{dkReqA: nil}}
+		preAdmitter := &MockPreAdmitter{name: "PreAdmitter", consumes: map[fwkplugin.DataKey]any{dkReqB: nil}}
+
+		preAdmission, _, err := CompilePipeline([]fwkplugin.Plugin{pA, pB, preAdmitter})
+		assert.NoError(t, err)
+
+		assert.Contains(t, preAdmission, "PA/mock")
+		assert.Contains(t, preAdmission, "PB/mock")
+		assert.Contains(t, preAdmission, "PreAdmitter/mock")
+	})
+
+	t.Run("PreAdmissionInvalidScopesHaltBoot", func(t *testing.T) {
+		dkEp := fwkplugin.NewEndpointDataKey("epKey", "mock")
+
+		pEp := &mockDataProducerP{name: "PEp", produces: map[fwkplugin.DataKey]any{dkEp: nil}}
+		preAdmitter := &MockPreAdmitter{name: "PreAdmitter", consumes: map[fwkplugin.DataKey]any{dkEp: nil}}
+
+		_, _, err := CompilePipeline([]fwkplugin.Plugin{pEp, preAdmitter})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "scope mismatch")
+		assert.Contains(t, err.Error(), "Pre-Admission consumes key")
+	})
+
+	t.Run("PreAdmissionCoercedUnspecifiedScopeIsEndpointScope", func(t *testing.T) {
+		dkUnspecified := fwkplugin.NewDataKey("unspecKey", "mock")
+
+		pUnspec := &mockDataProducerP{name: "PUnspec", produces: map[fwkplugin.DataKey]any{dkUnspecified: nil}}
+		preAdmitter := &MockPreAdmitter{name: "PreAdmitter", consumes: map[fwkplugin.DataKey]any{dkUnspecified: nil}}
+
+		_, _, err := CompilePipeline([]fwkplugin.Plugin{pUnspec, preAdmitter})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "scope mismatch")
+		assert.Contains(t, err.Error(), "Pre-Admission consumes key")
+	})
+
+	t.Run("KeepOptionalDependenciesOfActiveConsumers", func(t *testing.T) {
+		dkOpt := fwkplugin.NewRequestDataKey("optKey", "mock")
+
+		pOpt := &mockDataProducerP{name: "POpt", produces: map[fwkplugin.DataKey]any{dkOpt: nil}}
+
+		admitterReq := &MockOptionalPreAdmitter{
+			MockPreAdmitter:  MockPreAdmitter{name: "PreAdmitter", consumes: nil},
+			optionalConsumes: []fwkplugin.DataKey{dkOpt},
+		}
+
+		preAdmission, _, err := CompilePipeline([]fwkplugin.Plugin{pOpt, admitterReq})
+		assert.NoError(t, err)
+
+		assert.Contains(t, preAdmission, "POpt/mock")
+		assert.Contains(t, preAdmission, "PreAdmitter/mock")
+
+		indexOfProducer := -1
+		indexOfConsumer := -1
+		for i, name := range preAdmission {
+			switch name {
+			case "POpt/mock":
+				indexOfProducer = i
+			case "PreAdmitter/mock":
+				indexOfConsumer = i
+			}
+		}
+		assert.True(t, indexOfProducer != -1 && indexOfConsumer != -1)
+		assert.Less(t, indexOfProducer, indexOfConsumer, "Producer POpt should execute before optional consumer PreAdmitter")
+	})
+}
+
 func TestCreateMissingDataProducers(t *testing.T) {
 	producerTypeA := "producer-a"
 	producerTypeB := "producer-b"
@@ -299,22 +663,18 @@ func TestCreateMissingDataProducers(t *testing.T) {
 	keyAFailing := fwkplugin.NewDataKey("keyA", failingType)
 	keyANonProducer := fwkplugin.NewDataKey("keyA", nonProducerType)
 
-	// A DataProducer that produces keyA.
 	producerAFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockDataProducerP{name: name, produces: map[fwkplugin.DataKey]any{keyA: nil}}, nil
 	})
 
-	// A DataProducer that produces keyB.
 	producerBFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &mockDataProducerP{name: name, produces: map[fwkplugin.DataKey]any{keyB: nil}}, nil
 	})
 
-	// A non-ProducerPlugin registry entry (e.g. a scheduling scorer).
 	nonProducerFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return &MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyA: nil}}, nil
 	})
 
-	// A factory that always fails.
 	failingFactory := fwkplugin.FactoryFunc(func(name string, _ *json.Decoder, handle fwkplugin.Handle) (fwkplugin.Plugin, error) {
 		return nil, errors.New("requires params")
 	})
@@ -324,7 +684,7 @@ func TestCreateMissingDataProducers(t *testing.T) {
 		existingPlugins         []fwkplugin.Plugin
 		defaultProducerRegistry map[string]string
 		factoryRegistry         map[string]fwkplugin.FactoryFunc
-		wantTypes               []string // TypedName.Type of expected auto-created producers
+		wantTypes               []string
 		wantErr                 bool
 	}{
 		{
@@ -348,7 +708,6 @@ func TestCreateMissingDataProducers(t *testing.T) {
 		{
 			name: "producer already present by type - not duplicated",
 			existingPlugins: []fwkplugin.Plugin{
-				// Simulate a plugin whose type matches the registry key.
 				&typedMockPlugin{typeName: producerTypeA, produces: map[fwkplugin.DataKey]any{keyA: nil}},
 				&MockSchedulingPlugin{consumes: map[fwkplugin.DataKey]any{keyA: nil}},
 			},
@@ -391,6 +750,32 @@ func TestCreateMissingDataProducers(t *testing.T) {
 			factoryRegistry: map[string]fwkplugin.FactoryFunc{producerTypeA: producerAFactory},
 			wantTypes:       nil,
 		},
+		{
+			name: "missing optional key with no default producer is skipped",
+			existingPlugins: []fwkplugin.Plugin{
+				&MockOptionalPreAdmitter{
+					MockPreAdmitter:  MockPreAdmitter{name: "PreAdmitter"},
+					optionalConsumes: []fwkplugin.DataKey{keyA},
+				},
+			},
+			defaultProducerRegistry: map[string]string{},
+			factoryRegistry:         map[string]fwkplugin.FactoryFunc{producerTypeA: producerAFactory},
+			wantTypes:               nil,
+			wantErr:                 false,
+		},
+		{
+			name: "missing optional key WITH default producer is created",
+			existingPlugins: []fwkplugin.Plugin{
+				&MockOptionalPreAdmitter{
+					MockPreAdmitter:  MockPreAdmitter{name: "PreAdmitter"},
+					optionalConsumes: []fwkplugin.DataKey{keyA},
+				},
+			},
+			defaultProducerRegistry: map[string]string{keyA.String(): producerTypeA},
+			factoryRegistry:         map[string]fwkplugin.FactoryFunc{producerTypeA: producerAFactory},
+			wantTypes:               []string{producerTypeA},
+			wantErr:                 false,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -408,8 +793,6 @@ func TestCreateMissingDataProducers(t *testing.T) {
 			}
 			assert.NoError(t, err)
 
-			// The auto-created plugin is named after its registry type (the pluginType
-			// passed to the factory), so we compare by name.
 			var gotNames []string
 			for _, p := range handle.GetAllPlugins() {
 				isExisting := false
@@ -427,6 +810,145 @@ func TestCreateMissingDataProducers(t *testing.T) {
 			assert.ElementsMatch(t, tc.wantTypes, gotNames)
 		})
 	}
+}
+
+// --- Mocks and Helper Assertions ---
+
+type mockDataProducerP struct {
+	name     string
+	produces map[fwkplugin.DataKey]any
+	consumes map[fwkplugin.DataKey]any
+}
+
+type mockProducedDataType struct {
+	value int
+}
+
+func (m *mockProducedDataType) Clone() fwkdl.Cloneable {
+	return &mockProducedDataType{value: m.value}
+}
+
+func (m *mockDataProducerP) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
+}
+
+func (m *mockDataProducerP) Produces() map[fwkplugin.DataKey]any {
+	return m.produces
+}
+
+func (m *mockDataProducerP) Consumes() map[fwkplugin.DataKey]any {
+	return m.consumes
+}
+
+func (m *mockDataProducerP) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	endpoints[0].Put(mockProducedDataKey, &mockProducedDataType{value: 42})
+	return nil
+}
+
+type typedMockPlugin struct {
+	typeName string
+	produces map[fwkplugin.DataKey]any
+}
+
+func (m *typedMockPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: m.typeName, Type: m.typeName}
+}
+
+func (m *typedMockPlugin) Produces() map[fwkplugin.DataKey]any { return m.produces }
+func (m *typedMockPlugin) Produce(ctx context.Context, request *fwksched.InferenceRequest, endpoints []fwksched.Endpoint) error {
+	return nil
+}
+
+type MockConsumerFairnessPolicy struct {
+	fwkfcmocks.MockFairnessPolicy
+	consumes map[fwkplugin.DataKey]any
+}
+
+func (m *MockConsumerFairnessPolicy) Consumes() map[fwkplugin.DataKey]any {
+	return m.consumes
+}
+
+type MockConsumerOrderingPolicy struct {
+	fwkfcmocks.MockOrderingPolicy
+	consumes map[fwkplugin.DataKey]any
+}
+
+func (m *MockConsumerOrderingPolicy) Consumes() map[fwkplugin.DataKey]any {
+	return m.consumes
+}
+
+type MockSchedulingPlugin struct {
+	fwksched.Scorer
+	consumes map[fwkplugin.DataKey]any
+}
+
+func (m *MockSchedulingPlugin) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: "MockSchedulingPlugin", Type: "mock"}
+}
+
+func (m *MockSchedulingPlugin) Consumes() map[fwkplugin.DataKey]any {
+	return m.consumes
+}
+
+type mockEagerProducer struct {
+	mockDataProducerP
+	eager bool
+}
+
+func (m *mockEagerProducer) Eager() bool {
+	return m.eager
+}
+
+type MockAdmitter struct {
+	name     string
+	consumes map[fwkplugin.DataKey]any
+}
+
+func (m *MockAdmitter) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
+}
+
+func (m *MockAdmitter) Consumes() map[fwkplugin.DataKey]any {
+	return m.consumes
+}
+
+func (m *MockAdmitter) Admit(ctx context.Context, request *fwksched.InferenceRequest, pods []fwksched.Endpoint) error {
+	return nil
+}
+
+type MockPreAdmitter struct {
+	name     string
+	consumes map[fwkplugin.DataKey]any
+}
+
+func (m *MockPreAdmitter) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Name: m.name, Type: "mock"}
+}
+
+func (m *MockPreAdmitter) Consumes() map[fwkplugin.DataKey]any {
+	return m.consumes
+}
+
+func (m *MockPreAdmitter) PreAdmit(ctx context.Context, request *fwksched.InferenceRequest) error {
+	return nil
+}
+
+type MockOptionalPreAdmitter struct {
+	MockPreAdmitter
+	optionalConsumes []fwkplugin.DataKey
+}
+
+func (m *MockOptionalPreAdmitter) OptionalConsumes() []fwkplugin.DataKey {
+	return m.optionalConsumes
+}
+
+type MockOptionalAdmitter struct {
+	MockAdmitter
+	optionalConsumes []fwkplugin.DataKey
+}
+
+func (m *MockOptionalAdmitter) OptionalConsumes() []fwkplugin.DataKey {
+	return m.optionalConsumes
 }
 
 func assertTopologicalOrder(t *testing.T, dag map[string][]string, ordered []string) {
