@@ -95,8 +95,8 @@ The Flow Controller framework is built on several key components that work in co
 be highly modular and scalable, with clear separation of concerns. For a deep dive into the specific design choices and
 their justifications, please refer to the detailed documentation within the relevant sub-packages.
 
-1.  **The `FlowController` Engine (`./controller`)**: The central, orchestrator responsible for the main request
-    processing loop. It manages a worker that distributes incoming requests, apply policies, and dispatch
+1.  **The `FlowController` Engine (`./controller`)**: The central orchestrator responsible for the main request
+    processing loop. A single processor goroutine admits incoming requests, applies policies, and dispatches
     requests to the backends. Its design focuses on high throughput and backpressure.
 
 2.  **Pluggable `Policy` Contracts (`/pkg/epp/framework/interface/flowcontrol`)**: The plugin SDK defines the core
@@ -110,7 +110,7 @@ their justifications, please refer to the detailed documentation within the rele
 
 4.  **The `FlowRegistry` (`./registry`, `./contracts`)**: This is the stateful control plane of the system. It manages
     the configuration and lifecycle of all flows, policies, and queues. It presents a view of its state to the
-    `FlowController` worker.
+    `FlowController`'s processor loop.
 
 5.  **Core Types and Service Contracts (`./types`, `./contracts`)**: These packages define the foundational data
     structures (e.g., `FlowControlRequest`), errors, and service interfaces that decouple the engine from its

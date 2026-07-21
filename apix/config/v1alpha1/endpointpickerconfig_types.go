@@ -34,8 +34,9 @@ type EndpointPickerConfig struct {
 	metav1.TypeMeta `json:",inline"`
 
 	// +optional
-	// FeatureGates is a set of flags that enable various experimental features with the EPP.
-	// If omitted none of these experimental features will be enabled.
+	// FeatureGates is a set of flags that toggle optional EPP features. Each gate has a registered
+	// default; a bare name ("gate") enables it and "gate=false" disables it.
+	// If omitted, every gate uses its registered default.
 	FeatureGates FeatureGates `json:"featureGates,omitempty"`
 
 	// +required
@@ -186,7 +187,8 @@ func (sp SchedulingPlugin) String() string {
 	return "{" + strings.Join(parts, ", ") + "}"
 }
 
-// FeatureGates is a set of flags that enable various experimental features with the EPP
+// FeatureGates is a set of flags that toggle optional EPP features ("gate" enables, "gate=false"
+// disables; omitted gates use their registered defaults).
 type FeatureGates []string
 
 func (fg FeatureGates) String() string {
