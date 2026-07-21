@@ -30,7 +30,7 @@ import (
 // FCFSOrderingPolicyType is the registration type for the FCFS ordering policy.
 //
 // It selects the item with the earliest logical enqueue time.
-// For detailed documentation on behavior and queue pairing, see README.md.
+// For detailed documentation, see README.md.
 const FCFSOrderingPolicyType = "fcfs-ordering-policy"
 
 func FCFSOrderingPolicyFactory(name string, _ *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
@@ -38,8 +38,8 @@ func FCFSOrderingPolicyFactory(name string, _ *json.Decoder, _ plugin.Handle) (p
 }
 
 // fcfs is the internal implementation of the FCFS policy.
-// See the documentation for the exported `FCFSPolicyName` constant for detailed user-facing information about its
-// behavior.
+// See the documentation for the exported FCFSOrderingPolicyType constant for detailed user-facing
+// information about its behavior.
 type fcfs struct {
 	name string
 }

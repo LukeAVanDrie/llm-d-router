@@ -30,13 +30,6 @@ Requests are prioritized as follows:
 2. If two requests have the same deadline, or if both lack a valid deadline, they are ordered by `ReceivedTimestamp` (FCFS).
 3. Requests without a valid `x-llm-d-slo-ttft-ms` header (missing, empty, or invalid integer) are assigned a far-future deadline, placing them behind all SLO-bound requests.
 
-## Behavior and Queue Pairing
-
-This policy **requires** specific queue capabilities to function correctly.
-
-- **Required Capability:** `CapabilityPriorityConfigurable` (e.g., a heap-based priority queue).
-- This policy cannot be paired with a simple FIFO list queue because it must maintain items in a sorted order based on dynamic deadlines.
-
 ## Configuration
 
 This policy does not require any custom parameters in the flow control configuration itself, but it relies on the presence of the `x-llm-d-slo-ttft-ms` header in incoming requests.
@@ -49,7 +42,6 @@ orderingPolicyRef: slo-deadline-ordering-policy
 
 - **Header Dependency:** Requires clients or upstream components to correctly set the `x-llm-d-slo-ttft-ms` header.
 - **Starvation Risk:** Non-SLO requests or requests with very loose SLOs may be starved if there is a constant influx of tight-SLO requests.
-- **Computational Overhead:** Similar to EDF, maintaining a priority heap incurs higher CPU overhead ($O(\log n)$) than a simple FIFO list.
 
 ## Related Documentation
 *   [Ordering Overview](../README.md)

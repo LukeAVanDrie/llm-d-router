@@ -21,11 +21,12 @@ limitations under the License.
 // core controller logic.
 //
 // The primary contracts are:
-//   - SafeQueue: An interface for concurrent-safe queue implementations.
 //   - FairnessPolicy: The interface for policies that govern the competition between flows.
 //   - OrderingPolicy: The interface for policies that decide the strict sequence of service within a flow.
-//   - IntraFlowDispatchPolicy: (Deprecated) Legacy interface for intra-flow ordering. Replaced by OrderingPolicy.
-//   - ItemComparator: (Deprecated) Legacy interface for exposing ordering logic. Replaced by OrderingPolicy.
+//   - SaturationDetector: The interface for plugins that provide real-time pool load signals.
+//   - UsageLimitPolicy: The interface for policies that compute per-priority admission ceilings.
+//   - EvictionFilterPolicy and EvictionOrderingPolicy: The interfaces for policies that govern
+//     eviction of in-flight requests.
 //
 // An OrderingPolicy supplies the comparator (Less) that determines dispatch order within a flow's queue.
 package flowcontrol

@@ -4,7 +4,7 @@
 
 A usage limit policy that applies a fixed admission ceiling across all priority levels. The Flow Controller uses this ceiling to gate how much of the pool's capacity can be consumed before requests are queued.
 
-A `threshold` of `1.0` (the default) means no gating — all capacity is available. A lower value (e.g., `0.8`) reserves headroom by capping admission at 80% of pool capacity, providing a safety margin before saturation.
+A `threshold` of `1.0` (the default) gates dispatch only at the saturation set point: the dispatch cycle halts once pool saturation reaches `1.0`. A lower value (e.g., `0.8`) gates earlier, reserving headroom by capping admission at 80% of pool capacity.
 
 This policy is framework-injected by default when flow control is enabled. You do not need to explicitly declare it in your configuration.
 

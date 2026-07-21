@@ -22,17 +22,11 @@ The FCFS policy compares requests by their **Logical Enqueue Time**—the timest
 This policy inspects the following attributes of the request item:
 - **Logical Enqueue Time**: Used as the arrival timestamp to determine order.
 
-## Behavior and Queue Pairing
+## Behavior
 
-The behavioral guarantees of this policy are critically dependent on the capabilities of the `SafeQueue` it is paired with in the configuration.
-
-1. **Strict FCFS (High Accuracy, Lower Throughput):**
-   - Paired with a `CapabilityPriorityConfigurable` queue (e.g., a heap-based queue).
-   - Requests are strictly ordered by their logical enqueue time.
-2. **Approximate FCFS (High Throughput, Lower Accuracy):**
-   - Paired with a `CapabilityFIFO` queue (e.g., a list-based queue).
-   - Requests are ordered by their *physical* arrival time at the specific queue shard.
-   - This is the **default** behavior because it avoids the overhead of maintaining a min-heap across shards, yielding better performance for high-throughput workloads.
+Every flow's queue is a priority queue ordered by the flow's `OrderingPolicy`, so requests are
+dispatched in exact logical-arrival order: the request with the earliest logical enqueue time is
+always at the head of the queue.
 
 ## Configuration
 

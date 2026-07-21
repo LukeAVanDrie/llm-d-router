@@ -68,8 +68,9 @@ func (p *globalStrict) NewState(_ context.Context) any {
 // and inspecting the head of each queue to find the single highest-priority item.
 //
 // Requirements:
-// All flows in the band MUST use compatible OrderingPolicy types (i.e., identical score types).
-// If incompatible policies are detected, an error is returned.
+// All flows in the band MUST use the same OrderingPolicy type, so that item comparisons across
+// queues are meaningful. If flows with different ordering policy types are detected, an error is
+// returned.
 func (p *globalStrict) Pick(
 	_ context.Context,
 	flowGroup flowcontrol.PriorityBandAccessor,

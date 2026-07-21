@@ -1,8 +1,8 @@
 # Eviction Priority-Then-Time Ordering Plugin
 
-**Type:** `eviction-priority-then-time-ordering`
+**Type:** `priority-then-time-eviction-order-policy`
 
-An eviction ordering policy that selects which queued request to evict when the system is overloaded. It prioritizes evicting the lowest-priority request first. When two requests share the same priority, the most recently dispatched one is evicted first, minimizing wasted KV-cache investment.
+An eviction ordering policy that selects which in-flight request to evict when the system is overloaded. It prioritizes evicting the lowest-priority request first. When two requests share the same priority, the most recently dispatched one is evicted first, minimizing wasted KV-cache investment.
 
 Eviction ordering:
 1. **Lowest priority first** — requests with more negative priority are evicted before those with less negative or zero priority.

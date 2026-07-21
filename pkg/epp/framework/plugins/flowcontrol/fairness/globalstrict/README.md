@@ -41,7 +41,7 @@ fairnessPolicyRef: global-strict-fairness-policy
 
 ## Requirements
 
-All flows in the band **MUST** use compatible `OrderingPolicy` types (i.e., identical score types). If incompatible policies are detected, the policy will return an error.
+All flows in the band **MUST** use the same `OrderingPolicy` type, so that item comparisons across queues are meaningful. If flows with different ordering policy types are detected, the policy returns an error.
 
 ## Trade-offs
 

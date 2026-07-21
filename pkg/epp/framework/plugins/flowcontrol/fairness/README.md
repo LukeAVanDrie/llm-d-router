@@ -19,7 +19,8 @@ Fairness policies must often maintain state (e.g., Round Robin cursors) for each
 ## Available Implementations
 
 *   **[Round Robin](./roundrobin/README.md)** (`round-robin-fairness-policy`): Cycles through active flows one by one to guarantee no single flow can starve others.
-*   **[Global Strict](./globalstrict/README.md)** (`global-strict-fairness-policy`): A greedy strategy that ignores flow boundaries and picks the absolute "best" request globally.
+*   **[Global Strict](./globalstrict/README.md)** (`global-strict-fairness-policy`): A greedy strategy that ignores flow boundaries and picks the absolute "best" request globally. This is the default policy.
+*   **[Program-Aware](./program-aware/README.md)** (`program-aware-fairness`): Schedules per-program queues using aggregated per-program metrics (e.g., least attained service), providing workflow-level fairness.
 
 ## Conformance Testing
 

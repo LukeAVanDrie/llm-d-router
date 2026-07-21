@@ -30,12 +30,12 @@ const StaticUsageLimitPolicyType = "static-usage-limit-policy"
 // staticPolicyConfig is the JSON configuration for the static usage limit policy.
 type staticPolicyConfig struct {
 	// Threshold is the fixed ceiling returned for all priorities.
-	// Defaults to 1.0 (no gating).
+	// Defaults to 1.0 (gate dispatch only at full saturation).
 	Threshold *float64 `json:"threshold,omitempty"`
 }
 
 // StaticPolicyFactory creates a StaticUsageLimitPolicy from JSON config.
-// If no threshold is specified, it defaults to 1.0 (no gating).
+// If no threshold is specified, it defaults to 1.0 (gate dispatch only at full saturation).
 func StaticPolicyFactory(name string, rawConfig *json.Decoder, _ plugin.Handle) (plugin.Plugin, error) {
 	threshold := 1.0
 	if rawConfig != nil {
@@ -50,8 +50,8 @@ func StaticPolicyFactory(name string, rawConfig *json.Decoder, _ plugin.Handle) 
 	return NewConstPolicy(name, threshold), nil
 }
 
-// DefaultPolicy returns the default UsageLimitPolicy with threshold 1.0 (no gating).
-// Useful for test cases.
+// DefaultPolicy returns the default UsageLimitPolicy with threshold 1.0 (gate dispatch only at
+// full saturation). Useful for test cases.
 func DefaultPolicy() flowcontrol.UsageLimitPolicy {
 	return NewConstPolicy(StaticUsageLimitPolicyType, 1.0)
 }
