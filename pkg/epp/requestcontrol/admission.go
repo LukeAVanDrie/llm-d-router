@@ -177,10 +177,14 @@ func (fcac *FlowControlAdmissionController) Admit(
 	outcome, err := fcac.flowController.EnqueueAndWait(ctx, fcReq)
 	logger.V(logutil.DEBUG).Info("Flow control outcome",
 		"requestID", reqCtx.SchedulingRequest.RequestID, "outcome", outcome, "error", err)
-	// A TTL eviction signals backpressure (429) when serving capacity exists, but genuine unavailability (503) when
-	// the pool is empty. Probe pool emptiness (nil metadata = whole pool) only on that path.
+	// A TTL expiry signals backpressure (429) when serving capacity exists, but genuine unavailability (503) when
+	// the pool is empty. This covers the queued eviction outcome and a pre-admission expiry, which surfaces as
+	// RejectedOther or EvictedOther wrapping ErrTTLExpired. Probe pool emptiness (nil metadata = whole pool) only
+	// on those paths.
 	ttlPoolEmpty := false
-	if outcome == types.QueueOutcomeEvictedTTL {
+	if outcome == types.QueueOutcomeEvictedTTL ||
+		((outcome == types.QueueOutcomeRejectedOther || outcome == types.QueueOutcomeEvictedOther) &&
+			errors.Is(err, types.ErrTTLExpired)) {
 		ttlPoolEmpty = len(fcac.endpointCandidates.Locate(ctx, nil)) == 0
 	}
 	return translateFlowControlOutcome(outcome, err, ttlPoolEmpty)
