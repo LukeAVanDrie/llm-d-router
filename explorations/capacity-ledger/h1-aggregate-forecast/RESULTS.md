@@ -5,6 +5,13 @@ empty, and git history is the pre-registration record. Criteria changes after th
 are amendments below, each dated relative to the runs by commit and stating whom it
 favors; affected cells are re-run, not reinterpreted.
 
+Round 2 ([RESULTS-2.md](RESULTS-2.md)) records a warm-up defect in this run's harness
+(training sets length-truncated during pool fill, worst at N = 1000) and re-adjudicates
+K1 and K2 on the corrected harness; the K2 verdict at t = 5 s below is superseded there.
+This file stays as the round-1 record; reproduce it with
+`--warmup-rule legacy --calib-rule fixed` (N = 10 annex MC quantiles shift slightly with
+B4 in the ladder; verdict cells are unaffected).
+
 ## Hypothesis
 
 H1: age-conditioned nonparametric survival modeling (B3) materially improves aggregate

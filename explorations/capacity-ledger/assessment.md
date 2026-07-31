@@ -136,12 +136,19 @@ prototype validates the record shape.
 Severity: high if built without validation; contained otherwise.
 
 The layer's consumers need aggregate forecasts (occupancy of the pool at a horizon of seconds),
-not per-request output-length predictions. The serving literature's negative results
-(arrival-time length predictors of the S3 / TetriInfer / SSJF line — recalled, unverified;
-sources.md `s3-line`) concern the per-request problem and do not transfer: the aggregate object is a sum over many leases whose individual
-errors partially cancel, estimated from completed observations rather than request content.
-The precedents with the same structure are effective-bandwidth admission and actuarial
-reserving.
+not per-request output-length predictions. The arrival-time length-prediction line (S3,
+TetriInfer, SSJF, and Fu et al.'s learning-to-rank — read, locators in sources.md
+`s3-line`) does not reach this problem, on three verified grounds: its pointwise record
+is fragile largely by its own reporting (S3's accuracy collapses off-distribution with
+headline results measured on the easy set; TetriInfer's prediction-guided placement at
+real accuracy exactly ties its prediction-free baseline; SSJF's accuracy holds only on a
+length-filtered dataset); its one strong result, Fu et al., succeeds precisely by
+abandoning the pointwise target for relative rank, conceding the target this design also
+avoids; and all four evaluate ordering, placement, and batching only — the line is
+silent on admission, so nothing in it tests, let alone solves, the aggregate problem.
+The aggregate object is a sum over many leases whose individual errors partially cancel,
+estimated from completed observations rather than request content. The precedents with
+the same structure are effective-bandwidth admission and actuarial reserving.
 
 Transfer is not automatic either. Whether age-conditioned hazard curves beat trivial
 forecasters at this aggregate level, at these horizons, is an empirical question, and the
@@ -218,12 +225,13 @@ tunable is a one-sided upper confidence bound on future occupancy, and the ceili
 
 Recommendation: the document should name this dial, its default (100%), and the calibration
 evidence required before any lower setting is documented as supported. For setting the dial,
-arXiv:2607.16892 reports (machine-read standing, sources.md) the optimal admission-time
-reservation quantile as the critical fractile rho/(rho+1) of the length distribution, where
-rho is the ratio of preemption cost to over-reservation cost; the same structure applies
-here with revocation cost in place of preemption cost, and gives the dial an operational
-meaning beyond "pick a percentile". Pinning the theorem in the text precedes leaning on it
-outside this branch.
+arXiv:2607.16892 (read; Proposition IV.2, p. 5) places the optimal admission-time
+reservation at the critical fractile rho/(rho+1) of the (worst-case) length distribution,
+where rho = cp/cw is the ratio of per-token preemption cost to per-token waste cost; the
+proposition is the classical distributionally-robust newsvendor ratio applied to this
+setting, so citations outside this branch should credit the newsvendor lineage, not the
+paper's originality. The same structure applies here with revocation cost in place of
+preemption cost, and gives the dial an operational meaning beyond "pick a percentile".
 
 ## Finding 8: positions on the prior review (`capacity-ledger-review.md`)
 
@@ -340,29 +348,42 @@ collapse or strengthen as work-table items resolve.
 | Informative-censoring loop is governable | H3 design (alignment invariant, canary, governor) | open; late-stage by construction |
 | Prefix sharing breaks additivity in the conservative direction | finding 9 | direction derived; magnitude unmeasured until scrape reconciliation exists |
 | Multi-EPP posture | finding 9 | open |
-| Tier = one-sided confidence dial; fractile setting rule | finding 7; `dro2026` | proposed; setting rule machine-read |
-| No published occupant of the combination (age-conditioned, content-blind, pool-scope, revocation-enforced) | related work below | machine-read and recalled; reads pending |
+| Tier = one-sided confidence dial; fractile setting rule | finding 7; `dro2026` | proposed; setting rule read (Prop. IV.2, classical DR-newsvendor) |
+| No published occupant of the combination (age-conditioned, content-blind, pool-scope, revocation-enforced) | related work below | verified for the read subset (dro2026, tie2026, s3-line); PLP/remlen/UniBoost machine-read |
 
-## Related work positioning (first sweep, 2026-07-31)
+## Related work positioning (2026-07-31)
 
-Source states are tracked in [sources.md](sources.md); every entry below is machine-read
-or recalled, none read in full, so the specifics are provisional pending reads.
+Source states are tracked in [sources.md](sources.md); `dro2026`, `tie2026`, and the
+`s3-line` papers are read with locators pinned there; PLP, remlen, and UniBoost remain
+machine-read, so their specifics are provisional pending reads.
 
 The nearest published work, and where this design differs:
 
-- arXiv:2607.16892 (Robust KV Cache Management under Output Token Length Uncertainty, 2026)
-  is the closest system: per-class KV reservation at admission under length uncertainty, with
-  a Wasserstein-DRO control plane and a critical-fractile reservation policy, evaluated on
-  BurstGPT/Azure/ShareGPT traces. It is periodic re-optimization conditioned only on
-  admission-time information; it does not condition on decode progress, does not forecast
-  occupancy online over second-scale horizons, and treats preemption as a cost term rather
-  than an enforcement mechanism. Its headline negative result ("no single fixed-quantile
-  heuristic is optimal across cost regimes") supports the confidence-dial framing in
-  finding 7.
-- arXiv:2604.00499 (TIE) argues output length should be modeled as a distribution (log-t,
-  heavy-tailed) rather than a point, engine-side for scheduling, and names updating that
-  distribution during decoding as open future work. Age-conditioning during decode is exactly
-  that open item, done statistically instead of with a learned predictor.
+- arXiv:2607.16892 (`dro2026`, read) is the closest system: joint per-class KV
+  reservation, routing, and configuration at admission under length uncertainty, with a
+  Wasserstein-DRO control plane re-solved on 5-10 minute ticks, evaluated in simulation
+  on BurstGPT/Azure/ShareGPT traces. The reservation policy is the classical
+  distributionally-robust newsvendor fractile rho/(rho+1) (Proposition IV.2; rho the
+  preemption-to-waste cost ratio) — the paper's contribution is the coupling, not the
+  fractile. Every decision conditions only on admission-time information; the online
+  phase is O(1) table lookup. Two contrasts need precise wording after the read: it does
+  bound expected occupancy (a Little's-law constraint with a fixed headroom factor), and
+  its per-request reservation is a hard bound the data plane enforces by preemption — so
+  the differentiators are conditioning on decode progress, forecasting realized occupancy
+  online over second-scale horizons, and choosing revocation victims from lease state,
+  not the existence of occupancy control or of an enforced bound. Its headline negative
+  result ("no single fixed-quantile heuristic is optimal across cost regimes",
+  Sec. V-B) supports the confidence-dial framing in finding 7, and its authors name
+  online adaptation as future work.
+- arXiv:2604.00499 (TIE, `tie2026`, read) argues output length should be modeled as a
+  distribution (log-t; their Theorem 3.2 derives power-law tails structurally) rather
+  than a point, engine-side for queue ordering, and names distributional updates during
+  decoding as future work (App. E: "dynamically update the distribution as tokens are
+  generated"). The precise gap matters: point-estimate re-prediction during decode
+  already exists (TRAIL, ELIS), so what is open is exactly the distributional,
+  age-conditioned form this design proposes — and TIE's predictor needs ~20 resampled
+  generations per training prompt, where a survival estimator trains on observational
+  production completions.
 - arXiv:2602.11812 (PLP) and ELIS re-predict remaining length during decode, per-request,
   from model activations or partial output, for engine-side scheduling. These condition on
   progress but are content/activation-based per-request predictors, the frame whose fragility
@@ -377,5 +398,11 @@ The nearest published work, and where this design differs:
 
 Unclaimed in this set: content-blind, age-conditioned survival estimation driving pool-scope
 (gateway) admission with revocation as the enforcement mechanism, and the informative-censoring
-feedback loop that revocation introduces into the estimator. Several 2026 papers are adjacent;
-none occupies that combination. This remains a first sweep, not a systematic review.
+feedback loop that revocation introduces into the estimator. For the read subset this is
+now verified rather than recalled: none of the six read papers is content-blind or
+age-conditioned (every predictor reads the prompt; TetriInfer's remaining-token
+arithmetic decrements a frozen arrival estimate rather than re-conditioning); the only
+pool-scope system among them admits everything, and the only revoking one revokes as
+per-sequence misprediction recovery, not as enforcement of an admission bound. PLP,
+remlen, and UniBoost remain machine-read. This remains a targeted sweep, not a
+systematic review.

@@ -12,9 +12,10 @@ materially better than much simpler alternatives?
 
 The curves are over output length in tokens, conditioned on tokens generated so far; wall-clock
 enters only via each lease's observed decode rate. This is population-level forecasting.
-Per-request output-length prediction (unsolved in the serving literature per recalled,
-unverified sources — `s3-line` in [../sources.md](../sources.md)) is required nowhere: the
-estimators below never read request content, only stratum identity and progress.
+Per-request pointwise output-length prediction, whose record at the decisions it was
+actually applied to is fragile (read; `s3-line` in [../sources.md](../sources.md)), is
+required nowhere: the estimators below never read request content, only stratum identity
+and progress.
 
 ## Scope and non-goals
 
