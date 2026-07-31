@@ -12,7 +12,7 @@ pool is still filling are exactly the jobs short enough to have finished, so the
 set is truncated near r * t_warmup_end tokens, and the effect grows with N because
 arrival rate scales with N while fill time does not shrink. Measured
 (`eval/diag_training_bias.py`, seed 0, legacy rule): R2/N=1000 training mean 184 vs true
-756, max 723 in a regime with true q95 ~ 2975 and tail support to 16384; R1/N=1000
+756, max 723 in a regime with true q95 ~ 2989 and tail support to 16384; R1/N=1000
 training max 272 vs true q95 ~ 657. Every round-1 fitted estimator trained on these
 samples, so the round-1 scope statement "a verdict at 500 observations" was in fact a
 verdict at 500 length-truncated observations, most severely at N = 1000 — the same cells

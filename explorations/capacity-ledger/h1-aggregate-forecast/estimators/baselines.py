@@ -121,3 +121,31 @@ class OracleSurvival(SurvivalModel):
 
     def survival(self, n):
         return self.dist.survival(np.asarray(n, dtype=np.float64))
+
+
+class OraclePerLease(SurvivalModel):
+    """Drift oracle: each lease's true survival is its own component's survival, read from
+    the snapshot's component ids. Still the achievable ceiling (it knows the latent
+    component, strictly more than any marginal model), and still gates the harness."""
+    name = "oracle"
+
+    def __init__(self, dist_a, dist_b):
+        self.dists = (dist_a, dist_b)
+
+    def fit(self, lengths):
+        return self
+
+    def survival(self, n):
+        raise NotImplementedError("per-lease oracle has no marginal survival")
+
+    def p_alive_leases(self, snap, growth):
+        ages = snap.ages
+        p = np.empty_like(ages)
+        for cid, dist in enumerate(self.dists):
+            m = snap.comp == cid
+            if m.any():
+                s_now = dist.survival(ages[m])
+                s_then = dist.survival(ages[m] + growth)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    p[m] = np.where(s_now > 0, s_then / s_now, 0.0)
+        return np.clip(p, 0.0, 1.0)

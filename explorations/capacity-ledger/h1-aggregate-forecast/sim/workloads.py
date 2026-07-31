@@ -151,6 +151,65 @@ class Capped(OutputDist):
 
 
 @dataclass
+class TwoComponentMix(OutputDist):
+    """Stationary mixture of two arbitrary output distributions with weight w_a on a.
+    Used as the pilot/marginal distribution for drift scenarios; the simulator samples
+    component identities itself when running a time-varying mix."""
+
+    a: OutputDist
+    b: OutputDist
+    w_a: float
+
+    def sample(self, rng, size):
+        from_a = rng.random(size) < self.w_a
+        out = np.empty(size, dtype=np.int64)
+        na = int(from_a.sum())
+        out[from_a] = self.a.sample(rng, na)
+        out[~from_a] = self.b.sample(rng, size - na)
+        return out
+
+    def survival(self, n):
+        n = np.asarray(n, dtype=np.float64)
+        return self.w_a * self.a.survival(n) + (1.0 - self.w_a) * self.b.survival(n)
+
+
+@dataclass
+class DriftSchedule:
+    """Mixing weight on component a as a function of time relative to eval start.
+    Before eval start the weight is w_start; 'shift' jumps to w_end at at_eval_s;
+    'ramp' interpolates linearly from eval start over over_eval_s."""
+
+    a: OutputDist
+    b: OutputDist
+    w_start: float
+    w_end: float
+    kind: str  # "shift" | "ramp"
+    at_eval_s: float = 0.0
+    over_eval_s: float = 0.0
+
+    def weight(self, rel_eval_s: float) -> float:
+        if rel_eval_s < 0:
+            return self.w_start
+        if self.kind == "shift":
+            return self.w_start if rel_eval_s < self.at_eval_s else self.w_end
+        frac = min(rel_eval_s / self.over_eval_s, 1.0) if self.over_eval_s > 0 else 1.0
+        return self.w_start + (self.w_end - self.w_start) * frac
+
+    def mean_len(self, rel_eval_s: float, mean_a: float, mean_b: float) -> float:
+        w = self.weight(rel_eval_s)
+        return w * mean_a + (1.0 - w) * mean_b
+
+
+def build_drift_schedule(kind: str, params: dict) -> DriftSchedule:
+    d = params["drift"]
+    a, _ = build_regime(d["components"][0], params)
+    b, _ = build_regime(d["components"][1], params)
+    return DriftSchedule(
+        a=a, b=b, w_start=d["w_start"], w_end=d["w_end"], kind=kind,
+        at_eval_s=d["shift_at_eval_s"], over_eval_s=d["ramp_over_eval_s"])
+
+
+@dataclass
 class PromptDist:
     median: float
     sigma: float

@@ -32,6 +32,11 @@ class SurvivalModel:
             p = np.where(s_now > 0, s_then / s_now, 0.0)
         return np.clip(p, 0.0, 1.0)
 
+    def p_alive_leases(self, snap, growth: float) -> np.ndarray:
+        """Per-lease survival given full snapshot state. The base implementation uses ages
+        only; estimators with per-lease side information (drift oracle) override."""
+        return self.p_alive(snap.ages, growth)
+
 
 def aggregate(model: SurvivalModel, snap, r: float, t: float,
               rng: np.random.Generator | None = None, force_mc: bool = False) -> dict:
@@ -41,7 +46,7 @@ def aggregate(model: SurvivalModel, snap, r: float, t: float,
     approximation's skew error."""
     grow = r * t
     vals = snap.footprints + grow
-    p = model.p_alive(snap.ages, grow)
+    p = model.p_alive_leases(snap, grow)
     mean = float((p * vals).sum())
     var = float((vals * vals * p * (1.0 - p)).sum())
     sd = var ** 0.5

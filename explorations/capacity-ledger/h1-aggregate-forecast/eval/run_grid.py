@@ -1,11 +1,18 @@
 """Grid driver: simulate cells, score estimators, evaluate gates and K1/K2 inputs.
 
 Usage (from the experiment root):
-  .venv/bin/python -m eval.run_grid --synthetic          # full grid
+  .venv/bin/python -m eval.run_grid --synthetic          # round-2 defaults
   .venv/bin/python -m eval.run_grid --synthetic --quick  # smoke: N=100, seed 0
 
-Outputs: results/cells.csv, results/gates.csv, results/summary.txt. RESULTS.md is filled
-by hand from summary.txt so the pre-registered tables are never machine-overwritten.
+Round-2 defaults (RESULTS-2.md): steady warm-up, adaptive conformal/calibration window,
+B4 in the ladder, K2 medians under both void-cell rules. The round-1 configuration is
+`--warmup-rule legacy --calib-rule fixed`; with B4 in the ladder the N=10 annex MC
+quantiles draw from a shifted rng stream, so annex cells differ slightly from the
+round-1 record while verdict cells (N >= 100, normal-approx quantiles) are unaffected.
+
+Outputs: results/cells.csv, results/gates.csv, results/summary.txt. RESULTS-2.md is
+filled by hand from summary.txt so the pre-registered tables are never
+machine-overwritten.
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ from estimators.baselines import (               # noqa: E402
     B0Growth, B0Persistence, B1ConstantHazard, B2cCensoredLognormal, B2Lognormal,
     OracleSurvival)
 from estimators.conformal import ConformalWrapper  # noqa: E402
+from estimators.mixture_em import B4LognormalMixtureEM  # noqa: E402
 from eval import bootstrap, metrics              # noqa: E402
 from sim import simulator, workloads             # noqa: E402
 
@@ -40,9 +48,13 @@ COVERAGE_VALID = 0.93   # width comparisons require at least this
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
 
-def score_cell(regime: str, n: int, seed: int, params: dict, capacity: float) -> dict:
+def score_cell(regime: str, n: int, seed: int, params: dict, capacity: float,
+               warmup_rule: str = "steady", calib_spec="adaptive40",
+               warmup_completions: int | None = None) -> dict:
     """Run one cell's simulation and score every estimator mode on the eval window."""
-    res = simulator.run_cell(regime, n, seed, params, capacity=capacity)
+    res = simulator.run_cell(regime, n, seed, params, capacity=capacity,
+                             warmup_rule=warmup_rule, calib_window_s=calib_spec,
+                             warmup_min_completions=warmup_completions)
     out_dist, cap = workloads.build_regime(regime, params)
     r = res.rate_tokens_per_s
     rng = np.random.default_rng(np.random.SeedSequence([987, n, seed]))
@@ -52,6 +64,7 @@ def score_cell(regime: str, n: int, seed: int, params: dict, capacity: float) ->
         B2Lognormal().fit(res.training_lengths),
         B2cCensoredLognormal(cap).fit(res.training_lengths),
         B3DiscreteHazardKM(cap=cap).fit(res.training_lengths),
+        B4LognormalMixtureEM(cap).fit(res.training_lengths),
         OracleSurvival(out_dist),
     ]
     b0, b0g = B0Persistence(), B0Growth(cap if cap is not None else np.inf)
@@ -121,7 +134,8 @@ def score_cell(regime: str, n: int, seed: int, params: dict, capacity: float) ->
     for t in HORIZONS:
         gates[f"oracle_cov95_t{t}"] = scores[("oracle", "native", t)]["cov95"]
     return {"scores": scores, "gates": gates, "capacity": capacity,
-            "mean_active": res.mean_active, "n_training": len(res.training_lengths)}
+            "mean_active": res.mean_active, "n_training": len(res.training_lengths),
+            "calib_window_s": res.calib_window_s}
 
 
 def best_valid(scores_by_seed: list[dict], candidates: list[tuple[str, str]], t: float):
@@ -148,12 +162,21 @@ def main():
     ap.add_argument("--synthetic", action="store_true", default=True)
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--regimes", default=",".join(REGIMES))
+    ap.add_argument("--warmup-rule", default="steady", choices=("steady", "legacy"))
+    ap.add_argument("--calib-rule", default="adaptive40", choices=("adaptive40", "fixed"))
+    ap.add_argument("--warmup-completions", type=int, default=None,
+                    help="override sim.warmup_min_completions (training-size context runs)")
+    ap.add_argument("--ns", default=None, help="comma-separated pool sizes, default full grid")
+    ap.add_argument("--out-suffix", default="",
+                    help="suffix for results file names, e.g. '-train5000'")
     args = ap.parse_args()
 
     params = workloads.load_params()
     regimes = args.regimes.split(",")
-    ns = (100,) if args.quick else NS
+    ns = (100,) if args.quick else \
+        tuple(int(x) for x in args.ns.split(",")) if args.ns else NS
     seeds = (0,) if args.quick else SEEDS
+    calib_spec = "adaptive40" if args.calib_rule == "adaptive40" else None
     RESULTS_DIR.mkdir(exist_ok=True)
 
     capacities: dict[tuple[str, int], float] = {}
@@ -167,14 +190,17 @@ def main():
                 capacities[(regime, n)] = pilot.capacity
                 print(f"[pilot] {regime} N={n}: capacity={pilot.capacity:,.0f} tokens")
             for seed in seeds:
-                cell = score_cell(regime, n, seed, params, capacities[(regime, n)])
+                cell = score_cell(regime, n, seed, params, capacities[(regime, n)],
+                                  warmup_rule=args.warmup_rule, calib_spec=calib_spec,
+                                  warmup_completions=args.warmup_completions)
                 cell_scores[(regime, n, seed)] = cell
                 g = cell["gates"]
-                gate_rows.append({"regime": regime, "N": n, "seed": seed, **{
+                gate_rows.append({"regime": regime, "N": n, "seed": seed,
+                                  "calib_window_s": cell["calib_window_s"], **{
                     k: (f"{v:.4f}" if isinstance(v, float) else v) for k, v in g.items()}})
                 print(f"[cell] {regime} N={n} seed={seed}: little_dev={g['little_dev']:.3f} "
                       f"oracle_cov95(t=5)={g['oracle_cov95_t5.0']:.3f} "
-                      f"train={cell['n_training']}")
+                      f"train={cell['n_training']} W={cell['calib_window_s']:.0f}s")
 
     # ---- Gates ----
     gate_failures = []
@@ -197,13 +223,13 @@ def main():
                     gate_failures.append(
                         f"{regime}/N={n}/t={t}: pooled oracle cov {cov:.3f} outside [.93,.98]")
 
-    with open(RESULTS_DIR / "gates.csv", "w", newline="") as f:
+    with open(RESULTS_DIR / f"gates{args.out_suffix}.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(gate_rows[0].keys()))
         w.writeheader()
         w.writerows(gate_rows)
 
     # ---- Per-cell CSV ----
-    with open(RESULTS_DIR / "cells.csv", "w", newline="") as f:
+    with open(RESULTS_DIR / f"cells{args.out_suffix}.csv", "w", newline="") as f:
         cols = ["regime", "N", "seed", "t", "model", "mode", "pinball0.5", "pinball0.9",
                 "pinball0.95", "pinball0.99", "cov95", "width95", "width95_pct_headroom",
                 "mae", "brier"]
@@ -219,11 +245,15 @@ def main():
 
     # ---- Verdict aggregation at (regime, N, t) ----
     rng = np.random.default_rng(2026)
-    stochastic = [(m, md) for m in ("B1", "B2", "B2c", "B3") for md in ("native", "conformal")]
+    stochastic = [(m, md) for m in ("B1", "B2", "B2c", "B3", "B4")
+                  for md in ("native", "conformal")]
     b12 = [(m, md) for m in ("B1", "B2", "B2c") for md in ("native", "conformal")]
     trivial = [("B0", "conformal"), ("B0g", "conformal")]
 
-    lines = ["H1 summary (T1, pinball@q95, skill positive = better)", ""]
+    lines = [f"H1 summary (T1, pinball@q95, skill positive = better) "
+             f"[warmup={args.warmup_rule} calib={args.calib_rule}"
+             + (f" train={args.warmup_completions}" if args.warmup_completions else "")
+             + "]", ""]
     if gate_failures:
         lines += ["!! GATE FAILURES (verdict void until resolved):"] + \
                  [f"   {x}" for x in gate_failures] + [""]
@@ -232,8 +262,11 @@ def main():
                  [f"   {x}" for x in annex_warnings] + [""]
 
     k1_improvements, k2_by_t = [], defaultdict(list)
+    k2_zero_by_t = defaultdict(list)  # void-as-zero rule (RESULTS-2.md K2')
     width_reduction = {"R3": [], "R4": []}
-    lines.append(f"{'cell':<22}{'B1':>8}{'B2/B2c':>8}{'B3':>8}{'oracle':>8}  (skill vs best trivial)")
+    b4_report, b4_guard_violations = [], []
+    lines.append(f"{'cell':<22}{'B1':>8}{'B2/B2c':>8}{'B3':>8}{'B4':>8}{'oracle':>8}"
+                 f"  (skill vs best trivial)")
     for regime in regimes:
         for n in [x for x in ns if x in VERDICT_NS]:
             by_seed = [cell_scores[(regime, n, s)]["scores"] for s in seeds]
@@ -245,6 +278,7 @@ def main():
                 for label, cands in (("B1", [("B1", "native"), ("B1", "conformal")]),
                                      ("B2", b12[2:]), ("B3", [("B3", "native"),
                                                               ("B3", "conformal")]),
+                                     ("B4", [("B4", "native"), ("B4", "conformal")]),
                                      ("oracle", [("oracle", "native")])):
                     bv = best_valid(by_seed, cands, t)
                     if bv is None:
@@ -268,11 +302,20 @@ def main():
                             w_ref = np.mean([s[(ref[0][0], ref[0][1], t)]["width95"]
                                              for s in by_seed])
                             width_reduction[regime].append(1.0 - w_b3 / w_ref)
+                    b2c_valid = best_valid(
+                        by_seed, [("B2c", "native"), ("B2c", "conformal")], t) is not None
+                    if b2c_valid and row_sk.get("B4") is None:
+                        b4_guard_violations.append(f"{regime}/N={n}/t={int(t)}s")
+                    if regime == "R3" and n == 1000:
+                        b4_report.append((t, row_sk.get("B3"), row_sk.get("B4"), b2c_valid))
                 best_st = best_valid(by_seed, stochastic, t)
                 if best_st:
                     _, lo, hi = bootstrap.ci_paired_diff(best_st[2], triv[2], rng)
-                    imp = 1.0 - best_st[1] / triv[1]
-                    k2_by_t[t].append(imp if hi < 0 else 0.0)
+                    imp = (1.0 - best_st[1] / triv[1]) if hi < 0 else 0.0
+                    k2_by_t[t].append(imp)
+                    k2_zero_by_t[t].append(imp)
+                else:
+                    k2_zero_by_t[t].append(0.0)
                 cellname = f"{regime} N={n} t={int(t)}s"
                 def fmt(v):
                     if v is None:
@@ -280,10 +323,11 @@ def main():
                     s = f"{v[0]:+.1%}"
                     return f"{s}{'*' if v[1] else ' ':>1}"
                 lines.append(f"{cellname:<22}{fmt(row_sk['B1']):>8}{fmt(row_sk['B2']):>8}"
-                             f"{fmt(row_sk['B3']):>8}{fmt(row_sk['oracle']):>8}")
+                             f"{fmt(row_sk['B3']):>8}{fmt(row_sk['B4']):>8}"
+                             f"{fmt(row_sk['oracle']):>8}")
 
     lines += ["", "(* = paired 90% CI excludes zero; VOID = no mode met coverage >= 0.90)", ""]
-    lines.append("K1 inputs:")
+    lines.append("K1' inputs:")
     med_k1 = float(np.median(k1_improvements)) if k1_improvements else float("nan")
     lines.append(f"  median B3 improvement over best(B1,B2/B2c), verdict grid "
                  f"(CI-gated, non-significant -> 0): {med_k1:+.1%}")
@@ -292,15 +336,30 @@ def main():
         lines.append(f"  B3 q95 width reduction {rg} (valid-coverage cells): "
                      + (f"{float(np.mean(wr)):+.1%}" if wr else "no valid cells"))
     lines.append("")
-    lines.append("K2 inputs (median improvement of best stochastic over best trivial):")
-    for t in sorted(k2_by_t):
-        med = float(np.median(k2_by_t[t]))
+    lines.append("K2' inputs (median improvement of best stochastic over best trivial;"
+                 " pass needs both rules):")
+    for t in sorted(k2_zero_by_t):
+        med_ex = float(np.median(k2_by_t[t])) if k2_by_t[t] else float("nan")
+        med_z = float(np.median(k2_zero_by_t[t]))
         thresh = 0.05 if t <= 2 else 0.10
-        lines.append(f"  t={int(t):>2}s: {med:+.1%}  (threshold {thresh:.0%} -> "
-                     f"{'PASS' if med >= thresh else 'FAIL'})")
+        ok = med_ex >= thresh and med_z >= thresh
+        lines.append(f"  t={int(t):>2}s: void-excluded {med_ex:+.1%}, void-as-zero "
+                     f"{med_z:+.1%}  (threshold {thresh:.0%} -> "
+                     f"{'PASS' if ok else 'FAIL'})")
+    if b4_report:
+        lines += ["", "B4 at R3/N=1000 (skill vs best trivial, best valid mode):"]
+        for t, b3v, b4v, b2c_valid in sorted(b4_report):
+            def s(v):
+                return "VOID" if v is None else f"{v[0]:+.1%}"
+            ratio = ("n/a" if b3v is None or b4v is None or b3v[0] <= 0
+                     else f"{b4v[0] / b3v[0]:.2f}")
+            lines.append(f"  t={int(t):>2}s: B3 {s(b3v)}  B4 {s(b4v)}  ratio {ratio}  "
+                         f"(B2c valid: {b2c_valid})")
+        lines.append("  guard (B4 void where B2c valid): "
+                     + (", ".join(b4_guard_violations) if b4_guard_violations else "none"))
 
     summary = "\n".join(lines)
-    (RESULTS_DIR / "summary.txt").write_text(summary + "\n")
+    (RESULTS_DIR / f"summary{args.out_suffix}.txt").write_text(summary + "\n")
     print("\n" + summary)
     if gate_failures:
         sys.exit(2)
