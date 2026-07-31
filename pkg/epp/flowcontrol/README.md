@@ -50,12 +50,12 @@ Setting a `flowControl:` config section while the gate is disabled logs a warnin
 except `saturationDetector` (which the legacy admission path also uses) is ignored.
 
 Operationally, dispatch decisions depend on fresh endpoint metrics: saturation detection reads the
-model-server metrics that the EPP's own data layer scrapes from pods (this is independent of
-cluster monitoring such as Prometheus). Endpoints whose metrics are older than the detector's
-`metricsStalenessThreshold` count as fully saturated, so if the EPP loses its scrape path to all
-pods (network policy, metrics port change, a starved refresh loop), dispatch halts and queued
-requests eventually shed at their TTL. Keep the refresh interval comfortably inside the staleness
-threshold and monitor scrape health when running with flow control on.
+model-server metrics that the EPP's own data layer scrapes from endpoints. Endpoints whose metrics
+are older than the detector's `metricsStalenessThreshold` count as fully saturated, so if the EPP
+loses its scrape path to all endpoints (network policy, metrics port change, a starved refresh
+loop), dispatch halts and queued requests eventually shed at their TTL. Keep the refresh interval
+comfortably inside the staleness threshold and monitor scrape health when running with flow
+control on.
 
 Tuning knobs, all under the `flowControl:` config section:
 
