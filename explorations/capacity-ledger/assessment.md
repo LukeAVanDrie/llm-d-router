@@ -232,15 +232,53 @@ Recorded as opens; none block the prototype.
 
 ## Validation layers
 
+Existing tooling owns everything except the narrow phase-1 attribution instrument.
+inference-perf and llm-d-inference-sim are llm-d projects (BLIS donation to the project is
+under discussion), so capability gaps the validation program hits are filed and fixed upstream
+in those repositories rather than worked around in harness code; the validation investment
+then serves all three projects.
+
 - L0 (running): statistical falsification outside the EPP, Python,
-  `explorations/capacity-ledger/h1-aggregate-forecast/`. Ground truth known, decode rates
-  controlled, full grid in minutes.
+  `explorations/capacity-ledger/h1-aggregate-forecast/`. The minimal fixed-step simulator is
+  retained only because phase-1 attribution needs fixed decode rates and an analytically known
+  generating distribution (the oracle gate). Workload parameter conventions stay mappable to
+  inference-perf's synthetic workload configs; no custom trace-format or download code.
+- L0.5: the same estimator ladder re-scored on IBM BLIS (discrete-event cluster simulator:
+  arrival, routing, queueing, batching, token generation, KV utilization; runs in seconds).
+  BLIS owns the load-coupled decode-rate and arrivals-realism questions the L0 simulator
+  deliberately excludes (repo link to be pinned).
 - L1: Go port of any surviving estimator, differential-tested against the L0 reference via
   fixed-seed golden files; replay harness and shadow-mode calibration inside the EPP.
-- L2: end-to-end through a real EPP with existing tooling: inference-perf for load generation
-  and trace replay, llm-d-inference-sim or the IBM BLIS simulator as backends (links to be
-  pinned when supplied). BLIS models batching-coupled decode rates more faithfully than the L0
-  sensitivity, so it is the intermediate check between L1 and live traffic.
+- L2: end-to-end through a real EPP: kubernetes-sigs/inference-perf for load generation and
+  trace replay (its dataset loaders are also the day-2 path for calibrating L0 regimes against
+  Azure/ShareGPT-class traces), llm-d-inference-sim (OpenAI-compatible vLLM mock with latency
+  modeling and vLLM-subset metrics) as the backend.
+
+## Field inventory
+
+The design draws on established results in several fields; naming them makes the remaining
+imports visible.
+
+In use: survival analysis (hazard, conditional survival, censoring taxonomy), queueing theory
+(Little's law, backlog gates, M/G/infinity occupancy), operations research (newsvendor
+critical fractile, overbooking, two-phase reservations), probabilistic forecast verification
+(pinball loss, coverage, skill versus persistence/trend baselines), conformal prediction,
+causal inference (informative censoring as selection bias; the victim-selection logging
+invariant as ignorability), control theory (the overcommit governor), concentration of
+measure, and distributed-systems accounting discipline.
+
+Identified but not yet pulled:
+
+- Credibility theory (Buhlmann): the optimal blend weight between a stratum's own experience
+  and the pooled curve, replacing ad hoc pseudo-count shrinkage if B3 survives H1.
+- Effective bandwidth (large deviations): prices each flow as a scalar such that additive
+  admission meets a target overflow probability; a candidate endgame for tiered admission
+  that would keep the hot-path arithmetic trivial.
+- Extreme value theory: peaks-over-threshold as the rigorous form of hazard-curve tail
+  extrapolation; ruin theory as the frame for guaranteed-tier violation probability.
+- Bernstein-type concentration bounds: distribution-free upper bounds on aggregate occupancy,
+  wider than calibrated quantiles but guaranteed, suited to the conservative end of the
+  confidence dial.
 
 ## Related work positioning (first sweep, 2026-07-31)
 
