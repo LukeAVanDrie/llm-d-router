@@ -561,7 +561,7 @@ func TestInstantiateAndConfigure(t *testing.T) {
 			},
 		},
 		{
-			name:       "Ignored - Flow Control Config Present but FeatureGate Missing",
+			name:       "Ignored - Flow Control Config Present but FeatureGate Disabled",
 			configText: successflowControlConfigDisabledText,
 			wantErr:    false,
 			validate: func(t *testing.T, handle fwkplugin.Handle, rawCfg *configapi.EndpointPickerConfig, cfg *config.Config) {
@@ -845,6 +845,76 @@ func TestInstantiateAndConfigure(t *testing.T) {
 
 			if tc.validate != nil {
 				tc.validate(t, handle, rawConfig, cfg)
+			}
+		})
+	}
+}
+
+// TestFlowControlConfigIgnoredWarning verifies that a flowControl config section combined with a
+// disabled flowControl feature gate logs a warning that the settings are ignored, and that the
+// warning stays silent otherwise. The silent cases carry the weight here: ensureSaturationDetector
+// populates FlowControl for every config, so a predicate that ignored its saturationDetector
+// exclusion would warn at every legacy-path startup.
+func TestFlowControlConfigIgnoredWarning(t *testing.T) {
+	// Not parallel because it modifies the global plugin registry.
+	registerTestPlugins(t)
+	RegisterFeatureGate(flowcontrol.FeatureGate, false)
+
+	testCases := []struct {
+		name        string
+		configText  string
+		gateEnabled bool
+		wantWarn    bool
+	}{
+		{
+			name:       "settings ignored under an explicit opt-out",
+			configText: successflowControlConfigDisabledText,
+			wantWarn:   true,
+		},
+		{
+			name:       "settings ignored under the disabled default",
+			configText: successFlowControlConfigNoGatesText,
+			wantWarn:   true,
+		},
+		{
+			name:       "opt-out with no flowControl section",
+			configText: successFlowControlDisabledNoSectionText,
+		},
+		{
+			name:       "opt-out with only a saturation detector",
+			configText: successFlowControlDisabledSaturationDetectorText,
+		},
+		{
+			name:        "settings honored when the gate is on",
+			configText:  successFlowControlConfigText,
+			gateEnabled: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			writer := &strings.Builder{}
+			logger := logging.NewTestLoggerWithWriter(writer)
+
+			rawConfig, _, err := LoadRawConfig([]byte(tc.configText), logger)
+			require.NoError(t, err)
+
+			handle := testutils.NewTestHandle(context.Background())
+			cfg, err := InstantiateAndConfigure(rawConfig, handle, logger)
+			require.NoError(t, err)
+
+			if tc.gateEnabled {
+				require.NotNil(t, cfg.FlowControlConfig, "flow control config should be built when the gate is on")
+			} else {
+				require.Nil(t, cfg.FlowControlConfig, "flow control config should not be built when the gate is disabled")
+			}
+
+			if tc.wantWarn {
+				require.Contains(t, writer.String(), "flowControl feature gate is disabled",
+					"the ignored flowControl section should be called out in the logs")
+			} else {
+				require.NotContains(t, writer.String(), "flowControl feature gate is disabled",
+					"nothing is being ignored, so the warning should stay silent")
 			}
 		})
 	}

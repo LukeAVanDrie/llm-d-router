@@ -19,6 +19,15 @@ The EPP acts as the routing intelligence engine. Its resource usage scales prima
 #### Memory Allocation
 - **Base Memory**: EPP memory usage is relatively low and stable with small output token requests, but scales with the number of concurrent inflight requests.
 - **Inflight Requests Impact**: Memory usage increases with the number of concurrent inflight requests and the output (decode) token length.
+- **Flow Control Queues**: With flow control enabled, requests that cannot dispatch
+  under saturation are buffered in EPP memory, including their request bodies. The buffered volume
+  is bounded per priority band by `priorityBands[].maxRequests` (default 5000) and `maxBytes`
+  (default 1G), which `defaultPriorityBand` sets as a template for bands you do not list; budget for
+  the sum of the per-band `maxBytes` limits of the priority levels your traffic actually uses, on top
+  of the inflight-request sizing above. The global `flowControl.maxRequests` / `maxBytes` caps
+  default to unlimited, so set a global `maxBytes` under the container memory limit: at the per-band
+  default, a handful of bands clears the sizing guidance below before any band cap engages. Lower
+  these limits (or set a shorter `defaultRequestTTL`) to trade queueing for earlier shedding.
 - **Sizing Guidelines**:
   - For a request rate of 50 to 100 requests/second with 1k output tokens, EPP requires between **4 GiB and 6 GiB** of memory.
   - For workloads with longer output lengths (such as 5k output tokens), memory usage can reach **20+ GiB** due to the accumulation of state for concurrent inflight requests.
@@ -37,6 +46,10 @@ The EPP's scaling behavior and effectiveness are highly dependent on the configu
   | 3 | 2.7x |
   | 4 | 3.5x |
 
+  - **Note (Flow Control)**: Flow control state (queues, fairness accounting, and the saturation
+    view) is per replica and not shared. In Active-Active mode, priority and fairness are enforced
+    only within each replica's share of the traffic, and per-band capacity limits apply per
+    replica, so the fleet-wide queued volume scales with the replica count.
   - **Warning (Prefix Routing)**: **Active-Active mode should be avoided when using approximate prefix routing.** Because EPP replicas do not share prefix state, each replica only has visibility into the prefix state of the requests it has individually handled. This partition of state significantly degrades prefix cache hit rates, making prefix caching highly inefficient.
   - For more technical details and context on EPP replica state sync and scaling limitations, see [Issue #1290](https://github.com/llm-d/llm-d-router/issues/1290).
 

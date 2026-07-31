@@ -912,13 +912,13 @@ func (r *Runner) initAdmissionControl(
 	endpointCandidates contracts.EndpointCandidates,
 ) (contracts.EndpointCandidates, requestcontrol.AdmissionController, contracts.PriorityBandControlPlane) {
 	if !r.featureGates[flowcontrol.FeatureGate] {
-		setupLog.Info("Experimental Flow Control layer is disabled, using legacy admission control")
+		setupLog.Info("Flow Control layer is disabled via the flowControl feature gate, using legacy admission control")
 		return endpointCandidates,
 			requestcontrol.NewLegacyAdmissionController(eppConfig.SaturationDetector, endpointCandidates),
 			nil
 	}
 	endpointCandidates = requestcontrol.NewCachedEndpointCandidates(ctx, endpointCandidates, 50*time.Millisecond)
-	setupLog.Info("Initializing experimental Flow Control layer")
+	setupLog.Info("Initializing Flow Control layer")
 	registry := fcregistry.NewFlowRegistry(eppConfig.FlowControlConfig.Registry, setupLog)
 	fc := fccontroller.NewFlowController(
 		ctx,

@@ -192,6 +192,8 @@ func InstantiateAndConfigure(
 		if err != nil {
 			return nil, fmt.Errorf("failed to load flow control config: %w", err)
 		}
+	} else if flowControlSettingsConfigured(rawConfig.FlowControl) {
+		logger.Info("WARNING: the flowControl config section is set but the flowControl feature gate is disabled; its settings (other than saturationDetector) are ignored")
 	}
 
 	parserRegistry, err := buildParserRegistry(rawConfig.RequestHandler.Parsers, handle, logger)
@@ -215,6 +217,19 @@ func InstantiateAndConfigure(
 		FlowControlConfig:  flowControlConfig,
 		ParserRegistry:     parserRegistry,
 	}, nil
+}
+
+// flowControlSettingsConfigured reports whether the flowControl config section carries settings
+// beyond the saturation detector. The saturation detector is honored by the legacy admission path
+// even when the flowControl feature gate is disabled, so it alone does not indicate ignored
+// configuration.
+func flowControlSettingsConfigured(fc *configapi.FlowControlConfig) bool {
+	if fc == nil {
+		return false
+	}
+	return fc.MaxBytes != nil || fc.MaxRequests != nil || fc.DefaultRequestTTL != nil ||
+		fc.DefaultPriorityBand != nil || fc.DefaultNegativePriorityBand != nil ||
+		len(fc.PriorityBands) > 0 || fc.UsageLimitPolicyPluginRef != ""
 }
 
 func decodeRawConfig(configBytes []byte) (*configapi.EndpointPickerConfig, error) {

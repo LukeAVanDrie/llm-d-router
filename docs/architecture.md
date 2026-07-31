@@ -195,6 +195,8 @@ RequestHandler:
 - When no parsers are configured, `openai-parser`, `anthropic-parser`, and `vllmhttp-parser` are used.
 
 FlowControl:
+- The flow control admission layer itself is off by default; enable it with
+  `featureGates: ["flowControl"]`.
 - `fcfs-ordering-policy`, `global-strict-fairness-policy`, and `static-usage-limit-policy` are configured when absent.
 - `utilization-detector` is configured as the saturation detector when none is set.
 
