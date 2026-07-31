@@ -31,3 +31,9 @@ actually known about it. States, per [STYLE.md](STYLE.md):
 Claims in [assessment.md](assessment.md) that lean on machine-read or unverified entries
 say so at the point of use; upgrading an entry's state (an actual read with locators)
 is recorded here, not by silently strengthening the prose.
+
+Kept texts: source PDFs live outside every git tree, at
+`~/Desktop/Code/llm-d-router-data/capacity-ledger/papers/`, because of licensing and
+because worktree removal must not delete them. They are never committed. An assistant
+pass against a kept full text upgrades a work to read, with locators pinned in its Note
+so any claim the exploration leans on can be checked against the text in minutes.
