@@ -1,0 +1,36 @@
+{
+  "_note": "Frozen synthetic regime parameters. Conventions kept mappable to inference-perf synthetic workload configs (input/output token distributions); real-trace calibration goes through inference-perf dataset loaders, not custom code here.",
+  "decode_rate_tokens_per_s": 40.0,
+  "prompt": { "dist": "lognormal", "median": 512, "sigma_log": 1.0, "min": 8, "max": 8192 },
+  "regimes": {
+    "R1": { "output": { "dist": "lognormal", "median": 150, "sigma_log": 0.9 }, "cap": null },
+    "R2": {
+      "output": {
+        "dist": "lognormal_pareto_splice",
+        "median": 300, "sigma_log": 1.4,
+        "splice_quantile": 0.95, "pareto_alpha": 1.5, "tail_max": 16384
+      },
+      "cap": null
+    },
+    "R3": {
+      "output": {
+        "dist": "lognormal_mixture",
+        "weights": [0.6, 0.4],
+        "medians": [80, 2000],
+        "sigmas_log": [0.6, 0.6]
+      },
+      "cap": null
+    },
+    "R4": { "output": { "same_as": "R2" }, "cap": 1024 }
+  },
+  "sim": {
+    "dt_s": 0.1,
+    "target_utilization": 0.775,
+    "drop_above_capacity_fraction": 0.95,
+    "warmup_min_completions": 500,
+    "warmup_max_s": 5000,
+    "calibration_window_s": 300,
+    "eval_window_s": 600,
+    "snapshot_every_s": 1.0
+  }
+}

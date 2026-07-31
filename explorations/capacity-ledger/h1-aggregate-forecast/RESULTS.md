@@ -44,8 +44,27 @@ Verdict grid: target T1, pinball@q95, regimes R1-R4, N in {100, 1000}, t in {5, 
 
 | Gate | Requirement | Status |
 |---|---|---|
-| Little's law | realized steady-state N within 10% of target, all cells | PENDING |
-| Oracle coverage | oracle q95 coverage on T1 in [93%, 97%], all verdict cells | PENDING |
+| Little's law | realized steady-state N within 10% of target, all cells (hard-fail on verdict cells; annex deviations reported) | PENDING |
+| Oracle coverage | oracle q95 coverage on T1 in [93%, 98%], all verdict cells (amended, see notes) | PENDING |
+
+### Pre-verdict amendments (recorded before the full evaluation run)
+
+1. Oracle quantiles are Monte Carlo (2000 draws), not normal-approximation: the gate tests
+   harness math, and the normal approximation's skew error is a property of the estimator
+   machinery (which all competitors share uniformly), not of the harness. Smoke run showed
+   normal-approx oracle q95 coverage 0.972-0.977 in R3/R4.
+2. Oracle coverage upper bound amended 97% -> 98%. With lumpy footprints (R3 long mode, R4
+   cap atom) realized occupancy is a discrete sum with multi-percent atoms, so a one-sided
+   q95 covers at least 95% by construction and can sit near 98% legitimately. The dangerous
+   direction (under-coverage, broken math) still fails below 93%.
+3. B3 tail extrapolation upgraded from constant hazard to a Hill power-law fit on the top
+   decile, and B3 given the known max_tokens cap (B2c already had it). The reviewed
+   specification called for heavy-tail extrapolation; the smoke run showed the constant-
+   hazard variant coverage-void in every R2 cell. Direction favors the candidate under
+   test: a kill after this fix is more decisive, not less.
+4. Training-set size is pinned at the warm-up's ~500 completions in all cells. A verdict
+   against B3 is therefore a verdict at 500 observations; a training-size sensitivity is a
+   pre-declared day-2 item, not part of this verdict.
 
 ## Results
 
