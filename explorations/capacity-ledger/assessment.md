@@ -190,7 +190,11 @@ tunable is a one-sided upper confidence bound on future occupancy, and the ceili
   preemption-with-recompute remains the residual backstop.
 
 Recommendation: the document should name this dial, its default (100%), and the calibration
-evidence required before any lower setting is documented as supported.
+evidence required before any lower setting is documented as supported. For setting the dial,
+arXiv:2607.16892 derives the optimal admission-time reservation quantile as the critical
+fractile rho/(rho+1) of the length distribution, where rho is the ratio of preemption cost to
+over-reservation cost; the same structure applies here with revocation cost in place of
+preemption cost, and gives the dial an operational meaning beyond "pick a percentile".
 
 ## Finding 8: positions on the prior review (`capacity-ledger-review.md`)
 
@@ -238,11 +242,36 @@ Recorded as opens; none block the prototype.
   pinned when supplied). BLIS models batching-coupled decode rates more faithfully than the L0
   sensitivity, so it is the intermediate check between L1 and live traffic.
 
-## Related work positioning (unverified)
+## Related work positioning (first sweep, 2026-07-31)
 
-Arrival-time output-length prediction for scheduling is published and weak-to-fragile (S3,
-TetriInfer, SSJF; the learning-to-rank result suggests pointwise prediction was the wrong
-frame). Hazard-conditioned aggregate occupancy forecasting for pool-scope admission with
-revocation as enforcement has no publication this memo's author can name, but that is a memory
-claim, not a search result. A literature sweep is owed before any external claim is made; until
-then the positioning is a working assumption.
+The nearest published work, and where this design differs:
+
+- arXiv:2607.16892 (Robust KV Cache Management under Output Token Length Uncertainty, 2026)
+  is the closest system: per-class KV reservation at admission under length uncertainty, with
+  a Wasserstein-DRO control plane and a critical-fractile reservation policy, evaluated on
+  BurstGPT/Azure/ShareGPT traces. It is periodic re-optimization conditioned only on
+  admission-time information; it does not condition on decode progress, does not forecast
+  occupancy online over second-scale horizons, and treats preemption as a cost term rather
+  than an enforcement mechanism. Its headline negative result ("no single fixed-quantile
+  heuristic is optimal across cost regimes") supports the confidence-dial framing in
+  finding 7.
+- arXiv:2604.00499 (TIE) argues output length should be modeled as a distribution (log-t,
+  heavy-tailed) rather than a point, engine-side for scheduling, and names updating that
+  distribution during decoding as open future work. Age-conditioning during decode is exactly
+  that open item, done statistically instead of with a learned predictor.
+- arXiv:2602.11812 (PLP) and ELIS re-predict remaining length during decode, per-request,
+  from model activations or partial output, for engine-side scheduling. These condition on
+  progress but are content/activation-based per-request predictors, the frame whose fragility
+  motivated this design's population-level approach.
+- arXiv:2607.05316 finds LLMs linearly encode their own remaining output length in the
+  residual stream. If engines ever export that signal, it slots into the ledger document's
+  stage-5 engine co-design as a per-lease survival input; it does not change the pool-scope
+  architecture.
+- UniBoost (ICML 2026) reports the same prompt varying more than 2x in output length across
+  sampling runs and abandons per-request prediction for statistical priority signals,
+  consistent with the population-level framing here.
+
+Unclaimed in this set: content-blind, age-conditioned survival estimation driving pool-scope
+(gateway) admission with revocation as the enforcement mechanism, and the informative-censoring
+feedback loop that revocation introduces into the estimator. Several 2026 papers are adjacent;
+none occupies that combination. This remains a first sweep, not a systematic review.
