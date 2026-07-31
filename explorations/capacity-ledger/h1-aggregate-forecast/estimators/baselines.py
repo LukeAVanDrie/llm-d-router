@@ -29,7 +29,7 @@ class B0Growth:
     has_native_quantiles = False
 
     def __init__(self, max_len: float):
-        self.max_len = max_len  # regime cap if any, else the splice tail_max / effectively inf
+        self.max_len = max_len  # regime cap if any, else inf (no ceiling short of growth)
 
     def point(self, snap, r: float, t: float) -> float:
         ceil = snap.prompts + self.max_len

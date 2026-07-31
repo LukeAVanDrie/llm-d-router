@@ -12,8 +12,9 @@ materially better than much simpler alternatives?
 
 The curves are over output length in tokens, conditioned on tokens generated so far; wall-clock
 enters only via each lease's observed decode rate. This is population-level forecasting.
-Per-request output-length prediction (the unsolved problem in the serving literature) is required
-nowhere: the estimators below never read request content, only stratum identity and progress.
+Per-request output-length prediction (unsolved in the serving literature per recalled,
+unverified sources — `s3-line` in [../sources.md](../sources.md)) is required nowhere: the
+estimators below never read request content, only stratum identity and progress.
 
 ## Scope and non-goals
 
@@ -42,14 +43,14 @@ model is deferred (day 2, kill criterion K3).
 | ID | Estimator | Training data | Quantiles |
 |---|---|---|---|
 | B0 | Persistence: O(t) = O(0) | none | conformal only |
-| B0g | Deterministic growth, no completions: sum min(f_i + r_i t, p_i + max_tokens). The real incumbent. | none | conformal only |
+| B0g | Deterministic growth, no completions: sum min(f_i + r_i t, p_i + max_tokens). The strongest baseline needing no training data. | none | conformal only |
 | B1 | Age-blind constant hazard (geometric; exposure-form fit) per stratum | completions | native + conformal |
 | B2 | Lognormal MLE per stratum, analytic conditional survival | completions | native + conformal |
 | B2c | B2 with cap-hits treated as right-censored + point mass at max_tokens (R4 fairness) | completions | native + conformal |
 | B3 | Discrete hazard over geometric age buckets (ratio 1.5 from 16 tok), KM product, shrinkage toward B1 (alpha = 5 pseudo-obs/bucket). The proposed machinery. | completions | native + conformal |
 | Oracle | True generating S | n/a | native |
 
-Conformal wrapper: per-horizon trailing empirical quantiles of signed residuals from a
+Conformal wrapper: per-horizon empirical quantiles of signed residuals from a fixed
 calibration window, added to the point forecast. Every baseline is scored in its best valid
 mode, so point forecasters are not disadvantaged on quantile metrics (and if conformal-B0g
 matches native-B3, the machinery is dead).
@@ -75,7 +76,8 @@ Sanity gates, checked before any comparison numbers are read:
 
 1. Realized steady-state N within 10% of the Little's-law target.
 2. Oracle q95 coverage on T1 in [93%, 97%]. Outside that band, the forecast math or the
-   simulator is wrong; stop.
+   simulator is wrong; stop. (Band and evaluation amended after the smoke and first full
+   runs — upper bound 98%, seed-pooled; RESULTS.md amendments 2 and 5 carry the reasons.)
 
 ## Regimes
 
@@ -94,7 +96,7 @@ expected-null (deterministic growth is near-optimal there); N = 10 is a small-po
 1. **Primary: pinball loss at q in {0.5, 0.9, 0.95, 0.99}**, headline q95 (the admission bound is
    a one-sided upper quantile of occupancy).
 2. Conservative-quantile quality: q95 empirical coverage (validity gate: width counts only if
-   coverage >= 93%; < 90% disqualifies the cell) and mean width, as % of capacity and as % of
+   coverage >= 93%; < 90% disqualifies the cell) and mean width, in tokens and as % of
    mean headroom (C minus mean occupancy).
 3. Secondary: MAE of the mean forecast.
 4. Diagnostic, non-verdict: per-lease Brier score + reliability curve for P(alive at t).
@@ -117,11 +119,12 @@ conventions.
 ```
 README.md            this protocol
 RESULTS.md           pre-registered criteria + result tables (criteria committed first)
-data/                calibration (fetch_traces.py, calibrate.py, params_default.json)
+data/                params_default.json (frozen parameters; trace calibration goes
+                     through inference-perf loaders, no scripts written here)
 sim/                 workloads.py (regime samplers), simulator.py (pool dynamics, sanity gates)
 estimators/          base.py (interface + aggregation), baselines.py, b3_km.py, conformal.py
 eval/                metrics.py, run_grid.py, bootstrap.py, plots.py
-phase2/              censoring.py (deferred: independent + informative censoring preview)
+phase2/              deferred and unwritten: independent + informative censoring preview
 results/             gitignored
 .venv/               gitignored (python3 -m venv; numpy, scipy, matplotlib)
 ```

@@ -1,9 +1,12 @@
 # Assessment: the capacity-ledger design against the codebase
 
-Subject: `docs/flow-control-capacity-ledger.md` (PR #2061, informational companion document).
+Subject: `docs/flow-control-capacity-ledger.md` from PR #2061
+(https://github.com/llm-d/llm-d-router/pull/2061, informational companion document there;
+reviewed as fetched from the PR on 2026-07-31 — the file does not exist on this branch).
 Evidence: the code at `9a8c999f` on `main`; file paths below are repo-relative. Related input
 read but treated as low-confidence: `capacity-ledger-review.md` and `ledger-prototype-brief.md`
-(repo root of the main checkout); positions taken from them are re-derived here or marked.
+(copies in the kept-texts directory; sources.md `prior-review`); positions taken from them are
+re-derived here or marked.
 
 Scope: this memo evaluates feasibility and difficulty per section of the ledger document,
 identifies the design problems a prototype must resolve, and records the validation program.
@@ -21,7 +24,7 @@ not itself a proposal.
 | Hold-then-lease protocol | Change requested: hold placement conflicts with admission-time information ordering (finding 3) |
 | Endpoint and pool ledgers, dual admission check | Agree |
 | Reconciliation: event truth-up over filtering | Agree; two telemetry gaps block the estimation track (finding 4) |
-| Stochastic layer | Open: value unproven; pre-registered falsification underway (finding 5) |
+| Stochastic layer | Open: H1 complete — K1 killed the nonparametric machinery; K2 robust at 10 s, conditional at 5 s; H2/H3 pending (finding 5) |
 | Tiered admission | Open: generalize to confidence-level knob (finding 7) |
 | Migration path (stage 2 grows from in-flight load accounting) | Agree; confirmed viable (finding 1) |
 | Multi-EPP posture | Open: absent from the document; needs a stated position (finding 9) |
@@ -134,8 +137,8 @@ Severity: high if built without validation; contained otherwise.
 
 The layer's consumers need aggregate forecasts (occupancy of the pool at a horizon of seconds),
 not per-request output-length predictions. The serving literature's negative results
-(arrival-time length predictors of the S3 / TetriInfer / SSJF line) concern the per-request
-problem and do not transfer: the aggregate object is a sum over many leases whose individual
+(arrival-time length predictors of the S3 / TetriInfer / SSJF line — recalled, unverified;
+sources.md `s3-line`) concern the per-request problem and do not transfer: the aggregate object is a sum over many leases whose individual
 errors partially cancel, estimated from completed observations rather than request content.
 The precedents with the same structure are effective-bandwidth admission and actuarial
 reserving.
@@ -151,9 +154,10 @@ rate and none completes", which requires no training data. The pre-registered ex
   parametric fits, on aggregate occupancy quantiles at 1-10 s horizons. Outcome under the
   pre-registered criteria (RESULTS.md): K1 killed the bucketed nonparametric machinery at
   500 training observations (zero CI-gated gain over a censored lognormal; wider bounds in
-  both pre-declared favorable regimes); K2 passed at 5-10 s horizons (+14.5% and +30.1%
-  over the best trivial baseline), carried by the parametric estimators with conformal
-  calibration. Two design-relevant emergent findings: calibration degrades with pool size
+  R4 and no valid-coverage cells at all in R3, its two pre-declared favorable regimes); K2
+  passed robustly at t = 10 s (+30.1%, and +29.9% under the harsher VOID-as-zero rule of
+  amendment 6) and conditionally at t = 5 s (+14.5% as implemented, +7.3% and failing
+  under that rule), carried by the parametric estimators with conformal calibration. Two design-relevant emergent findings: calibration degrades with pool size
   (at N = 1000 under heavy tails all fitted estimators went coverage-void while the oracle
   held, so bias, not stochastic width, binds at scale), and the conformal wrapper was the
   best valid mode almost everywhere. Consequence for the ledger document: the stochastic
@@ -329,7 +333,8 @@ collapse or strengthen as work-table items resolve.
 | Lease independence in the aggregate variance | H1 protocol | assumed; burst-correlated lengths untested |
 | Decode rate known per lease | H1 simulator choice | assumed; noisy-rate sensitivity untested |
 | Nonparametric hazard machinery earns its complexity | H1 K1 | false at 500 observations under stationarity |
-| A stochastic forecaster beats trivial baselines at 5-10 s | H1 K2 | measured, stationary synthetic regimes only |
+| A stochastic forecaster beats trivial baselines at 10 s | H1 K2 | measured, stationary synthetic regimes only; robust to VOID-cell handling |
+| The same at 5 s | H1 K2, amendment 6 | conditional: passes as implemented, fails under VOID-as-zero |
 | Calibration survives drift and pool scale | work table row 1 | open; the leading stochastic-layer risk |
 | Fitted-estimator bias, not stochastic width, binds at N=1000 heavy tails | H1 emergent finding | measured |
 | Informative-censoring loop is governable | H3 design (alignment invariant, canary, governor) | open; late-stage by construction |

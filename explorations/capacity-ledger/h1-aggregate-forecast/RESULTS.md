@@ -1,9 +1,9 @@
 # H1 results (pre-registered)
 
-This file is committed with the kill criteria stated and the result tables empty, before any
-evaluation run. Git history is the pre-registration record. Criteria may not be changed after
-the first result-bearing commit; if a criterion proves ill-posed, the change and its reason are
-recorded here and the affected cells are re-run, not reinterpreted.
+The kill criteria precede the results: `eac07223` committed this file with the tables
+empty, and git history is the pre-registration record. Criteria changes after that commit
+are amendments below, each dated relative to the runs by commit and stating whom it
+favors; affected cells are re-run, not reinterpreted.
 
 ## Hypothesis
 
@@ -47,7 +47,10 @@ Verdict grid: target T1, pinball@q95, regimes R1-R4, N in {100, 1000}, t in {5, 
 | Little's law | realized steady-state N within 10% of target, all cells (hard-fail on verdict cells; annex deviations reported) | PASS on all verdict cells; N=10 annex deviates 11-32% as expected from time-average variance at small N |
 | Oracle coverage | seed-pooled oracle q95 coverage on T1 in [93%, 98%], all verdict cells (amended, see notes) | PASS, all 16 verdict cells |
 
-### Pre-verdict amendments (recorded before the full evaluation run)
+### Amendments
+
+Amendments 1-4 were recorded before the full evaluation run (`447a7caa`). Amendments 5-6
+were recorded after full-run results existed; each states its ordering and whom it favors.
 
 1. Oracle quantiles are Monte Carlo (2000 draws), not normal-approximation: the gate tests
    harness math, and the normal approximation's skew error is a property of the estimator
@@ -65,14 +68,24 @@ Verdict grid: target T1, pinball@q95, regimes R1-R4, N in {100, 1000}, t in {5, 
 4. Training-set size is pinned at the warm-up's ~500 completions in all cells. A verdict
    against B3 is therefore a verdict at 500 observations; a training-size sensitivity is a
    pre-declared day-2 item, not part of this verdict.
-5. The oracle-coverage gate is evaluated on seed-pooled coverage per verdict cell
-   (regime, N, t), not per seed. Reason: the oracle's realized value is by construction a
-   draw from the exact distribution its quantile is computed from, so conditional coverage
-   is exact and residual variation is sampling noise; per-seed coverage over ~600
-   autocorrelated snapshots has a standard error of 3-5 points, and a hard band applied per
-   seed false-fails routinely (observed: 5 of 48 per-seed checks, spread across regimes,
-   all consistent with noise). Pooling three seeds triples the effective sample. Competitor
-   scores are unaffected; this changes only the gate evaluation.
+5. Post-hoc (recorded in the verdict commit, after the first full run — an ordering
+   violation of this file's own rule, caught by the session's cold read and relabeled
+   here). The oracle-coverage gate is evaluated on seed-pooled coverage per verdict cell
+   (regime, N, t), not per seed. Beneficiary: the harness gate itself — five per-seed
+   failures became passes. The statistical case stands on its own: the oracle's realized
+   value is by construction a draw from the exact distribution its quantile is computed
+   from, so conditional coverage is exact and residual variation is sampling noise;
+   per-seed coverage over ~600 autocorrelated snapshots has a standard error of 3-5
+   points, and a hard band applied per seed false-fails routinely (observed: 5 of 48
+   per-seed checks, spread across regimes, all consistent with noise). Competitor scores
+   are unaffected.
+6. Post-hoc (recorded after the verdict run, from the cold read). VOID-cell handling in
+   the K2 medians was never pre-registered: as implemented (eval/run_grid.py), a verdict
+   cell where every stochastic mode fails the 0.90 coverage floor is excluded from the
+   median rather than counted, a choice that favors the layer. Sensitivity, derived from
+   the verdict table: counting such cells (R2/N=1000 at both verdict horizons) as zero
+   improvement gives +7.3% at t = 5 s (below the 10% threshold) and +29.9% at t = 10 s
+   (still passing). The K2 verdict below carries this conditioning.
 
 ## Results
 
@@ -99,7 +112,7 @@ Skill = 1 - loss(model)/loss(best trivial); positive = better than trivial. CI-g
 | R4 | 100 | 5 | +8.5%* | +25.3%* | +23.4%* | +30.7%* |
 | R4 | 100 | 10 | +19.0%* | +30.1%* | +28.3%* | +36.9%* |
 | R4 | 1000 | 5 | -9.0% | +8.0% | -18.1% | +33.9%* |
-| R4 | 1000 | 10 | +22.3%* | +29.6%* | +20.3% | +46.0%* |
+| R4 | 1000 | 10 | +22.3%* | +29.6%* | +20.3%* | +46.0%* |
 
 ### K1 inputs
 
@@ -121,7 +134,8 @@ Skill = 1 - loss(model)/loss(best trivial); positive = better than trivial. CI-g
 ### Coverage / width — q95, t = 5 s, best valid mode per estimator
 
 (Seed-averaged coverage and width as a fraction of mean headroom; VOID = no mode reached
-coverage 0.90. Full tables in results/cells.csv, reproducible from the fixed seeds.)
+coverage 0.90. Full tables in results/cells.csv — results/ is regenerated rather than
+committed; reproduce with the two commands under Context cells.)
 
 | Cell | B0 | B0g | B1 | B2 | B2c | B3 | Oracle |
 |---|---|---|---|---|---|---|---|
@@ -149,10 +163,13 @@ followed by `.venv/bin/python -m eval.plots` (fixed seeds, deterministic).
   observations, bucketed nonparametric hazard estimation does not earn its complexity over
   a censored parametric fit. Scope: this is a verdict at 500 observations under
   stationarity (amendment 4); the training-size sensitivity is the pre-declared follow-up.
-- **K2: PASSES at t in {5, 10} s** (+14.5% and +30.1% over the best trivial baseline),
-  fails at t <= 2 s exactly as pre-registered. The stochastic layer justifies itself at
-  the horizons eviction tolerance and dispatch pacing live at, carried almost entirely by
-  the parametric estimators (B2/B2c).
+- **K2: PASSES robustly at t = 10 s** (+30.1% as implemented, +29.9% under VOID-as-zero)
+  **and conditionally at t = 5 s** (+14.5% as implemented, +7.3% and failing under
+  VOID-as-zero; amendment 6). Fails at t <= 2 s exactly as pre-registered. The stochastic
+  layer justifies itself at the 10 s horizon under either rule, carried almost entirely
+  by the parametric estimators (B2/B2c); the 5 s case rests on how heavy-tail
+  large-pool cells are counted, which is the same calibration-at-scale problem note 2
+  records.
 - Notes:
   1. The conformal mode was the best valid mode almost everywhere, including for the
      survival models; native distributional quantiles were rarely optimal. The residual

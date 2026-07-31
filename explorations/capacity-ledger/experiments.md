@@ -9,8 +9,8 @@ Pre-registration and verdicts: [h1-aggregate-forecast/RESULTS.md](h1-aggregate-f
 
 | Script | Question | What it found |
 |---|---|---|
-| `tests.py` | Are the harness statistics right? | Analytic oracle survival matches 10M-sample empirical CDFs to < 5e-4 in all four regimes (exact at integer arguments by the ceil-sampling argument in `sim/workloads.py`); censored lognormal MLE recovers (mu, sigma) under cap truncation ~25x better than the naive fit; conformal coverage nominal on held-out gaussian residuals; normal-approx aggregation matches Monte Carlo mean/sd/q95 |
-| `eval.run_grid` | Do age-conditioned survival curves earn their complexity for aggregate forecasts (K1), and does any stochastic forecaster beat trivial baselines (K2)? | K1 killed the bucketed nonparametric estimator at 500 training observations: +0.0% CI-gated median gain over best-of(B1, B2/B2c), and wider q95 bounds in both pre-declared favorable regimes. K2 passed at t in {5, 10} s (+14.5%, +30.1% over best trivial), failed at t <= 2 s as pre-registered-expected; the gain is carried by the censored parametric fit with conformal calibration. Emergent: at N = 1000 under heavy tails every fitted estimator went coverage-void while the oracle held 0.951 (bias, not stochastic width, binds at scale); the conformal mode was the best valid mode almost everywhere. Five pre-verdict amendments recorded in RESULTS.md |
+| `tests.py` | Are the harness statistics right? | Analytic oracle survival matches 10M-sample empirical CDFs in all four regimes (observed max error 3.8e-4; the committed gate asserts < 5e-3); censored lognormal MLE recovers (mu, sigma) under cap truncation where the naive fit does not (mu error 0.010 vs 0.251; committed gate asserts < 0.05); conformal coverage nominal on held-out gaussian residuals; normal-approx aggregation matches Monte Carlo mean/sd/q95 |
+| `eval.run_grid` | Do age-conditioned survival curves earn their complexity for aggregate forecasts (K1), and does any stochastic forecaster beat trivial baselines (K2)? | K1 killed the bucketed nonparametric estimator at 500 training observations: +0.0% CI-gated median gain over best-of(B1, B2/B2c), wider q95 bounds in R4 and no valid-coverage cells in R3, its two pre-declared favorable regimes. K2 passed robustly at t = 10 s (+30.1%; +29.9% under VOID-as-zero) and conditionally at t = 5 s (+14.5% as implemented; +7.3% and failing under VOID-as-zero, RESULTS.md amendment 6), failed at t <= 2 s as pre-registered-expected; the gain is carried by the censored parametric fit with conformal calibration. Emergent: at N = 1000 under heavy tails every fitted estimator went coverage-void while the oracle held 0.951 (see RESULTS.md note 2); the conformal mode was the best valid mode almost everywhere. Six amendments in RESULTS.md: four pre-run by git history, two post-hoc and labeled with whom they favor |
 | `eval.plots` | (figures) | `results/skill_vs_horizon.png`, `results/coverage_width.png` from `results/cells.csv` |
 
 ## Work table
@@ -24,8 +24,9 @@ body ([STYLE.md](STYLE.md)).
    bias binds exactly where multiplexing gains are largest, and every current result is
    stationary. Add regime-drift scenarios and a conformal-window sweep (which also settles
    the untested hypothesis that the R2/N=1000 collapse traces to the 300 s calibration
-   window holding ~10 effective samples at E[T] ~ 30 s). Pre-register criteria before
-   running. Waits on nothing.
+   window holding ~10 effective samples at E[T] ~ 30 s, derived: R2 mean length ~1200
+   tokens at 40 tok/s). Pre-register criteria before running; this run also supersedes
+   the conditional K2 result at t = 5 s (RESULTS.md amendment 6). Waits on nothing.
 2. **Mixture-EM estimator.** Does a two-component lognormal mixture capture B3's only win
    (R3/N=1000, t >= 5 s: +22%/+49%) with parametric degrees of freedom? Settles whether a
    nonparametric revival is ever needed. Waits on nothing.

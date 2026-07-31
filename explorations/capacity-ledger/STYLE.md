@@ -48,10 +48,10 @@ this assistant's own paper summaries.
 
 ## Hanging threads
 
-Open questions with no home in a committed artifact go to the threads section of
-[experiments.md](experiments.md) before a session ends, each naming the question and what
-it waits on. Threads are triaged periodically: a thread re-earns its line or is deleted,
-with the deletion explained in the commit body.
+Open questions with no home in a committed artifact go to the work table (or its backlog
+row) in [experiments.md](experiments.md) before a session ends, each naming the question
+and what it waits on. Rows are triaged periodically: a row re-earns its line or is
+deleted, with the deletion explained in the commit body.
 
 ## History
 
