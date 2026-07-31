@@ -147,8 +147,21 @@ rate and none completes", which requires no training data. The pre-registered ex
 `explorations/capacity-ledger/h1-aggregate-forecast/` (kill criteria committed before results,
 `eac07223`) decides:
 
-- H1 (running): hazard curves vs deterministic growth, constant hazard, and parametric fits,
-  on aggregate occupancy quantiles at 1-10 s horizons. Kill criteria K1/K2 in RESULTS.md.
+- H1 (complete, 2026-07-31): hazard curves vs deterministic growth, constant hazard, and
+  parametric fits, on aggregate occupancy quantiles at 1-10 s horizons. Outcome under the
+  pre-registered criteria (RESULTS.md): K1 killed the bucketed nonparametric machinery at
+  500 training observations (zero CI-gated gain over a censored lognormal; wider bounds in
+  both pre-declared favorable regimes); K2 passed at 5-10 s horizons (+14.5% and +30.1%
+  over the best trivial baseline), carried by the parametric estimators with conformal
+  calibration. Two design-relevant emergent findings: calibration degrades with pool size
+  (at N = 1000 under heavy tails all fitted estimators went coverage-void while the oracle
+  held, so bias, not stochastic width, binds at scale), and the conformal wrapper was the
+  best valid mode almost everywhere. Consequence for the ledger document: the stochastic
+  layer's Directional label survives, but its mechanism sentence should read
+  "per-stratum parametric survival with censoring-aware fitting and conformal residual
+  calibration", not "empirical or Kaplan-Meier-style curves"; a two-component mixture fit
+  is the candidate for the one regime the nonparametric estimator won (latent bimodality
+  at scale).
 - H2 (next, if H1 survives): shadow-mode calibration inside the EPP against replayed and live
   traffic; the forecast gates nothing until quantile coverage holds.
 - H3 (last): closed-loop behavior when eviction censors the estimator's own training data
