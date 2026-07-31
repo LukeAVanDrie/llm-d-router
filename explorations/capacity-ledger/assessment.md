@@ -204,10 +204,12 @@ tunable is a one-sided upper confidence bound on future occupancy, and the ceili
 
 Recommendation: the document should name this dial, its default (100%), and the calibration
 evidence required before any lower setting is documented as supported. For setting the dial,
-arXiv:2607.16892 derives the optimal admission-time reservation quantile as the critical
-fractile rho/(rho+1) of the length distribution, where rho is the ratio of preemption cost to
-over-reservation cost; the same structure applies here with revocation cost in place of
-preemption cost, and gives the dial an operational meaning beyond "pick a percentile".
+arXiv:2607.16892 reports (machine-read standing, sources.md) the optimal admission-time
+reservation quantile as the critical fractile rho/(rho+1) of the length distribution, where
+rho is the ratio of preemption cost to over-reservation cost; the same structure applies
+here with revocation cost in place of preemption cost, and gives the dial an operational
+meaning beyond "pick a percentile". Pinning the theorem in the text precedes leaning on it
+outside this branch.
 
 ## Finding 8: positions on the prior review (`capacity-ledger-review.md`)
 
@@ -300,6 +302,9 @@ Identified but not yet pulled:
   confidence dial.
 
 ## Related work positioning (first sweep, 2026-07-31)
+
+Source states are tracked in [sources.md](sources.md); every entry below is machine-read
+or recalled, none read in full, so the specifics are provisional pending reads.
 
 The nearest published work, and where this design differs:
 
