@@ -246,10 +246,16 @@ Recorded as opens; none block the prototype.
 ## Validation layers
 
 Existing tooling owns everything except the narrow phase-1 attribution instrument.
-inference-perf and llm-d-inference-sim are llm-d projects (BLIS donation to the project is
-under discussion), so capability gaps the validation program hits are filed and fixed upstream
-in those repositories rather than worked around in harness code; the validation investment
-then serves all three projects.
+inference-perf and llm-d-inference-sim are llm-d projects, and donation of BLIS to the
+project is under discussion (https://github.com/llm-d/llm-d/pull/2015), so capability gaps
+the validation program hits are filed and fixed upstream in those repositories rather than
+worked around in harness code; the validation investment then serves all three projects.
+
+Repositories:
+
+- inference-perf: https://github.com/kubernetes-sigs/inference-perf
+- llm-d-inference-sim: https://github.com/llm-d/llm-d-inference-sim
+- BLIS: https://github.com/inference-sim/inference-sim
 
 - L0 (running): statistical falsification outside the EPP, Python,
   `explorations/capacity-ledger/h1-aggregate-forecast/`. The minimal fixed-step simulator is
@@ -259,7 +265,7 @@ then serves all three projects.
 - L0.5: the same estimator ladder re-scored on IBM BLIS (discrete-event cluster simulator:
   arrival, routing, queueing, batching, token generation, KV utilization; runs in seconds).
   BLIS owns the load-coupled decode-rate and arrivals-realism questions the L0 simulator
-  deliberately excludes (repo link to be pinned).
+  deliberately excludes.
 - L1: Go port of any surviving estimator, differential-tested against the L0 reference via
   fixed-seed golden files; replay harness and shadow-mode calibration inside the EPP.
 - L2: end-to-end through a real EPP: kubernetes-sigs/inference-perf for load generation and
