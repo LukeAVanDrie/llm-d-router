@@ -172,6 +172,16 @@ Consequence for sequencing: the deterministic ledger does not depend on any of t
 kills the layer, the ledger still corrects the token-mode under-count, gives exact eviction
 sizing, and adds the dual admission check.
 
+Per-request bookkeeping is not per-request prediction. A lease's footprint decomposes into
+a measured part (prompt tokens, the cached-prefix discount, tokens generated so far), a
+bounded part (the max_tokens ceiling, a request field rather than a forecast), and a
+predicted part that exists only in aggregate: the expected view discounts the sum of
+bookings by pooled survival probabilities, and no admission consumer reads one lease's
+probability alone. A per-lease probability is calibrated on average and wrong for any
+individual, which is acceptable wherever it is consumed summed. The two places a
+probability would be consumed individually, victim selection and wait-vs-evict, are where
+the per-lease Brier diagnostic and the censoring-alignment invariant sit.
+
 ## Finding 6: the slots axis has no telemetry; the KV axis is already covered
 
 Severity: low.
@@ -300,6 +310,33 @@ Identified but not yet pulled:
 - Bernstein-type concentration bounds: distribution-free upper bounds on aggregate occupancy,
   wider than calibrated quantiles but guaranteed, suited to the conservative end of the
   confidence dial.
+
+## Standing
+
+The table repeats the exploration's layers so the weakest can be found by scanning; rows
+collapse or strengthen as work-table items resolve.
+
+| Layer | Source | Standing |
+|---|---|---|
+| Scalar-gauge defects motivate the ledger | finding 1; dispatchCycle, both detectors | verified in code |
+| Deterministic ledger grows from in-flight load accounting | finding 1; producer.go paths | verified in code |
+| Residency stocks (block pool, max_num_seqs) are engine-enforced, abort frees on disconnect | resource model's axis selection | recalled engine behavior; unverified against engine source this branch |
+| Prefill is a rate; the backlog gate is the existing token-mode accounting | finding 2 | derived; accounting verified in code |
+| Hold placement | finding 3 | open; candidates named, none validated |
+| Absolute KV telemetry exists; slots telemetry does not | finding 6; extractor factories | verified in code |
+| Termination cause and censored age observable to plugins | finding 4 | false today; small plumbing, upstream-early |
+| Footprint = measurement + max_tokens bound; prediction only as an aggregate discount | finding 5 | derived from the definitions |
+| Lease independence in the aggregate variance | H1 protocol | assumed; burst-correlated lengths untested |
+| Decode rate known per lease | H1 simulator choice | assumed; noisy-rate sensitivity untested |
+| Nonparametric hazard machinery earns its complexity | H1 K1 | false at 500 observations under stationarity |
+| A stochastic forecaster beats trivial baselines at 5-10 s | H1 K2 | measured, stationary synthetic regimes only |
+| Calibration survives drift and pool scale | work table row 1 | open; the leading stochastic-layer risk |
+| Fitted-estimator bias, not stochastic width, binds at N=1000 heavy tails | H1 emergent finding | measured |
+| Informative-censoring loop is governable | H3 design (alignment invariant, canary, governor) | open; late-stage by construction |
+| Prefix sharing breaks additivity in the conservative direction | finding 9 | direction derived; magnitude unmeasured until scrape reconciliation exists |
+| Multi-EPP posture | finding 9 | open |
+| Tier = one-sided confidence dial; fractile setting rule | finding 7; `dro2026` | proposed; setting rule machine-read |
+| No published occupant of the combination (age-conditioned, content-blind, pool-scope, revocation-enforced) | related work below | machine-read and recalled; reads pending |
 
 ## Related work positioning (first sweep, 2026-07-31)
 
