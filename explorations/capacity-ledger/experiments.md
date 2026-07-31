@@ -52,7 +52,12 @@ body ([STYLE.md](STYLE.md)).
     `docs/flow-control-capacity-ledger.md`: the stochastic mechanism sentence, the
     confidence dial, the new opens, and the per-request-probability vs point-prediction
     distinction. Waits on rows 1-2 settling the mechanism.
-11. **Backlog.** Bernstein-bound note for the conservative end of the dial (paper
-    exercise); credibility-theory shrinkage (gated on a nonparametric revival, itself
-    gated on row 2 failing); small-pool (N = 10) regime treatment (MC quantiles
-    throughout; Little deviations 11-32% are expected time-average variance).
+11. **Backlog.** L0 sensitivities from the protocol not yet run: noisy decode rates
+    (estimated r with lognormal error, applied to all estimators alike) and
+    burst-correlated lengths (the lease-independence stress). Engine-source verification
+    that the residency stocks and abort-on-disconnect behave as the resource model
+    assumes (currently recalled, per the assessment's standing table); precedes any EPP
+    wiring. Bernstein-bound note for the conservative end of the dial (paper exercise).
+    Credibility-theory shrinkage (gated on a nonparametric revival, itself gated on
+    row 2 failing). Small-pool (N = 10) regime treatment (MC quantiles throughout;
+    Little deviations 11-32% are expected time-average variance).
