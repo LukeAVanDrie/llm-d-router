@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import numpy as np
 
-BLOCK_LEN = 30
-N_RESAMPLES = 1000
+BLOCK_LEN = 30     # guess: ~one autocorrelation length at the shortest E[T] regimes
+N_RESAMPLES = 1000  # convention
 
 
 def _block_indices(n: int, rng: np.random.Generator, block: int) -> np.ndarray:

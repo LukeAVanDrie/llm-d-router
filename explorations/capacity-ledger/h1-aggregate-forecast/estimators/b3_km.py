@@ -3,7 +3,9 @@
 The proposed machinery under test. Per-token hazard per bucket is deaths over token
 exposure, shrunk toward the age-blind constant hazard (B1) with a prior weighted at
 `prior_obs` average observations: h_b = (deaths_b + h1 * w) / (exposure_b + w), where
-w = prior_obs * mean(L) tokens of pseudo-exposure. Survival is the product of per-bucket
+w = prior_obs * mean(L) tokens of pseudo-exposure. The constructor defaults (bucket start
+16, ratio 1.5, prior_obs 5, Hill on the top decile) are all guesses, per STYLE.md's
+numbers rule; the verdict in RESULTS.md is a verdict on B3 at these settings. Survival is the product of per-bucket
 geometric survival, computed in log space with cumulative sums at bucket edges and linear
 interpolation (in log-survival) inside a bucket, so survival(n) is vectorized. Beyond the
 last populated bucket the last hazard extends (constant-hazard extrapolation).

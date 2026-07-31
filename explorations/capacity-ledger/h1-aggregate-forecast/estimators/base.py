@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import numpy as np
 
-MC_DRAWS = 2000
-NORMAL_APPROX_MIN_N = 100
+MC_DRAWS = 2000          # convention; MC-vs-normal agreement checked in tests.py
+NORMAL_APPROX_MIN_N = 100  # guess for where CLT suffices; oracle gate would catch a bad one
 
 
 class SurvivalModel:

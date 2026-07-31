@@ -1,5 +1,6 @@
 {
   "_note": "Frozen synthetic regime parameters. Conventions kept mappable to inference-perf synthetic workload configs (input/output token distributions); real-trace calibration goes through inference-perf dataset loaders, not custom code here.",
+  "_standings": "Numbers rule (STYLE.md): every value in this file is a guess pending trace calibration. decode_rate, prompt and regime shape parameters are plausibility guesses; sim.dt_s, warmup_min_completions, and the window lengths are pre-registered conventions; target_utilization and drop_above_capacity_fraction are guesses. Nothing here is measured.",
   "decode_rate_tokens_per_s": 40.0,
   "prompt": { "dist": "lognormal", "median": 512, "sigma_log": 1.0, "min": 8, "max": 8192 },
   "regimes": {
