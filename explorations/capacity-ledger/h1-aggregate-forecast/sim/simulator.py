@@ -66,6 +66,10 @@ class SimResult:
     admitted: int = 0
     calib_window_s: float = 0.0   # resolved calibration window length
     eval_start_s: float = 0.0     # absolute sim time of eval-window start
+    # Post-burn-in completion stream (times and L_eff), for refit arms and the
+    # completion-mix detector (RESULTS-3.md). Recorded only on capped runs.
+    completion_times_s: np.ndarray = field(default_factory=lambda: np.empty(0))
+    completion_lengths: np.ndarray = field(default_factory=lambda: np.empty(0))
 
 
 class Pool:
@@ -166,6 +170,8 @@ def run_cell(regime: str, target_n: int, seed: int, params: dict,
 
     training: list[np.ndarray] = []
     training_count = 0
+    comp_times: list[float] = []
+    comp_lengths: list[np.ndarray] = []
     min_completions = (warmup_min_completions if warmup_min_completions is not None
                        else sim_p["warmup_min_completions"])
     tokens_per_step = r * dt
@@ -217,9 +223,13 @@ def run_cell(regime: str, target_n: int, seed: int, params: dict,
                 pool.admit(prompts, lengths, comp)
                 res.admitted += n_arr
         completed = pool.step(tokens_per_step)
-        if warm_done_step is None and len(completed) and step >= burn_in_steps:
-            training.append(completed)
-            training_count += len(completed)
+        if len(completed) and step >= burn_in_steps:
+            if capacity is not None:
+                comp_times.append(t_now)
+                comp_lengths.append(completed)
+            if warm_done_step is None:
+                training.append(completed)
+                training_count += len(completed)
 
         if capacity is None:
             # Pilot: measure occupancy after a settling period.
@@ -250,6 +260,10 @@ def run_cell(regime: str, target_n: int, seed: int, params: dict,
         step += 1
 
     res.mean_active = float(np.mean(active_counts)) if active_counts else 0.0
+    if comp_lengths:
+        res.completion_times_s = np.repeat(np.array(comp_times),
+                                           [len(c) for c in comp_lengths])
+        res.completion_lengths = np.concatenate(comp_lengths)
     return res
 
 

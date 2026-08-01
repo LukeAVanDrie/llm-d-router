@@ -177,6 +177,82 @@ def test_drift_mix_and_per_lease_oracle():
         check(f"per-lease oracle lease{i}", abs(p[i] - want) < 1e-12)
 
 
+def test_refit_honesty():
+    """The refit model used at snapshot time u must be trained only on completions with
+    completion time <= the latest epoch <= u, from the trailing window: poisoning every
+    completion after that epoch must not change the fit, and the training set must be
+    exactly the trailing slice."""
+    from eval.refit import refit_models
+
+    class Recorder:
+        def fit(self, lengths):
+            self.lengths = np.asarray(lengths).copy()
+            return self
+
+    class FakeSnap:
+        def __init__(self, t):
+            self.time_s = t
+
+    rng = np.random.default_rng(11)
+    comp_t = np.sort(rng.uniform(0.0, 400.0, 3000))
+    comp_l = rng.lognormal(5, 1, 3000)
+    snaps = [FakeSnap(t) for t in np.arange(100.0, 400.0)]
+    models = refit_models(snaps, Recorder, comp_t, comp_l, 30.0, 500, 100)
+    ok_window, ok_honest = True, True
+    for snap, m in zip(snaps, models):
+        epoch = 100.0 + 30.0 * np.floor((snap.time_s - 100.0) / 30.0)
+        j = int(np.searchsorted(comp_t, epoch, side="right"))
+        want = comp_l[max(0, j - 500):j]
+        ok_window &= np.array_equal(m.lengths, want)
+        ok_honest &= m.trained_through_s <= snap.time_s
+    check("refit trailing window", ok_window)
+    check("refit honesty (epoch <= snapshot)", ok_honest)
+    poisoned = comp_l.copy()
+    poisoned[comp_t > 250.0] = 1e9
+    models_p = refit_models(snaps, Recorder, comp_t, poisoned, 30.0, 500, 100)
+    i = next(k for k, s in enumerate(snaps) if s.time_s == 250.0)
+    check("refit poison-future invariance",
+          np.array_equal(models[i].lengths, models_p[i].lengths))
+
+
+def test_detector_windows():
+    """Detector statistics must be computed from exactly the trailing realized window."""
+    from eval.run_drift_detect import detector_stats
+
+    class FakeRes:
+        pass
+
+    times = np.arange(0.0, 300.0)
+    t = 5.0
+    resid = np.zeros(300)
+    resid[200:] = 10.0  # residuals from snapshot 200 on exceed the bound
+    mon = {t: {
+        "calib_times": times[:100], "eval_times": times[100:],
+        "calib_resid": resid[:100], "eval_resid": resid[100:],
+        "q95_static": 5.0, "iqr": 2.0,
+    }}
+    res = FakeRes()
+    res.completion_times_s = np.arange(0.0, 300.0, 0.1)
+    res.completion_lengths = np.where(res.completion_times_s < 200.0, 100.0, 900.0)
+    res.training_lengths = np.full(500, 100.0)
+    stats = detector_stats(mon, res, 100.0, 20, t)
+    ev = mon[t]["eval_times"]
+    # At s=250: realized residuals in (150, 250] come from snapshots 146..245; the 46
+    # from snapshot 200 on exceed the bound.
+    i = int(np.where(ev == 250.0)[0][0])
+    check("D-cov window", abs(stats["D-cov"][i] - (46 / 100 - 0.05)) < 1e-12,
+          f"got {stats['D-cov'][i]:.4f}")
+    check("D-qshift window", abs(stats["D-qshift"][i] - (10.0 - 5.0) / 2.0) < 1e-12)
+    # At s=199.9...: no post-200 completion is in the window yet; KS vs identical = 0.
+    j = int(np.where(ev == 199.0)[0][0])
+    check("D-mix pre-shift zero", stats["D-mix"][j] < 0.01,
+          f"got {stats['D-mix'][j]:.4f}")
+    # At s=299: window (199, 299] is ~99% shifted completions; KS near 1.
+    k = int(np.where(ev == 299.0)[0][0])
+    check("D-mix post-shift high", stats["D-mix"][k] > 0.95,
+          f"got {stats['D-mix'][k]:.4f}")
+
+
 def test_steady_warmup_unbiased():
     """Steady-rule training completions must be length-unbiased where the legacy rule
     truncates: R2/N=1000 training max must exceed the true q95 (legacy max sits far
@@ -199,7 +275,8 @@ if __name__ == "__main__":
     for t in (test_pinball, test_aggregation_vs_mc, test_conformal_coverage,
               test_b2c_censored_recovery, test_b3_matches_empirical,
               test_b4_em_recovery, test_rolling_conformal_honesty,
-              test_drift_mix_and_per_lease_oracle, test_steady_warmup_unbiased,
+              test_drift_mix_and_per_lease_oracle, test_refit_honesty,
+              test_detector_windows, test_steady_warmup_unbiased,
               test_oracle_vs_empirical):
         print(t.__name__)
         t()
