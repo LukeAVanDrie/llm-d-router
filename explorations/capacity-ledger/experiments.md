@@ -24,9 +24,23 @@ Ordered by decisiveness per cost; future sessions take work from the top unless 
 otherwise. A row re-earns its place at triage or is deleted with the reason in the commit
 body ([STYLE.md](STYLE.md)).
 
-1. **Hold-placement design round.** Assessment finding 3: the decision that unblocks the
+1. **Continuous-refit drift arm.** KD tested the harshest deployable configuration
+   (fits frozen pre-drift, conformal-only adaptation); the realistic loop — estimators
+   retrained on trailing completions at some cadence, cheap given the ~500-completion
+   requirement — is untested, not failed. Extend the DS/DR scenarios with refit arms;
+   pre-register in RESULTS-2 amendment style (or a RESULTS-3). Decides whether the
+   deterministic fallback is a rare-event path (abrupt breaks only) or the common case
+   under gradual drift — the difference between "prediction engine with a safety net"
+   and "safety net with an occasional prediction engine". Waits on nothing; the harness
+   exists.
+2. **Drift-detection design.** KD failed both scenarios, so the fallback path needs a
+   trigger: which online signal detects calibration loss fastest (rolling coverage
+   deficit, residual-quantile shift, admission-mix distance), and at what threshold does
+   the ledger drop to the deterministic bound? Scoreable on the same DS/DR scenarios;
+   pairs naturally with row 1 in one session. Waits on nothing.
+3. **Hold-placement design round.** Assessment finding 3: the decision that unblocks the
    deterministic ledger skeleton. Waits on a design discussion.
-2. **Ledger-document revision.** Fold the assessment, the round-2 verdicts, and the read
+4. **Ledger-document revision.** Fold the assessment, the round-2 verdicts, and the read
    sources into `docs/flow-control-capacity-ledger.md`: the stochastic mechanism sentence
    (per-stratum censored parametric fit with conformal calibration; B3 and B4 both
    unearned), the confidence dial with the read fractile rule, drift as a detected
@@ -34,25 +48,20 @@ body ([STYLE.md](STYLE.md)).
    degraded mode), transient discipline (calibration residuals and capacity sizing only
    from settled pools — the deployment analog of the round-2 harness amendments), the
    horizon boundary (value at 2-10 s, none at 1 s), and the per-request-probability vs
-   point-prediction distinction. Waits on nothing.
-3. **Telemetry change (upstream).** Termination-cause enum and a streamed-token counter
+   point-prediction distinction. Waits on nothing hard; rows 1-2 sharpen its
+   drift-posture sentence, so it lands best in the same or the following session.
+5. **Telemetry change (upstream).** Termination-cause enum and a streamed-token counter
    (assessment finding 4); training-data accrual is the long pole and cannot be
    backfilled. Waits on the user's go-ahead to prepare an upstream issue and PR.
-4. **T2 / K3 admissions dominance.** Does arrival forecasting dominate length modeling
+6. **T2 / K3 admissions dominance.** Does arrival forecasting dominate length modeling
    for total-occupancy forecasts? Waits on the shared admissions forecaster and the
    oracle-arrivals ablation.
-5. **Censoring preview (phase 2).** Degradation of censoring-aware fits under independent
+7. **Censoring preview (phase 2).** Degradation of censoring-aware fits under independent
    vs eviction-shaped censoring; flag threshold pre-registered in the protocol. Waits on
    the injectors.
-6. **BLIS re-score (L0.5).** Do the verdicts survive batching-coupled decode rates and
+8. **BLIS re-score (L0.5).** Do the verdicts survive batching-coupled decode rates and
    realistic arrivals? Waits on reading the BLIS API (`blis` in sources.md).
-7. **Drift-detection design.** KD failed both scenarios, so the fallback path needs a
-   trigger: which online signal detects calibration loss fastest (rolling coverage
-   deficit, residual-quantile shift, admission-mix distance), and at what threshold does
-   the ledger drop to the deterministic bound? A small harness extension can score
-   detectors on the existing DS/DR scenarios. Waits on nothing; feeds row 2's canary
-   sentence.
-8. **Backlog.** L0 sensitivities from the protocol not yet run: noisy decode rates
+9. **Backlog.** L0 sensitivities from the protocol not yet run: noisy decode rates
    (estimated r with lognormal error, applied to all estimators alike) and
    burst-correlated lengths (the lease-independence stress). Engine-source verification
    that the residency stocks, abort-on-disconnect, and the shared per-iteration token

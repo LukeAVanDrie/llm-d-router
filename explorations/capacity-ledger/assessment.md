@@ -340,6 +340,62 @@ Identified but not yet pulled:
   wider than calibrated quantiles but guaranteed, suited to the conservative end of the
   confidence dial.
 
+## The solution shape, against the alternatives
+
+Recorded because the question "is this the right shape at all, or should the project be
+scratched" was asked and answered; the answer should not have to be re-derived. Standing:
+the selection argument is derived from problem structure and precedent; the competing
+families are argued against, not tested — building and measuring one is the only
+stronger evidence, and none is planned.
+
+Two structural facts select the architecture. First, the plant is dead-time dominated
+with expensive reversal: an admission mistake occupies KV for the request's remaining
+lifetime, the evidence of the mistake arrives after commitment, and revocation burns
+completed work. Control of dead-time-dominated plants requires a predictive element in
+the loop; pure feedback oscillates or must run conservatively enough to forfeit the
+multiplexing value it exists to capture. Second, the dominant resource is a stock
+claimed at admission and released at a stochastic later time — the defining structure of
+airline overbooking, actuarial reserving, and effective-bandwidth admission, which
+converged independently on one architecture: deterministic commitment accounting,
+overcommit against a calibrated distribution, revocation as recourse, and calibration
+monitoring. The ledger with a stochastic layer is that synthesis; the precedent density
+the north star's prior-art section reports is evidence for the shape, not a novelty
+deficit.
+
+The competing families, and the structural reason each loses here:
+
+- **Model-free feedback control** (congestion-control shape: probe, back off on delay
+  signals) assumes cheap reversal and feedback faster than the disturbance; both are
+  false for KV leases.
+- **Worst-case-only admission** (deterministic ledger alone) is coherent but forfeits
+  the multiplexing the engines themselves already capture by internal overcommit with
+  preemption; a max_tokens-only gateway refuses load its own backends absorb.
+- **Engine-native only** (gateway as pure balancer) has exact state but no pool scope:
+  cross-replica headroom, fleet-wide tiering, and shedding before work enters are
+  answerable only above the replica — the node-versus-cluster split Borg-class systems
+  settled the same way.
+- **Ordering-only scheduling** (the published line, `s3-line`/`tie2026`) does not
+  address sustained overload; pool-scope admission is exactly the gap the related-work
+  reads verified as unoccupied.
+- **Learned end-to-end policies** inherit the per-request fragility documented in the
+  read literature, plus delayed reward and poor auditability, at a safety-critical gate.
+- **Pricing** requires cooperative clients and is orthogonal; tiering is its crude form.
+
+The round-2 results amend the framing's emphasis, not its structure: the load-bearing
+component is calibrated headroom control — conformal residual calibration did most of
+the calibration work in both rounds and its rolling form is the only piece that
+survived drift — while the survival model is an accuracy layer whose contribution is
+regime-dependent (decisive in chat and truncation regimes, modest in heavy tails,
+negative under drift). The operating contract that follows: statistically multiplex
+while calibration demonstrably holds; fall back to the guaranteed bound when the
+coverage canary trips. A predictor that stays calibrated through arbitrary regime
+breaks without a fallback is unmeetable in principle — the new distribution must be
+observed before anything can be calibrated to it — so the fallback is a requirement of
+the problem, not a concession by this design. Whether the fallback is a rare-event path
+or the common case is the open empirical question (the continuous-refit row in the work
+table); the migration staging hedges the answer either way, because stopping at the
+deterministic ledger retains standalone value.
+
 ## Standing
 
 The table repeats the exploration's layers so the weakest can be found by scanning; rows
@@ -366,6 +422,8 @@ collapse or strengthen as work-table items resolve.
 | Multi-EPP posture | finding 9 | open |
 | Tier = one-sided confidence dial; fractile setting rule | finding 7; `dro2026` | proposed; setting rule read (Prop. IV.2, classical DR-newsvendor) |
 | No published occupant of the combination (age-conditioned, content-blind, pool-scope, revocation-enforced) | related work below | verified for the read subset (dro2026, tie2026, s3-line); PLP/remlen/UniBoost machine-read |
+| The ledger-plus-forecast shape beats the competing solution families | solution-shape section | derived from problem structure and precedent; alternatives argued, not tested |
+| Drift fallback is rare-event, not the common case | continuous-refit work-table row | open; decides the product framing (prediction engine with safety net vs the reverse) |
 
 ## Related work positioning (2026-07-31)
 
