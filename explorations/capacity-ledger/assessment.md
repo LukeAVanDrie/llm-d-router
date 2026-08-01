@@ -24,7 +24,7 @@ not itself a proposal.
 | Hold-then-lease protocol | Change requested: hold placement conflicts with admission-time information ordering (finding 3) |
 | Endpoint and pool ledgers, dual admission check | Agree |
 | Reconciliation: event truth-up over filtering | Agree; two telemetry gaps block the estimation track (finding 4) |
-| Stochastic layer | Open: H1 rounds 1-2 complete — nonparametric machinery killed twice (K1, K1'); layer passes at 5-10 s under both void rules (K2'); drift verdict KD failed, so drift is a detected regime with a deterministic fallback; H2/H3 pending (finding 5) |
+| Stochastic layer | Open: H1 rounds 1-3 complete — nonparametric machinery killed twice (K1, K1'); layer passes at 5-10 s under both void rules (K2'); drift is a detected regime (KD failed; the refit loop re-arms 5 s horizons within 300 s but not 10 s horizons, KR; canary = residual-quantile shift at 16-25 s latency, DD); H2/H3 pending (finding 5) |
 | Tiered admission | Open: generalize to confidence-level knob (finding 7) |
 | Migration path (stage 2 grows from in-flight load accounting) | Agree; confirmed viable (finding 1) |
 | Multi-EPP posture | Open: absent from the document; needs a stated position (finding 9) |
@@ -188,7 +188,15 @@ rate and none completes", which requires no training data. The pre-registered ex
   reads "per-stratum censored parametric survival with conformal residual calibration on
   settled-pool residuals", and its operating envelope now carries three read-off rules:
   no value at t = 1 s, calibration and sizing only from settled pools, and a drift
-  fallback path as a first-class design element.
+  fallback path as a design element on the same footing as the forecast itself. Round 3
+  (RESULTS-3.md, complete 2026-07-31) prices that fallback path: continuous refit on
+  trailing completions re-arms the 5 s horizon within 300 s of an abrupt break (valid
+  native quantiles, reference-level skill) but cannot re-arm the 10 s horizon until the
+  post-shift completion stream clears its length bias (~ the new tail's residence
+  time), no deployable mode is valid while a ramp is actively moving, and the best
+  detection trigger is the rolling residual-quantile shift at 16-25 s median latency
+  with zero observed false alarms (completion-mix distance is the worst trigger, for
+  the same bias reason).
 - H2 (next, if H1 survives): shadow-mode calibration inside the EPP against replayed and live
   traffic; the forecast gates nothing until quantile coverage holds.
 - H3 (last): closed-loop behavior when eviction censors the estimator's own training data
@@ -391,10 +399,13 @@ while calibration demonstrably holds; fall back to the guaranteed bound when the
 coverage canary trips. A predictor that stays calibrated through arbitrary regime
 breaks without a fallback is unmeetable in principle — the new distribution must be
 observed before anything can be calibrated to it — so the fallback is a requirement of
-the problem, not a concession by this design. Whether the fallback is a rare-event path
-or the common case is the open empirical question (the continuous-refit row in the work
-table); the migration staging hedges the answer either way, because stopping at the
-deterministic ledger retains standalone value.
+the problem, not a concession by this design. How often the fallback runs is now
+measured rather than open (RESULTS-3.md KR/DD): it is the standing posture during any
+active drift and, for ~10 s horizons, for a further window on the order of the shifted
+tail's residence time; the refit loop re-arms 5 s horizons within 300 s of a break, and
+the canary that opens the fallback window fires in 16-25 s. The migration staging is
+insensitive to this split, because stopping at the deterministic ledger retains
+standalone value.
 
 ## Standing
 
@@ -416,14 +427,15 @@ collapse or strengthen as work-table items resolve.
 | Nonparametric hazard machinery earns its complexity | H1 K1, K1' | false at ~500 unbiased observations under stationarity; 10x data does not change it; the B4 mixture is also unearned |
 | A stochastic forecaster beats trivial baselines at 5-10 s | H1 K2' | measured, both void-cell rules, corrected harness; t = 2 s also passes, t = 1 s does not; stationary synthetic regimes only |
 | Calibration survives pool scale | RESULTS-2.md question A | yes, given transient discipline: training and calibration residuals from settled pools; the round-1 N=1000 collapse was harness artifact |
-| Calibration survives drift | RESULTS-2.md KD | false, both scenarios: coverage lost outright, or validity restored by short rolling windows with negative skill vs rolling-conformal persistence; drift is a detected regime with a deterministic fallback |
+| Calibration survives drift | RESULTS-2.md KD; RESULTS-3.md KR | false for frozen fits, both scenarios (KD); with continuous refit, split by horizon: 5 s horizons re-arm within 300 s of a break with valid native quantiles, 10 s horizons stay behind rolling-conformal persistence until the completion stream clears the shift's length bias; nothing deployable is valid mid-ramp |
 | Informative-censoring loop is governable | H3 design (alignment invariant, canary, governor) | open; late-stage by construction |
 | Prefix sharing breaks additivity in the conservative direction | finding 9 | direction derived; magnitude unmeasured until scrape reconciliation exists |
 | Multi-EPP posture | finding 9 | open |
 | Tier = one-sided confidence dial; fractile setting rule | finding 7; `dro2026` | proposed; setting rule read (Prop. IV.2, classical DR-newsvendor) |
 | No published occupant of the combination (age-conditioned, content-blind, pool-scope, revocation-enforced) | related work below | verified for the read subset (dro2026, tie2026, s3-line); PLP/remlen/UniBoost machine-read |
 | The ledger-plus-forecast shape beats the competing solution families | solution-shape section | derived from problem structure and precedent; alternatives argued, not tested |
-| Drift fallback is rare-event, not the common case | continuous-refit work-table row | open; decides the product framing (prediction engine with safety net vs the reverse) |
+| Drift fallback frequency | RESULTS-3.md KR (adjudicated framing) | measured on the synthetic scenarios: fallback is the standing posture during active drift and in the ~10 s-horizon shadow after a shift (~ tail residence time); the engine re-arms 5 s horizons within minutes; at the heavy-tail mix the stationary engine edge is itself within noise (+2.4%/+4.7%, CIs through zero) |
+| Drift detection trigger | RESULTS-3.md DD | measured: rolling residual-quantile shift, median 16 s on an abrupt break at zero observed stationary false alarms (six null runs); coverage-deficit twin 25 s; completion-mix distance last (56 s) and disqualified as a sole trigger by its structural lag |
 
 ## Related work positioning (2026-07-31)
 

@@ -177,34 +177,112 @@ No kill attaches to DD; it selects a design and bounds the exposure window
 
 ### KR — recovery table (N = 1000, seed-pooled)
 
+(`eval.run_drift_refit`, seeds 0-2; all gates passed: Little dev <= 5.3% per verdict
+seed, per-lease-oracle coverage in band on every verdict slice and the reference eval
+window. Reference skill, from the three stationary w = 0.25 runs: +2.4% at t = 5 s
+(B2-static vs B0-static, 90% CI on the paired diff [-177, +4]) and +4.7% at t = 10 s
+(B2-static vs B0-roll600, CI [-441, +3]) — both CIs include zero, so the stationary
+prize at this heavy-tail-dominated mix is itself within noise, consistent with round 2's
+R2 rows sitting under the 10% bar. Skill CIs below are the paired diff vs the slice's
+best valid trivial; negative bounds favor the refit arm.)
+
 | Slice | t (s) | Best refit arm-mode | Refit cov95 | Refit skill | Reference skill | Recovery |
 |---|---|---|---|---|---|---|
-| DR post | 5 | | | | | |
-| DR post | 10 | | | | | |
-| DS recovery | 5 | | | | | |
-| DS recovery | 10 | | | | | |
-| DS post (context) | 5 | | | | | |
-| DS post (context) | 10 | | | | | |
+| DR post | 5 | B2-c150-n2000 native | 0.902 | +2.1% (CI [-305, +191]) | +2.4% | YES |
+| DR post | 10 | B2-c30-n2000 roll150 | 0.986 | -17.5% (CI [+315, +1277]) | +4.7% | NO |
+| DS recovery | 5 | B2-c150-n500 native | 0.923 | +3.2% (CI [-498, +396]) | +2.4% | YES |
+| DS recovery | 10 | B2-c150-n2000 roll150 | 0.973 | -3.9% (CI [-348, +618]) | +4.7% | NO |
+| DS post (context) | 5 | B2-c30-n2000 roll150 | 0.929 | +32.4% (CI [-6327, +579]) | +2.4% | (context) |
+| DS post (context) | 10 | B2-c30-n2000 roll150 | 0.921 | +44.6% (CI [-15487, -910]) | +4.7% | (context) |
+
+Slice detail from `results/drift_refit.csv`, recorded because the verdicts lean on it:
+
+- **Active ramp (DR ramp, 0-600 s): no deployable mode is valid at either horizon.**
+  Family coverage maxima: refit 0.893 / 0.830 (B2-c30-n2000 roll150, t = 5 / 10 s),
+  trivial 0.745 / 0.718 (B0g roll150), frozen 0.665 / 0.520 (B2 roll150). Continuous
+  refit is closest to the floor but under it; only the per-lease oracle is valid while
+  the mix is moving.
+- **Post-break transient (DS early, 300-600 s): fast refit is the only valid family.**
+  B2-c30 arms with roll150 hold 0.900-0.906 at both horizons; no trivial and no frozen
+  mode reaches 0.90. The DS post context rows' large skill (+32.4%/+44.6%) is earned in
+  this transient, against trivials whose rolling windows are polluted by the shift.
+- **The t = 10 s failure is completion-stream length bias, not staleness.** On DR post
+  and DS recovery, every refit arm's native mode is void at t = 10 s (coverage
+  0.824-0.878) even at cadence 30 s with a trailing window spanning ~11-31 s of wall
+  time (derivation in the conventions above): after a shift toward the long-output mix,
+  completions under-represent the new tail for a duration on the order of its residence
+  time (16384 / 40 = 410 s), the fit under-covers, and only short rolling windows
+  restore validity at a width that forfeits skill (best valid refit pinball 4965 vs
+  best trivial 4227 on DR post t = 10 s). At t = 5 s the same bias is survivable:
+  refit native modes are valid (0.902-0.923) and match the reference skill.
 
 ### KR — KD-continuity table (10% CI-gated rule, refit arms included)
 
 | Scenario | t (s) | Best fitted cov95 (arm-mode) | Skill vs trivial | Pass |
 |---|---|---|---|---|
-| DS | 5 | | | |
-| DS | 10 | | | |
-| DR | 5 | | | |
-| DR | 10 | | | |
+| DS | 5 | B2-c30-n2000 roll150, 0.929 | +32.4% vs B0g-roll150 | FAIL (CI includes zero) |
+| DS | 10 | B2-c30-n2000 roll150, 0.921 | +44.6%* vs B0g-roll150 | PASS |
+| DR | 5 | B2-c150-n2000 native, 0.902 | +2.1% vs B0-roll300 | FAIL |
+| DR | 10 | B2 (frozen) roll150, 0.939 | -7.8% vs B0-roll300 | FAIL |
+
+(The DS/t=10 PASS is earned in the transient: on the recovery slice alone the best
+refit arm is -3.9%. The KD-continuity rule scores the full KD post slice as registered,
+so the pass stands, with this note recording where the skill lives. At DR/t=10 the best
+valid fitted mode overall is the frozen fit with rolling conformal, reproducing the KD
+round-2 cell; refitting makes t = 10 s worse there, per the bias mechanism above.)
 
 ### DD — detection scoring (t = 5 s, W_d = 150 s, thresholds from pooled stationary max)
 
+(`eval.run_drift_detect`, drift seeds 0-2, null seeds 0-5; all Little deviations <= 5.3%.
+Latencies in seconds from onset; DS onset = shift at 300 s, DR onset = ramp start.)
+
 | Detector | theta | DS latency per seed (s) | DS median (s) | DR latency per seed (s) | DR median (s) | False alarms |
 |---|---|---|---|---|---|---|
-| D-cov | | | | | | |
-| D-qshift | | | | | | |
-| D-mix | | | | | | |
+| D-cov | 0.130 | 23, 25, 27 | 25 | 94, 86, 85 | 86 | 0 |
+| D-qshift | 0.683 | 16, 19, 13 | 16 | 86, 86, 76 | 86 | 0 |
+| D-mix | 0.051 | 83, 54, 56 | 56 | 249, 165, 181 | 181 | 0 |
+
+Window-sweep context (median DS latency at each window's own stationary-max theta):
+W = 60 s gives D-cov 20 / D-qshift 15 / D-mix 23; W = 300 s gives 32 / 20 / 97. The
+ranking is the same at every window.
 
 ## Verdicts
 
-- **KR:**
-- **Framing:**
-- **DD:**
+- **KR: recovery splits by horizon — YES at t = 5 s on both verdict slices, NO at
+  t = 10 s on both.** At the 5 s horizon the refit loop returns to reference-level
+  skill with valid native quantiles within 300 s of an abrupt break and after a ramp
+  settles; at 10 s no refit arm recovers, because the post-shift completion stream
+  under-represents the new mix's tail for roughly its residence time and short rolling
+  windows buy validity at a width that hands the skill advantage to rolling-conformal
+  persistence. Two findings outside the pre-registered cells, both from the committed
+  CSV: nothing deployable is valid while a ramp is in progress (refit comes closest,
+  0.893/0.830 vs the 0.90 floor), and in the first 300 s after a break the fast-cadence
+  refit arms are the only valid family at either horizon.
+- **Framing: mixed by the pre-registered readings; adjudicated as follows (direction:
+  this narrows the layer's claimed envelope rather than expanding it, and neither
+  pre-registered pole is adopted).** The fallback is not a rare-event path: it is the
+  standing posture whenever drift is actively in progress (no valid deployable mode on
+  the ramp) and, for horizons near 10 s, for a further window on the order of the new
+  tail's residence time after the mix settles. The fallback is also not the common
+  case: at stationarity the layer is valid and skilled (round 2), at t <= 5 s the refit
+  loop re-arms within 300 s of a break — marginally holding validity even inside the
+  transient at cadence 30 s — and the detection latency that opens the fallback window
+  is 16-25 s (DD). The shipped sentence for the ledger document: statistically
+  multiplex while calibration demonstrably holds; on a canary trip, drop to the
+  degraded mode (rolling-conformal residuals on trivial growth) or the deterministic
+  bound; re-admit the fitted layer per horizon as its coverage returns, which the
+  refit loop achieves at 5 s horizons within minutes and does not achieve at 10 s
+  horizons until the completion stream clears the shift. One overlay the framing
+  question presupposed away: at this heavy-tail-dominated mix the stationary prize is
+  +2.4%/+4.7% with CIs through zero, so "engine vs net" at drift is a second-order
+  question there; the engine's first-order value lives in the chat/truncation regimes
+  (round 2: +25-48%) and in the post-break transient (+32%/+45% vs polluted trivials).
+- **DD: D-qshift wins — median DS latency 16 s at zero observed false alarms; the
+  fast-trigger floor (60 s) is met.** D-cov is a close second (25 s) and is the
+  directly interpretable form (it reads the monitored bound's own miss rate); D-mix is
+  last (56 s, and 3.5x slower on the ramp) for the same reason refit fails at t = 10 s:
+  completion-side signals inherit the post-shift length bias by construction. The
+  ranking is unchanged at every window in the sweep. Design consequence: the coverage
+  canary should trigger on the rolling residual-quantile shift (or its miss-rate twin),
+  never on completion-mix distance alone; with a 150 s window the fallback's undetected
+  exposure after an abrupt break is tens of seconds at N = 1000, t = 5 s.
