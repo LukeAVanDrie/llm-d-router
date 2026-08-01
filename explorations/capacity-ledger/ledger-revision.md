@@ -32,8 +32,9 @@ become bookkeeping operations against the ledger rather than threshold compariso
 against a gauge. Prefill compute, which is a rate rather than a stock, is governed by a
 backlog gate beside the ledger, not by a vector coordinate.
 
-The engine's own scheduler already runs this accounting model inside each replica. This
-design raises it to pool scope, the one place the engine cannot.
+The engine's own scheduler already runs this accounting model inside each replica
+(recalled engine behavior; the resource model section carries the verification
+obligation). This design raises it to pool scope, the one place the engine cannot.
 
 The design also carries the QoS story: tiers are admission against different confidence
 levels of the same ledger. The operator tunable is a one-sided confidence level on
@@ -365,16 +366,18 @@ Findings the design now rests on:
   (RESULTS-2.md, B4).
 - **The layer earns its keep at horizons of 2-10 seconds and not at 1 second.** Median
   skill of the best stochastic mode over the best trivial baseline (deterministic
-  growth or persistence, conformally calibrated): +15.4% at 5 s and +19.8% at 10 s
-  under both pre-registered void rules, +6.8% at 2 s, a fail at 1 s where deterministic
-  growth is near-optimal (RESULTS-2.md, K2'). Skill is regime-dependent: +25-48% in
-  chat and truncation regimes, +6-9% in heavy tails, where the fit with conformal
-  calibration sits at the oracle ceiling (R2/N=1000: +6.4% vs oracle +6.1% at 5 s).
+  growth or persistence, conformally calibrated): +15.4% at 5 s and +19.8% at 10 s —
+  unchanged whether cells with no valid-coverage mode are excluded or counted as zero —
+  +6.8% at 2 s, a fail at 1 s where deterministic growth is near-optimal
+  (RESULTS-2.md, K2'). Skill is regime-dependent: +25-48% in chat and truncation
+  regimes, +3-9% in heavy tails, where the fit with conformal calibration sits at the
+  oracle ceiling (R2/N=1000: +6.4% vs oracle +6.1% at 5 s).
 - **Calibration requires transient discipline.** Training completions and calibration
   residuals must come from settled pools: residuals drawn inside a pool-fill transient
-  produced a total coverage collapse that was initially misread as estimator failure
-  (RESULTS-2.md, question A). The deployment analog: calibrate and size only against
-  steady-state windows, and treat scale-up transients as uncalibrated periods.
+  produce a total coverage collapse that is indistinguishable, from the scores alone,
+  from estimator failure (RESULTS-2.md, question A). The deployment analog: calibrate
+  and size only against steady-state windows, and treat scale-up transients as
+  uncalibrated periods.
 - **Drift is a detected regime, not a forecastable one.** Frozen fits lose coverage
   outright under an abrupt mix shift and lose skill to rolling-conformal persistence
   under a ramp (RESULTS-2.md, KD). Continuous refit narrows this but does not remove
@@ -397,10 +400,13 @@ Findings the design now rests on:
 The rules above compose into the layer's runtime posture:
 
 1. Statistically multiplex while calibration demonstrably holds, measured by the
-   canary on the production forecast's own residuals.
+   canary on the production forecast's own residuals. The measured latencies used
+   thresholds calibrated against stationary null runs the simulation can manufacture;
+   the online threshold-setting rule for a deployment is open (see Open questions).
 2. On a canary trip, drop the affected horizons to the degraded mode —
    rolling-conformal residuals on the trivial growth forecast — or to the deterministic
-   bound, per tier. The undetected exposure after an abrupt break is tens of seconds.
+   bound, per tier. The undetected exposure after an abrupt break is tens of seconds at
+   the calibrated thresholds.
 3. Re-admit the fitted layer per horizon as its coverage returns: short horizons
    (~5 s) re-arm within minutes under the refit loop; longer horizons re-arm only once
    post-shift completions are representative again.
@@ -437,6 +443,10 @@ admission.
 - Censoring-aware refit: fitting on completions plus in-flight ages as right-censored
   observations attacks the completion length bias behind both the long-horizon refit
   failure and the mix-distance detector's lag.
+- Online canary threshold setting: the scored latencies calibrated thresholds from
+  stationary null runs, which a deployment cannot manufacture; the online analog
+  (trailing quantiles of the detector statistic during canary-quiet operation, or an
+  operator-set false-alarm budget) is undesigned.
 - Stratification depth (flow, prompt length, model) before data sparsity dominates;
   decode-rate variability under load (excluded from the simulation by design; owned by
   the external-simulator re-score).

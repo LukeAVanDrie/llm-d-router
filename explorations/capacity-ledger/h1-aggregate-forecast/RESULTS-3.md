@@ -89,11 +89,10 @@ recorded as context), requiring >= 20 window samples (convention), else no alarm
 - **D-qshift (residual-quantile shift):** (rolling q95 of realized residuals minus the
   static calibration q95) / IQR of calibration residuals (robust scale; always defined).
 - **D-mix (completion-mix distance):** two-sample KS statistic between completion lengths
-  completing in (s - W_d, s] and the frozen warm-up training set. The work table named
-  this signal "admission-mix distance"; in DS/DR the drifting quantity is output length,
-  which is observable only at completion — admission-time features (prompt lengths) do
-  not drift by construction — so the implementable form is completion-mix distance, and
-  the row is renamed accordingly.
+  completing in (s - W_d, s] and the frozen warm-up training set. This is the
+  implementable form of the work table's "admission-mix distance": in DS/DR the
+  drifting quantity is output length, observable only at completion, and admission-time
+  features (prompt lengths) do not drift by construction.
 
 **Threshold rule (matched false-alarm budget).** Six stationary null runs (schedule
 w_start = w_end = 1.0, rng label `DRIFTNULL`, seeds 0-5, same windows and capacity).
@@ -183,8 +182,10 @@ window. Reference skill, from the three stationary w = 0.25 runs: +2.4% at t = 5
 (B2-static vs B0-static, 90% CI on the paired diff [-177, +4]) and +4.7% at t = 10 s
 (B2-static vs B0-roll600, CI [-441, +3]) — both CIs include zero, so the stationary
 prize at this heavy-tail-dominated mix is itself within noise, consistent with round 2's
-R2 rows sitting under the 10% bar. Skill CIs below are the paired diff vs the slice's
-best valid trivial; negative bounds favor the refit arm.)
+R2 rows sitting under the 10% bar. Skill CIs here and below are 90% bootstrap bounds on
+the paired mean pinball difference vs the best valid trivial, in token units, not
+percentage points; negative bounds favor the fitted side, and * marks a CI that
+excludes zero, as in RESULTS-2.md.)
 
 | Slice | t (s) | Best refit arm-mode | Refit cov95 | Refit skill | Reference skill | Recovery |
 |---|---|---|---|---|---|---|
@@ -267,7 +268,8 @@ ranking is the same at every window.
   case: at stationarity the layer is valid and skilled (round 2), at t <= 5 s the refit
   loop re-arms within 300 s of a break — marginally holding validity even inside the
   transient at cadence 30 s — and the detection latency that opens the fallback window
-  is 16-25 s (DD). The shipped sentence for the ledger document: statistically
+  on an abrupt break is 16-25 s across the two residual-side detectors (DD). The
+  shipped sentence for the ledger document: statistically
   multiplex while calibration demonstrably holds; on a canary trip, drop to the
   degraded mode (rolling-conformal residuals on trivial growth) or the deterministic
   bound; re-admit the fitted layer per horizon as its coverage returns, which the
@@ -280,7 +282,8 @@ ranking is the same at every window.
 - **DD: D-qshift wins — median DS latency 16 s at zero observed false alarms; the
   fast-trigger floor (60 s) is met.** D-cov is a close second (25 s) and is the
   directly interpretable form (it reads the monitored bound's own miss rate); D-mix is
-  last (56 s, and 3.5x slower on the ramp) for the same reason refit fails at t = 10 s:
+  last (3.5x slower on the abrupt break, 56 s vs 16 s, and 2.1x slower on the ramp,
+  181 s vs 86 s) for the same reason refit fails at t = 10 s:
   completion-side signals inherit the post-shift length bias by construction. The
   ranking is unchanged at every window in the sweep. Design consequence: the coverage
   canary should trigger on the rolling residual-quantile shift (or its miss-rate twin),

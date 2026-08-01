@@ -24,8 +24,8 @@ not itself a proposal.
 | Hold-then-lease protocol | Change requested: hold placement conflicts with admission-time information ordering (finding 3) |
 | Endpoint and pool ledgers, dual admission check | Agree |
 | Reconciliation: event truth-up over filtering | Agree; two telemetry gaps block the estimation track (finding 4) |
-| Stochastic layer | Open: H1 rounds 1-3 complete — nonparametric machinery killed twice (K1, K1'); layer passes at 5-10 s under both void rules (K2'); drift is a detected regime (KD failed; the refit loop re-arms 5 s horizons within 300 s but not 10 s horizons, KR; canary = residual-quantile shift at 16-25 s latency, DD); H2/H3 pending (finding 5) |
-| Tiered admission | Open: generalize to confidence-level knob (finding 7) |
+| Stochastic layer | Directional supported at simulation level: H1 rounds 1-3 complete — nonparametric machinery killed twice (K1, K1'); layer passes at 5-10 s under both void rules (K2'); drift is a detected regime (KD failed; the refit loop re-arms 5 s horizons within 300 s but not 10 s horizons, KR; canary = residual-quantile shift, 16 s median on an abrupt break, 86 s on the ramp, DD); H2 shadow validation is the remaining gate before any admission authority (finding 5) |
+| Tiered admission | Change requested: generalize to a confidence-level knob (finding 7); the revision draft adopts the dial as Directional |
 | Migration path (stage 2 grows from in-flight load accounting) | Agree; confirmed viable (finding 1) |
 | Multi-EPP posture | Open: absent from the document; needs a stated position (finding 9) |
 
@@ -132,9 +132,9 @@ tokens at scheduling, `MaxOutputTokens`, flow, priority, model; termination: cau
 termination) and upstream the two plumbing changes as a small, self-contained PR once the
 prototype validates the record shape.
 
-## Finding 5: the stochastic layer's value is unproven, and the test is cheap
+## Finding 5: the stochastic layer's value is measured at simulation level; the remaining risk is transfer
 
-Severity: high if built without validation; contained otherwise.
+Severity: high if built without shadow validation; contained otherwise.
 
 The layer's consumers need aggregate forecasts (occupancy of the pool at a horizon of seconds),
 not per-request output-length predictions. The arrival-time length-prediction line (S3,
@@ -158,7 +158,7 @@ rate and none completes", which requires no training data. The pre-registered ex
 `explorations/capacity-ledger/h1-aggregate-forecast/` (kill criteria committed before results,
 `eac07223`) decides:
 
-- H1 (two rounds, complete 2026-07-31): hazard curves vs deterministic growth, constant
+- H1 (three rounds, complete 2026-07-31): hazard curves vs deterministic growth, constant
   hazard, parametric fits, and a two-component censored-EM mixture, on aggregate
   occupancy quantiles at 1-10 s horizons. Round 1 (RESULTS.md) killed the bucketed
   nonparametric machinery (K1) and passed the layer conditionally, but its harness had
@@ -194,10 +194,10 @@ rate and none completes", which requires no training data. The pre-registered ex
   native quantiles, reference-level skill) but cannot re-arm the 10 s horizon until the
   post-shift completion stream clears its length bias (~ the new tail's residence
   time), no deployable mode is valid while a ramp is actively moving, and the best
-  detection trigger is the rolling residual-quantile shift at 16-25 s median latency
-  with zero observed false alarms (completion-mix distance is the worst trigger, for
-  the same bias reason).
-- H2 (next, if H1 survives): shadow-mode calibration inside the EPP against replayed and live
+  detection trigger is the rolling residual-quantile shift — 16 s median on the abrupt
+  break, 86 s on the ramp, at zero observed false alarms (completion-mix distance is
+  the worst trigger, for the same bias reason).
+- H2 (next): shadow-mode calibration inside the EPP against replayed and live
   traffic; the forecast gates nothing until quantile coverage holds.
 - H3 (last): closed-loop behavior when eviction censors the estimator's own training data
   (informative censoring). This is the genuine research risk in the design; it activates only
@@ -403,7 +403,9 @@ the problem, not a concession by this design. How often the fallback runs is now
 measured rather than open (RESULTS-3.md KR/DD): it is the standing posture during any
 active drift and, for ~10 s horizons, for a further window on the order of the shifted
 tail's residence time; the refit loop re-arms 5 s horizons within 300 s of a break, and
-the canary that opens the fallback window fires in 16-25 s. The migration staging is
+the canary that opens the fallback window fires in a median of 16 s on an abrupt break
+(later on a ramp, 86 s, where calibration loss itself arrives gradually). The migration
+staging is
 insensitive to this split, because stopping at the deterministic ledger retains
 standalone value.
 
