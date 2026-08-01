@@ -37,8 +37,12 @@ body ([STYLE.md](STYLE.md)).
    feed into the refit epoch. If it restores t = 10 s native validity post-drift, the
    re-admission rule in the drift posture simplifies to one horizon-blind sentence.
    Waits on nothing.
-2. **Hold-placement design round.** Assessment finding 3: the decision that unblocks the
-   deterministic ledger skeleton. Waits on a design discussion.
+2. **Hold-placement prototype.** Assessment finding 3: the decision that unblocks the
+   deterministic ledger skeleton. The placement is flow-control-internal — the gate
+   consumes a ledger view in place of the saturation check, and the hold itself is
+   director-side (candidate (a)) — so the open part is empirical, not consensual: a
+   replay-harness prototype measuring the gate-to-hold window under burst, which
+   decides whether the two-stage hold (b) is ever needed.
 3. **Ledger-revision review and upstreaming.** The local rewrite is drafted at
    [ledger-revision.md](ledger-revision.md) (mechanism sentence, confidence dial with
    the read fractile rule, drift posture per RESULTS-3, transient discipline, horizon

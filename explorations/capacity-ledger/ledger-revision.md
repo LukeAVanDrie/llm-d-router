@@ -180,6 +180,13 @@ Design rules:
 *(Proposed: the protocol, the ledgers, the dual admission check. Open: where the hold
 is taken.)*
 
+A booking's output side is the `MaxOutputTokens` ceiling and everything else in it is
+measured, so estimation error moves the deterministic ledger in one direction:
+under-admission. Eviction sizing is unaffected — revoking a lease frees its current,
+measured footprint, not its booking — and so are the race closure and the fit check.
+What loose ceilings cost is utilization (typical outputs run well below their
+ceilings), and that cost is the yield the stochastic layer exists to recover.
+
 ### Hold, then lease
 
 Admission is a two-phase reservation protocol:
@@ -339,6 +346,24 @@ After truth-up, one quantity remains uncertain: when each active lease will rele
 Output length is a random variable; everything the ledger wants to know about the
 future is a function of its distribution.
 
+### The model in plain terms
+
+Each active request is a weighted coin. Given that it has already produced n tokens,
+its stratum's survival curve gives the probability it is still running at the horizon
+(age matters: a request at token 3000 has different odds than one at token 30). If
+still running it contributes its current size plus the horizon's decode growth; if
+finished, zero. Summing a thousand such coins cancels most individual error and yields
+a distribution for total occupancy; admission reads its 95th percentile. The conformal
+layer then corrects that bound against reality: it tracks how past bounds compared to
+what actually happened and shifts today's bound by the observed error quantiles, so the
+95% holds even when the survival curve is wrong — provided the near future resembles
+the recent past. That proviso is the entire drift problem: when the workload
+stops resembling its recent past, no estimator can be calibrated to data that does not
+exist yet, so the layer detects the break and falls back rather than forecasting
+through it. Everything measured in the validation program reduces to: which survival
+curve (a two-parameter censored lognormal; richer forms do not pay), which residual
+window, and how fast detection and re-entry work.
+
 ### The framing
 
 Let `L` be a request's output length in tokens. Define, per stratum (flow, model, or
@@ -363,7 +388,12 @@ Findings the design now rests on:
   median skill over the parametric fit at ~500 unbiased observations and stay under the
   bar at 10x data (RESULTS-2.md, K1'), and a two-component censored-EM mixture tracks
   the plain censored fit within noise everywhere its target prize existed
-  (RESULTS-2.md, B4).
+  (RESULTS-2.md, B4). Convergence is front-loaded: the fit itself is two parameters
+  from ~500 completions per stratum (the verdicts are pinned there, and 10x data
+  changes nothing measurable; RESULTS-2.md training-size context), so the wall clock to
+  a usable bound is dominated by accumulating settled-pool calibration residuals — the
+  committed window rule targets ~40 effective residual samples (RESULTS-2.md harness
+  amendments) — and, in deployment, by the telemetry prerequisites above.
 - **The layer earns its keep at horizons of 2-10 seconds and not at 1 second.** Median
   skill of the best stochastic mode over the best trivial baseline (deterministic
   growth or persistence, conformally calibrated): +15.4% at 5 s and +19.8% at 10 s —
@@ -394,6 +424,23 @@ Findings the design now rests on:
   25 s, and completion-mix distance in 56 s — completion-side signals inherit the same
   length bias that defeats refit at long horizons, so mix distance must never be the
   sole trigger (RESULTS-3.md, DD).
+
+### Many workloads, one pool
+
+Fits are per stratum, keyed by what is known at admission (flow identity, model,
+priority class), and the pool forecast sums each lease against its own stratum's
+curve. This ordering matters for what counts as drift: when two differently-shaped
+workloads are separately labeled, one growing from a minority to a majority of traffic
+is not drift — the sum tracks the admitted composition automatically, because every
+lease carries the right curve from admission. The harness's per-lease oracle is
+exactly this construction with perfect labels, and it held valid coverage through
+every drift scenario, including mid-ramp, while every marginal model failed
+(RESULTS-3.md slice detail). The drift verdicts therefore bound the residual case: a
+shift inside one stratum, or between populations no admission-time label separates.
+Stratification is the first line of drift defense; the canary and fallback cover what
+labels cannot see. Its limit is data sparsity — a stratum that cannot reach the
+~500-completion requirement never earns its own curve and pools with its neighbors —
+and the right depth is an open question below.
 
 ### The operating contract
 
