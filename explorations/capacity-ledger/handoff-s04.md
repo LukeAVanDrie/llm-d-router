@@ -160,6 +160,18 @@ Candidates, none yet chosen:
 - Flow control declares the dependency through some non-plugin path. No mechanism for
   this exists today.
 
+## Independent review comes first
+
+The next session is a review session, not a build session: `prompt-s05-review.md` holds
+the prompt. The ordering below assumes the accounting is sound and only the wiring is
+open, and that assumption has not been tested by anyone who did not make it. The
+building session's own critique is in `self-review-s04.md`, recorded as a diff target
+rather than as an assessment; its top finding (leases have no TTL and no reaper, so a
+missed terminal signal leaks capacity permanently) is a design hole rather than a wiring
+gap, and integrating the director hooks over it would make the leak reachable.
+
+Re-plan from the review. Do not resume the ordering below unrevised.
+
 ## Remaining work, in order
 
 ### 1. Adapter instantiation
