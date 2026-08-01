@@ -2,9 +2,10 @@
 
 Draft status: local rewrite of the capacity-ledger document from PR #2061 (snapshot at
 [inputs/flow-control-capacity-ledger-pr2061.md](inputs/flow-control-capacity-ledger-pr2061.md)),
-revised against the code assessment ([assessment.md](assessment.md)) and the H1
+revised against the code assessment ([assessment.md](assessment.md)), the H1
 experiment verdicts (rounds 1-3,
-[h1-aggregate-forecast/](h1-aggregate-forecast/README.md)). It lives on the
+[h1-aggregate-forecast/](h1-aggregate-forecast/README.md)), and the closed-form
+results in [theory.md](theory.md). It lives on the
 `capacity-ledger` exploration branch; citations into `explorations/` resolve there and
 need public homes before this text goes into an upstream PR. Code references are to
 `main` at `9a8c999f`.

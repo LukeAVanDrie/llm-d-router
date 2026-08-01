@@ -66,8 +66,7 @@ commit body ([STYLE.md](STYLE.md)).
    the phase-2 censoring preview; the BLIS re-score (L0.5).
 7. **Backlog.** L0 sensitivities from the protocol not yet run: noisy decode rates
    (estimated r with lognormal error, applied to all estimators alike) and
-   burst-correlated lengths (the lease-independence stress). Bernstein-bound note for
-   the conservative end of the dial (paper exercise).
+   burst-correlated lengths (the lease-independence stress).
    Small-pool (N = 10) regime treatment (MC quantiles throughout; Little deviations
    11-32% are expected time-average variance). Reads for the still-machine-read sources
    (PLP, remlen, UniBoost) if any claim comes to lean on them. Deployment threshold
