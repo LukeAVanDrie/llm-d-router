@@ -316,11 +316,20 @@ Event truth-up instead:
 - **Per scrape**: telemetry validates the roll-up and catches drift (translation error,
   missed events, the prefix-sharing gap); persistent per-endpoint discrepancy is
   surfaced as calibration error on the Translator rather than silently absorbed.
+- **At EPP restart**: ledger state is process-local and the deployment model has no
+  in-place upgrades, so a new process has no lease records for work admitted by its
+  predecessor. Scrape reconciliation carries that work as observed, unattributed
+  occupancy until it drains — the error direction is conservative (it suppresses
+  admission rather than enabling over-admission), and per-lease operations (eviction
+  sizing, victim selection) are simply unavailable for unattributed work. *(Open: the
+  rebuild sequence and how long unattributed occupancy typically persists.)*
 
 ### Telemetry prerequisites for the estimation track
 
-Two plumbing gaps block the stochastic layer's training data, and neither can be
-backfilled, so they are worth upstreaming ahead of everything else:
+Two plumbing gaps corrupt the stochastic layer's training stream in every process
+lifetime, and the exported observation record built on that stream — the only
+cross-restart history the design uses — cannot be backfilled, so they are worth
+upstreaming ahead of everything else:
 
 - **Termination cause is not observable at the plugin layer.** The stream-abort cleanup
   path forces `HandleResponseBody` with `EndOfStream=true` and no cause
@@ -425,20 +434,31 @@ Findings the design now rests on:
   length bias that defeats refit at long horizons, so mix distance must never be the
   sole trigger (RESULTS-3.md, DD).
 
-### Cold start
+### Cold start is the steady state
 
-The layer has no pretrained state and no history requirement. A fresh deployment boots
-as the deterministic ledger (the confidence dial's 100% default), acquires the
-degraded mode once a settled residual window exists (minutes of steady traffic, per
-the window rule above), and earns fitted curves stratum by stratum as completions
-accrue. Because the estimators are content-blind — they consume completion lengths and
-decode ages, never prompts, activations, or model internals — nothing couples them to
-a model family, tokenizer, or workload; every deployment learns its own curves in
-place. Value is monotone in data and correctness never depends on it. The telemetry
-prerequisites gate when this in-place clock starts, which is why they land first; no
-corpus is assembled offline and none could be shipped. History matters in exactly two
-places: the coverage evidence required before an operator moves the dial below 100%,
-and strata too rare to earn their own curves (next section).
+The layer has no pretrained state, no history requirement, and no persistence: all
+estimator state is process-local, and the EPP deployment model has no in-place
+upgrades, so every restart replays cold start. That is a design position, not a
+limitation to engineer around. A fresh process boots as the deterministic ledger (the
+confidence dial's 100% default), acquires the degraded mode once a settled residual
+window exists (minutes of steady traffic, per the window rule above), and earns fitted
+curves stratum by stratum as completions accrue — fast enough that restart-frequency
+amnesia costs minutes of yield, never correctness. Amnesia is also aligned with the
+drift posture: warm-starting from persisted fit parameters would reintroduce the
+frozen-fit failure the drift verdicts measured (a stale curve wrapped in fresh
+confidence), where a re-learned fit cannot be stale by construction. Because the
+estimators are content-blind — completion lengths and decode ages, never prompts,
+activations, or model internals — nothing couples them to a model family, tokenizer,
+or workload; every process learns its own curves in place.
+
+Two consequences follow. Strata too rare to reach the completion requirement within a
+process lifetime never earn their own curves and live on the credibility hierarchy
+permanently (next section). And the only history the design uses anywhere is exported
+observation — shadow-mode coverage metrics recorded outside the process — which
+survives restarts, is the evidence an operator needs before moving the dial below
+100%, and is the one record that cannot be backfilled; the telemetry prerequisites
+exist to make each process's live stream correct and that exported record trustworthy,
+not to assemble a corpus.
 
 ### Many workloads, one pool
 

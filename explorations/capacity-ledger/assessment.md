@@ -113,8 +113,10 @@ window under burst before deciding whether (b) is needed. Do not start with (c).
 ## Finding 4: two telemetry gaps block the estimation track and cannot be backfilled
 
 Severity: high for the stochastic-layer program, low implementation cost. These are the items
-worth upstreaming ahead of everything else, because the estimator's training data accrues only
-after they land.
+worth upstreaming ahead of everything else: without them every process lifetime's training
+stream is corrupted (aborts enter as short completions), and the exported observation record —
+the only history that survives EPP restarts, since estimator state is process-local with no
+in-place upgrades — cannot be backfilled.
 
 - Termination cause is not observable at the plugin layer. The stream-abort cleanup path forces
   `HandleResponseBody` with `EndOfStream=true` and no cause (`pkg/epp/handlers/server.go`,

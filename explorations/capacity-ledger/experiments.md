@@ -50,8 +50,10 @@ body ([STYLE.md](STYLE.md)).
    user's read, and on public homes for the exploration citations before any upstream
    PR.
 4. **Telemetry change (upstream).** Termination-cause enum and a streamed-token counter
-   (assessment finding 4); training-data accrual is the long pole and cannot be
-   backfilled. Waits on the user's go-ahead to prepare an upstream issue and PR.
+   (assessment finding 4); without them every process lifetime's training stream is
+   corrupted, and the exported observation record — the only history that survives EPP
+   restarts — cannot be backfilled. Waits on the user's go-ahead to prepare an
+   upstream issue and PR.
 5. **T2 / K3 admissions dominance.** Does arrival forecasting dominate length modeling
    for total-occupancy forecasts? Waits on the shared admissions forecaster and the
    oracle-arrivals ablation.
