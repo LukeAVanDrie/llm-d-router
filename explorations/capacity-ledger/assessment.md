@@ -157,22 +157,34 @@ rate and none completes", which requires no training data. The pre-registered ex
 `explorations/capacity-ledger/h1-aggregate-forecast/` (kill criteria committed before results,
 `eac07223`) decides:
 
-- H1 (complete, 2026-07-31): hazard curves vs deterministic growth, constant hazard, and
-  parametric fits, on aggregate occupancy quantiles at 1-10 s horizons. Outcome under the
-  pre-registered criteria (RESULTS.md): K1 killed the bucketed nonparametric machinery at
-  500 training observations (zero CI-gated gain over a censored lognormal; wider bounds in
-  R4 and no valid-coverage cells at all in R3, its two pre-declared favorable regimes); K2
-  passed robustly at t = 10 s (+30.1%, and +29.9% under the harsher VOID-as-zero rule of
-  amendment 6) and conditionally at t = 5 s (+14.5% as implemented, +7.3% and failing
-  under that rule), carried by the parametric estimators with conformal calibration. Two design-relevant emergent findings: calibration degrades with pool size
-  (at N = 1000 under heavy tails all fitted estimators went coverage-void while the oracle
-  held, so bias, not stochastic width, binds at scale), and the conformal wrapper was the
-  best valid mode almost everywhere. Consequence for the ledger document: the stochastic
-  layer's Directional label survives, but its mechanism sentence should read
-  "per-stratum parametric survival with censoring-aware fitting and conformal residual
-  calibration", not "empirical or Kaplan-Meier-style curves"; a two-component mixture fit
-  is the candidate for the one regime the nonparametric estimator won (latent bimodality
-  at scale).
+- H1 (two rounds, complete 2026-07-31): hazard curves vs deterministic growth, constant
+  hazard, parametric fits, and a two-component censored-EM mixture, on aggregate
+  occupancy quantiles at 1-10 s horizons. Round 1 (RESULTS.md) killed the bucketed
+  nonparametric machinery (K1) and passed the layer conditionally, but its harness had
+  three defects the round-2 diagnostics exposed: warm-up training sets were
+  length-truncated during pool fill, calibration residuals were drawn from the fill
+  transient, and capacity pilots were sized inside it. Round 2 (RESULTS-2.md) fixed the
+  harness and re-adjudicated everything under the original criteria. Outcome: K1' kills
+  B3 again on unbiased data (+0.0% CI-gated median over the censored lognormal, no width
+  win in its favorable regimes; 10x training data still leaves its best cell ~2 skill
+  points over the best parametric alternative), the B4 mixture also fails to earn a slot
+  (the R3/N=1000 prize it chased was a round-1 artifact that shrank from +22%/+49% to
+  +3%/+4%), and K2' passes at t in {2, 5, 10} s under both void-cell rules
+  (+6.8%/+15.4%/+19.8%), unconditionally superseding the round-1 conditional verdict at
+  5 s. The round-1 "bias binds at scale" emergent finding is superseded: with settled
+  training and calibration, fitted estimators are valid at N = 1000 and the censored
+  lognormal with conformal calibration sits essentially at the oracle ceiling in the
+  hard heavy-tail regime (R2/N=1000: +6.4% vs oracle +6.1% at 5 s). The new negative
+  result is drift (KD): under an abrupt or ramped mix shift at N = 1000 the fitted layer
+  either loses coverage entirely or, when a short rolling conformal window restores it,
+  underperforms rolling-conformal persistence — calibrated forecasting does not survive
+  drift, so drift must be detected (coverage canary) and met with the deterministic
+  bound, not forecast through. Consequence for the ledger document: the stochastic
+  layer's Directional label survives on the stationary evidence, its mechanism sentence
+  reads "per-stratum censored parametric survival with conformal residual calibration on
+  settled-pool residuals", and its operating envelope now carries three read-off rules:
+  no value at t = 1 s, calibration and sizing only from settled pools, and a drift
+  fallback path as a first-class design element.
 - H2 (next, if H1 survives): shadow-mode calibration inside the EPP against replayed and live
   traffic; the forecast gates nothing until quantile coverage holds.
 - H3 (last): closed-loop behavior when eviction censors the estimator's own training data
@@ -340,11 +352,10 @@ collapse or strengthen as work-table items resolve.
 | Footprint = measurement + max_tokens bound; prediction only as an aggregate discount | finding 5 | derived from the definitions |
 | Lease independence in the aggregate variance | H1 protocol | assumed; burst-correlated lengths untested |
 | Decode rate known per lease | H1 simulator choice | assumed; noisy-rate sensitivity untested |
-| Nonparametric hazard machinery earns its complexity | H1 K1 | false at 500 observations under stationarity |
-| A stochastic forecaster beats trivial baselines at 10 s | H1 K2 | measured, stationary synthetic regimes only; robust to VOID-cell handling |
-| The same at 5 s | H1 K2, amendment 6 | conditional: passes as implemented, fails under VOID-as-zero |
-| Calibration survives drift and pool scale | work table row 1 | open; the leading stochastic-layer risk |
-| Fitted-estimator bias, not stochastic width, binds at N=1000 heavy tails | H1 emergent finding | measured |
+| Nonparametric hazard machinery earns its complexity | H1 K1, K1' | false at ~500 unbiased observations under stationarity; 10x data does not change it; the B4 mixture is also unearned |
+| A stochastic forecaster beats trivial baselines at 5-10 s | H1 K2' | measured, both void-cell rules, corrected harness; t = 2 s also passes, t = 1 s does not; stationary synthetic regimes only |
+| Calibration survives pool scale | RESULTS-2.md question A | yes, given transient discipline: training and calibration residuals from settled pools; the round-1 N=1000 collapse was harness artifact |
+| Calibration survives drift | RESULTS-2.md KD | false, both scenarios: coverage lost outright, or validity restored by short rolling windows with negative skill vs rolling-conformal persistence; drift is a detected regime with a deterministic fallback |
 | Informative-censoring loop is governable | H3 design (alignment invariant, canary, governor) | open; late-stage by construction |
 | Prefix sharing breaks additivity in the conservative direction | finding 9 | direction derived; magnitude unmeasured until scrape reconciliation exists |
 | Multi-EPP posture | finding 9 | open |

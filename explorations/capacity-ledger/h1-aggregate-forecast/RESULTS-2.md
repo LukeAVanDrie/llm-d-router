@@ -166,25 +166,41 @@ tokens at W = 300).
 
 ### K1' inputs
 
+(`eval.run_grid --ns 100,1000`, steady warm-up, adaptive window, seeds 0-2; all gates
+passed: Little dev <= 4.6% per verdict-cell seed, pooled oracle coverage in band in all
+16 verdict cells. Resolved adaptive windows: R1 300 s, R2 660-900 s, R3 900-1080 s,
+R4 480 s.)
+
 | Quantity | Value |
 |---|---|
-| Median B3 improvement over best-of(B1, B2/B2c), verdict grid (CI-gated, non-significant counted 0) | |
-| B3 q95 width reduction, R3, N >= 100 (valid coverage only) | |
-| B3 q95 width reduction, R4, N >= 100 (valid coverage only) | |
+| Median B3 improvement over best-of(B1, B2/B2c), verdict grid (CI-gated, non-significant counted 0) | +0.0% |
+| B3 q95 width reduction, R3, N >= 100 (valid coverage only) | +2.8% |
+| B3 q95 width reduction, R4, N >= 100 (valid coverage only) | -1.7% (B3 wider) |
 
 ### K2' inputs (median improvement of best stochastic over best trivial)
 
+No verdict cell was void for the whole stochastic ladder, so the two rules coincide.
+
 | t (s) | Void-excluded | Void-as-zero | Threshold | Pass/Fail |
 |---|---|---|---|---|
-| 5 | | | 10% | |
-| 10 | | | 10% | |
+| 2 (context) | +6.8% | +6.8% | 5% | PASS |
+| 5 | +15.4% | +15.4% | 10% | PASS |
+| 10 | +19.8% | +19.8% | 10% | PASS |
+
+(t = 1 s remains a fail at +2.6% against its 5% threshold, as pre-registered-expected;
+t = 2 s, a round-1 expected-fail, passes under the corrected harness.)
 
 ### B4 at R3/N=1000 (skill vs best trivial, best valid mode)
 
 | t (s) | B3 | B4 | B4/B3 ratio | B4 valid where B2c valid? |
 |---|---|---|---|---|
-| 5 | | | | |
-| 10 | | | | |
+| 5 | +3.2% | +2.3% | 0.72 | yes, every verdict cell |
+| 10 | +4.1% | +2.6% | 0.64 | yes, every verdict cell |
+
+The prize itself shrank: round 1 recorded B3's R3/N=1000 edge as +22%/+49%; under the
+corrected harness it is +3.2%/+4.1%, because round 1's margin was measured against
+trivial baselines crippled by transient-window calibration. B4 tracks B2c within noise
+in every other cell.
 
 ### KD — drift (N = 1000, post-drift slice, best fitted (mode, window) vs best trivial)
 
@@ -200,12 +216,26 @@ oracle post-slice coverage in band.)
 
 ### Context: training size (~5000 vs ~500 completions, N = 1000)
 
-| Regime | B3 skill delta | B4 skill delta | B2c skill delta |
+Skill-point deltas at t = 5 / t = 10 s, derived by subtracting the two run summaries
+(`eval.run_grid --ns 1000 --warmup-completions 5000 --out-suffix=-train5000` minus the
+K1'/K2' run). One context-run gate flag: pooled oracle coverage at R4/t=10 was 0.929,
+marginally under the 0.93 band floor; no verdict rides on this run.
+
+| Regime | B3 delta | B4 delta | B2c delta |
 |---|---|---|---|
-| R1 | | | |
-| R2 | | | |
-| R3 | | | |
-| R4 | | | |
+| R1 | +1.0 / -0.6 | +0.2 / -1.1 | +0.3 / -0.8 |
+| R2 | +8.4 / +16.7 | -0.3 / +0.2 | -0.3 / +0.0 |
+| R3 | +0.7 / +3.6 | +1.3 / +3.0 | +0.2 / +1.5 |
+| R4 | -1.5 / +1.4 | -1.1 / +2.3 | -0.7 / +2.3 |
+
+Reading: the parametric fits are data-insensitive at 10x training (deltas within ~2
+points, indistinguishable from noise); B3 alone moves materially, recovering from
+negative to parity in R2 (+8.4/+16.7, its geometric-bucket tail was data-starved) and
+widening its R3 edge at 10 s (+4.1% to +7.7%). Even so, at 5000 completions B3's best
+cell beats the best simpler alternative by ~2 skill points (R3/t=10: B3 +7.7% vs B4
++5.6%) and still trails B2c in R2 (+8.6% vs +9.4%). B3's kill is partly data
+starvation, and repairing it with 10x data still leaves the machinery under the 10%
+materiality bar it was registered against.
 
 ## Verdicts
 
@@ -217,9 +247,31 @@ oracle post-slice coverage in band.)
   effective-samples hypothesis); truncation costs ~20% interval width but not coverage.
   Operational consequence: calibration residuals must come from a settled pool, and
   training from steady-state completions; neither requires a long window.
-- **K1':**
-- **K2':**
-- **B4:**
+- **K1': B3 stays KILLED, now on clean footing.** Both arms hold on unbiased training:
+  median CI-gated improvement +0.0% (< 10%), and no >= 10% valid-coverage width
+  reduction in either favorable regime (R3 +2.8%, R4 -1.7%). The round-1 kill's scope
+  defect is repaired: this is a verdict at ~500 unbiased observations under
+  stationarity.
+- **K2': PASS at t = 5 and 10 s under both void-cell rules** (+15.4% and +19.8%; no
+  stochastic-void verdict cells remain, so the rules coincide). This supersedes the
+  round-1 conditional verdict at t = 5 s in the layer's favor and removes the
+  amendment-6 conditioning. Two supersessions of round-1 emergent notes follow from the
+  same tables: the N=1000 heavy-tail coverage collapse (round-1 note 2) was harness
+  artifact, not estimator bias — every fitted estimator except B1 is valid at N = 1000
+  under the corrected harness; and the oracle-to-best-fitted gap (round-1 note 4) closes
+  at stationarity (R2/N=1000: B2 +6.4%/+9.4% vs oracle +6.1%/+10.6%), so the
+  stationary headroom is essentially captured by a censored lognormal with conformal
+  calibration.
+- **B4: fails its threshold; the reopen clause it guarded is moot.** B4 reaches 0.72 /
+  0.64 of B3's R3/N=1000 skill (< 0.75), which by the letter of the pre-registered rule
+  would reopen the nonparametric case. But that clause presumed the round-1 prize
+  (+22%/+49%); the corrected prize is +3.2%/+4.1%, below the 10% materiality bar that
+  K1' — the governing, first-registered criterion for estimator complexity — applies,
+  and K1' holds. Adjudication, recorded rather than silently resolved: neither B3 nor
+  B4 earns a slot beyond B2c; the residual latent-bimodality edge at R3/N=1000 is 1-2
+  points of pinball skill and does not pay for either estimator's surface. The
+  training-size context (B3 +7.7% at R3/t=10 on 5000 completions) does not change this:
+  still ~2 points over B4 and under the bar.
 - **KD: FAIL at both horizons, differently per scenario.** Under the abrupt shift no
   fitted mode reaches 0.90 post-shift coverage at N = 1000 at any rolling window (max
   0.803). Under the ramp, a 150 s rolling window restores validity (0.937/0.939) but

@@ -9,8 +9,11 @@ Pre-registration and verdicts: [h1-aggregate-forecast/RESULTS.md](h1-aggregate-f
 
 | Script | Question | What it found |
 |---|---|---|
-| `tests.py` | Are the harness statistics right? | Analytic oracle survival matches 10M-sample empirical CDFs in all four regimes (observed max error 3.8e-4; the committed gate asserts < 5e-3); censored lognormal MLE recovers (mu, sigma) under cap truncation where the naive fit does not (mu error 0.010 vs 0.251; committed gate asserts < 0.05); conformal coverage nominal on held-out gaussian residuals; normal-approx aggregation matches Monte Carlo mean/sd/q95 |
-| `eval.run_grid` | Do age-conditioned survival curves earn their complexity for aggregate forecasts (K1), and does any stochastic forecaster beat trivial baselines (K2)? | K1 killed the bucketed nonparametric estimator at 500 training observations: +0.0% CI-gated median gain over best-of(B1, B2/B2c), wider q95 bounds in R4 and no valid-coverage cells in R3, its two pre-declared favorable regimes. K2 passed robustly at t = 10 s (+30.1%; +29.9% under VOID-as-zero) and conditionally at t = 5 s (+14.5% as implemented; +7.3% and failing under VOID-as-zero, RESULTS.md amendment 6), failed at t <= 2 s as pre-registered-expected; the gain is carried by the censored parametric fit with conformal calibration. Emergent: at N = 1000 under heavy tails every fitted estimator went coverage-void while the oracle held 0.951 (see RESULTS.md note 2); the conformal mode was the best valid mode almost everywhere. Six amendments in RESULTS.md: four pre-run by git history, two post-hoc and labeled with whom they favor |
+| `tests.py` | Are the harness statistics right? | Analytic oracle survival matches 10M-sample empirical CDFs in all four regimes (observed max error 3.8e-4; the committed gate asserts < 5e-3); censored lognormal MLE recovers (mu, sigma) under cap truncation where the naive fit does not (mu error 0.010 vs 0.251; committed gate asserts < 0.05); conformal coverage nominal on held-out gaussian residuals; normal-approx aggregation matches Monte Carlo mean/sd/q95. Round 2 adds: B4 censored-EM recovers the R3-class mixture (w error < 0.02, survival error < 0.01 censored and not), rolling conformal provably uses no unrealized residuals, drift mixture and per-lease oracle exact, steady warm-up unbiased (train max 11192 vs legacy 723 at R2/N=1000) |
+| `eval.diag_training_bias` | Is the warm-up training set length-biased? | Legacy rule (collect from t = 0) truncates near r * t_warmup: R2/N=1000 training mean 184 vs true 756, max 723 against true q95 ~ 2989; R1/N=1000 max 272 vs q95 657. The steady rule (500 s burn-in) is unbiased. This defect motivated the round-2 re-adjudication (RESULTS-2.md) |
+| `eval.run_grid` | Do age-conditioned survival curves earn their complexity for aggregate forecasts (K1/K1'), and does any stochastic forecaster beat trivial baselines (K2/K2')? | Round 1 (RESULTS.md, legacy warm-up, fixed 300 s window): K1 killed B3 at 500 training observations; K2 passed at 10 s, conditionally at 5 s (amendment 6); N=1000 heavy-tail cells went coverage-void. Round 2 (RESULTS-2.md, steady warm-up, adaptive window, B4 in the ladder): the round-1 voids were harness artifacts (truncated training + transient-placed calibration + undersized pilots); with them fixed, K1' re-kills B3 on unbiased data (+0.0% median, no width win; 10x training still leaves it under the bar), K2' passes at t in {2, 5, 10} s under both void rules (+6.8%/+15.4%/+19.8%), B4 fails its 0.75 threshold against a prize that shrank to +3-4%, and B2c+conformal reaches the oracle ceiling at stationarity (R2/N=1000: +6.4% vs oracle +6.1% at 5 s) |
+| `eval.run_window_factorial` | Which mechanism collapsed R2/N=1000 in round 1: training truncation or calibration-window length? | Neither alone: window placement. Every steady-state-placed window is valid at every length (legacy 0.971-0.978 across W = 300-2400 s), and a 300 s post-transient window with unbiased training is valid too (confirmatory cell), so the round-1 collapse required truncated training AND a calibration window inside the pool-fill transient; either repair suffices. Truncation costs ~20% interval width, not coverage. Refutes the work-table effective-samples hypothesis |
+| `eval.run_drift` | Does parametric+conformal calibration survive drift at N = 1000 (KD)? | FAIL at both horizons, both scenarios. Abrupt 75% mix shift: no fitted mode recovers 0.90 post-shift coverage at any rolling window (max 0.803). Ramp: a 150 s rolling window restores validity (0.937/0.939) but skill vs rolling-conformal persistence is negative (-5.4%/-7.8%) — the adaptation value is in the conformal layer, and the stale fit hurts the point forecast it wraps. Consequence: drift is a detected regime (coverage canary, deterministic fallback), not a forecastable one |
 | `eval.plots` | (figures) | `results/skill_vs_horizon.png`, `results/coverage_width.png` from `results/cells.csv` |
 
 ## Work table
@@ -19,46 +22,40 @@ Ordered by decisiveness per cost; future sessions take work from the top unless 
 otherwise. A row re-earns its place at triage or is deleted with the reason in the commit
 body ([STYLE.md](STYLE.md)).
 
-1. **H1 drift extension (L0).** The top open risk in the stochastic layer: at N = 1000
-   every fitted estimator went coverage-void under heavy tails while the oracle held, so
-   bias binds exactly where multiplexing gains are largest, and every current result is
-   stationary. Add regime-drift scenarios and a conformal-window sweep (which also settles
-   the untested hypothesis that the R2/N=1000 collapse traces to the 300 s calibration
-   window holding ~10 effective samples at E[T] ~ 30 s, derived: R2 mean length ~1200
-   tokens at 40 tok/s). Pre-register criteria before running; this run also supersedes
-   the conditional K2 result at t = 5 s (RESULTS.md amendment 6). Waits on nothing.
-2. **Mixture-EM estimator.** Does a two-component lognormal mixture capture B3's only win
-   (R3/N=1000, t >= 5 s: +22%/+49%) with parametric degrees of freedom? Settles whether a
-   nonparametric revival is ever needed. Waits on nothing.
-3. **Training-size sensitivity.** Is B3's kill data-starvation? Context run (not verdict)
-   with warm-up extended to ~5000 completions; the verdict is pinned at ~500 (RESULTS.md
-   amendment 4). Waits on nothing; the cheapest row.
-4. **Source reads: `dro2026`, `tie2026`, `s3-line`.** Three claims the assessment leans
-   on stand at machine-read or recalled ([sources.md](sources.md)), and the positioning
-   narrative rests on the weakest of them. Waits on PDFs landing in the kept-texts directory.
-5. **Hold-placement design round.** Assessment finding 3: the decision that unblocks the
+1. **Hold-placement design round.** Assessment finding 3: the decision that unblocks the
    deterministic ledger skeleton. Waits on a design discussion.
-6. **Telemetry change (upstream).** Termination-cause enum and a streamed-token counter
+2. **Ledger-document revision.** Fold the assessment, the round-2 verdicts, and the read
+   sources into `docs/flow-control-capacity-ledger.md`: the stochastic mechanism sentence
+   (per-stratum censored parametric fit with conformal calibration; B3 and B4 both
+   unearned), the confidence dial with the read fractile rule, drift as a detected
+   regime (coverage canary, deterministic fallback, rolling-conformal-on-trivial as the
+   degraded mode), transient discipline (calibration residuals and capacity sizing only
+   from settled pools — the deployment analog of the round-2 harness amendments), the
+   horizon boundary (value at 2-10 s, none at 1 s), and the per-request-probability vs
+   point-prediction distinction. Waits on nothing.
+3. **Telemetry change (upstream).** Termination-cause enum and a streamed-token counter
    (assessment finding 4); training-data accrual is the long pole and cannot be
    backfilled. Waits on the user's go-ahead to prepare an upstream issue and PR.
-7. **T2 / K3 admissions dominance.** Does arrival forecasting dominate length modeling
+4. **T2 / K3 admissions dominance.** Does arrival forecasting dominate length modeling
    for total-occupancy forecasts? Waits on the shared admissions forecaster and the
    oracle-arrivals ablation.
-8. **Censoring preview (phase 2).** Degradation of censoring-aware fits under independent
+5. **Censoring preview (phase 2).** Degradation of censoring-aware fits under independent
    vs eviction-shaped censoring; flag threshold pre-registered in the protocol. Waits on
    the injectors.
-9. **BLIS re-score (L0.5).** Do the verdicts survive batching-coupled decode rates and
+6. **BLIS re-score (L0.5).** Do the verdicts survive batching-coupled decode rates and
    realistic arrivals? Waits on reading the BLIS API (`blis` in sources.md).
-10. **Ledger-document revision.** Fold the assessment and H1 verdicts into
-    `docs/flow-control-capacity-ledger.md`: the stochastic mechanism sentence, the
-    confidence dial, the new opens, and the per-request-probability vs point-prediction
-    distinction. Waits on rows 1-2 settling the mechanism.
-11. **Backlog.** L0 sensitivities from the protocol not yet run: noisy decode rates
-    (estimated r with lognormal error, applied to all estimators alike) and
-    burst-correlated lengths (the lease-independence stress). Engine-source verification
-    that the residency stocks and abort-on-disconnect behave as the resource model
-    assumes (currently recalled, per the assessment's standing table); precedes any EPP
-    wiring. Bernstein-bound note for the conservative end of the dial (paper exercise).
-    Credibility-theory shrinkage (gated on a nonparametric revival, itself gated on
-    row 2 failing). Small-pool (N = 10) regime treatment (MC quantiles throughout;
-    Little deviations 11-32% are expected time-average variance).
+7. **Drift-detection design.** KD failed both scenarios, so the fallback path needs a
+   trigger: which online signal detects calibration loss fastest (rolling coverage
+   deficit, residual-quantile shift, admission-mix distance), and at what threshold does
+   the ledger drop to the deterministic bound? A small harness extension can score
+   detectors on the existing DS/DR scenarios. Waits on nothing; feeds row 2's canary
+   sentence.
+8. **Backlog.** L0 sensitivities from the protocol not yet run: noisy decode rates
+   (estimated r with lognormal error, applied to all estimators alike) and
+   burst-correlated lengths (the lease-independence stress). Engine-source verification
+   that the residency stocks and abort-on-disconnect behave as the resource model
+   assumes (currently recalled, per the assessment's standing table); precedes any EPP
+   wiring. Bernstein-bound note for the conservative end of the dial (paper exercise).
+   Small-pool (N = 10) regime treatment (MC quantiles throughout; Little deviations
+   11-32% are expected time-average variance). Reads for the still-machine-read sources
+   (PLP, remlen, UniBoost) if any claim comes to lean on them.
