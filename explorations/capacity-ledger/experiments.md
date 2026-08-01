@@ -24,50 +24,50 @@ continuous refit under drift, drift-detection scoring).
 
 ## Work table
 
-Ordered by decisiveness per cost; future sessions take work from the top unless directed
-otherwise. A row re-earns its place at triage or is deleted with the reason in the commit
-body ([STYLE.md](STYLE.md)).
+Ordered by the working-prototype critical path, which runs through the EPP, not the
+harness: the L0 statistical program has answered its gating questions (rounds 1-3),
+and further refinement there is yield-tuning for a stage-4 layer whose stage-2/3
+consumer does not exist yet. Sessions take work from the top unless directed
+otherwise; the top rows are EPP-shaped (code, integration design against real files,
+source verification), and statistical rows are parked until a design question demands
+a number. A row re-earns its place at triage or is deleted with the reason in the
+commit body ([STYLE.md](STYLE.md)).
 
-1. **Censoring-aware refit under drift (KR follow-up).** KR's t = 10 s failure is
-   completion-stream length bias: in-flight long leases are exactly the observations the
-   trailing-completion fit is missing. Refitting on completions plus in-flight ages as
-   right-censored observations (the B2c/Tobit machinery, already committed and gated in
-   tests.py) removes that bias in principle and would also repair D-mix's lag. One
-   RESULTS-3 amendment or a short RESULTS-4; the harness needs only an in-flight-ages
-   feed into the refit epoch. If it restores t = 10 s native validity post-drift, the
-   re-admission rule in the drift posture simplifies to one horizon-blind sentence.
-   Waits on nothing.
-2. **Hold-placement prototype.** Assessment finding 3: the decision that unblocks the
-   deterministic ledger skeleton. The placement is flow-control-internal — the gate
-   consumes a ledger view in place of the saturation check, and the hold itself is
-   director-side (candidate (a)) — so the open part is empirical, not consensual: a
-   replay-harness prototype measuring the gate-to-hold window under burst, which
-   decides whether the two-stage hold (b) is ever needed.
-3. **Ledger-revision review and upstreaming.** The local rewrite is drafted at
-   [ledger-revision.md](ledger-revision.md) (mechanism sentence, confidence dial with
-   the read fractile rule, drift posture per RESULTS-3, transient discipline, horizon
-   boundary, per-request-probability vs point-prediction distinction). Waits on the
-   user's read, and on public homes for the exploration citations before any upstream
-   PR.
-4. **Telemetry change (upstream).** Termination-cause enum and a streamed-token counter
+1. **Engine-source verification.** The resource model's premises — block-pool and
+   `max_num_seqs` enforcement, abort-frees-on-disconnect, the shared per-iteration
+   token budget — are recalled, not verified, and every axis choice rests on them.
+   Read the engine scheduler/block-manager source, pin locators in sources.md, upgrade
+   the assessment's standing row. Cheap, precedes any EPP wiring. Waits on nothing.
+2. **Stage-2 skeleton in the EPP.** The working prototype's first half: extend
+   `InFlightLoadProducer` toward the dual ledger (lease record, KV axis held to EOS,
+   reclaiming state), the gate consuming a ledger view in place of the saturation
+   check in processor.go, and the director-side hold (candidate (a)) with its
+   rejection path. Includes the empirical question that used to be its own row: the
+   gate-to-hold window width under burst, measured in-repo (bench or replay), which
+   decides whether the two-stage hold (b) is ever needed. Grounding rule for the
+   session that takes this row: start from docs/architecture.md and the
+   director/processor code paths, map every ledger concept to an existing plugin seam
+   before writing new machinery.
+3. **Telemetry change (upstream).** Termination-cause enum and a streamed-token counter
    (assessment finding 4); without them every process lifetime's training stream is
    corrupted, and the exported observation record — the only history that survives EPP
    restarts — cannot be backfilled. Waits on the user's go-ahead to prepare an
    upstream issue and PR.
-5. **T2 / K3 admissions dominance.** Does arrival forecasting dominate length modeling
-   for total-occupancy forecasts? Waits on the shared admissions forecaster and the
-   oracle-arrivals ablation.
-6. **Censoring preview (phase 2).** Degradation of censoring-aware fits under independent
-   vs eviction-shaped censoring; flag threshold pre-registered in the protocol. Waits on
-   the injectors.
-7. **BLIS re-score (L0.5).** Do the verdicts survive batching-coupled decode rates and
-   realistic arrivals? Waits on reading the BLIS API (`blis` in sources.md).
-8. **Backlog.** L0 sensitivities from the protocol not yet run: noisy decode rates
+4. **Ledger-revision review and upstreaming.** The local rewrite is drafted at
+   [ledger-revision.md](ledger-revision.md). Waits on the user's read, a decision on
+   the PR #2061 document's fate, and public homes for the exploration citations.
+5. **H2 shadow mode.** Go port of the winning estimator/calibration pair,
+   differential-tested against the L0 reference; shadow forecast inside the EPP gating
+   nothing, coverage exported. Waits on rows 2-3.
+6. **Parked: stage-4 statistics.** Resume when H2 exists or a design question demands
+   a number, not before: censoring-aware refit under drift (KR's t = 10 s
+   completion-bias fix via in-flight ages as right-censored observations; would also
+   repair D-mix's lag and simplify the re-admission rule); T2/K3 admissions dominance;
+   the phase-2 censoring preview; the BLIS re-score (L0.5).
+7. **Backlog.** L0 sensitivities from the protocol not yet run: noisy decode rates
    (estimated r with lognormal error, applied to all estimators alike) and
-   burst-correlated lengths (the lease-independence stress). Engine-source verification
-   that the residency stocks, abort-on-disconnect, and the shared per-iteration token
-   budget (finding 2's premise) behave as the resource model assumes (currently
-   recalled, per the assessment's standing table); precedes any EPP wiring. Bernstein-bound note for the conservative end of the dial (paper exercise).
+   burst-correlated lengths (the lease-independence stress). Bernstein-bound note for
+   the conservative end of the dial (paper exercise).
    Small-pool (N = 10) regime treatment (MC quantiles throughout; Little deviations
    11-32% are expected time-average variance). Reads for the still-machine-read sources
    (PLP, remlen, UniBoost) if any claim comes to lean on them. Deployment threshold
