@@ -1,6 +1,6 @@
 {
   "_note": "Frozen synthetic regime parameters. Conventions kept mappable to inference-perf synthetic workload configs (input/output token distributions); real-trace calibration goes through inference-perf dataset loaders, not custom code here.",
-  "_standings": "Numbers rule (STYLE.md): every value in this file is a guess pending trace calibration. decode_rate, prompt and regime shape parameters are plausibility guesses; sim.dt_s, warmup_min_completions, and the window lengths are pre-registered conventions; target_utilization and drop_above_capacity_fraction are guesses. sim.steady_burn_in_s is derived (tail support / decode rate = 16384/40 = 410 s, rounded up; RESULTS-2.md). conformal.* are conventions (RESULTS-2.md). drift.* are conventions and guesses fixed before any drift run (RESULTS-2.md). Nothing here is measured.",
+  "_standings": "Numbers rule (STYLE.md): every value in this file is a guess pending trace calibration. decode_rate, prompt and regime shape parameters are plausibility guesses; sim.dt_s, warmup_min_completions, and the window lengths are pre-registered conventions; target_utilization and drop_above_capacity_fraction are guesses. sim.steady_burn_in_s is derived (tail support / decode rate = 16384/40 = 410 s, rounded up; RESULTS-2.md). conformal.* are conventions (RESULTS-2.md). drift.* are conventions and guesses fixed before any drift run (RESULTS-2.md). drift.refit.* and drift.detection.* are conventions and guesses fixed before any round-3 run (RESULTS-3.md). Nothing here is measured.",
   "decode_rate_tokens_per_s": 40.0,
   "prompt": { "dist": "lognormal", "median": 512, "sigma_log": 1.0, "min": 8, "max": 8192 },
   "regimes": {
@@ -51,6 +51,21 @@
     "ramp_over_eval_s": 600,
     "calibration_window_s": 600,
     "eval_window_s": 900,
-    "rolling_windows_s": [150, 300, 600]
+    "rolling_windows_s": [150, 300, 600],
+    "refit": {
+      "estimators": ["B1", "B2"],
+      "cadences_s": [30, 150, 600],
+      "trailing_completions": [500, 2000],
+      "min_fit_completions": 100,
+      "recovery_margin_points": 5
+    },
+    "detection": {
+      "monitored_horizon_s": 5,
+      "window_s": 150,
+      "window_sweep_s": [60, 300],
+      "min_window_samples": 20,
+      "stationary_seeds": [0, 1, 2, 3, 4, 5],
+      "fast_trigger_floor_s": 60
+    }
   }
 }
