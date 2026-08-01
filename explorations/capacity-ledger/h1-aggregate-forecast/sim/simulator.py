@@ -176,7 +176,9 @@ def run_cell(regime: str, target_n: int, seed: int, params: dict,
     eval_steps = int(eval_win / dt)
     warmup_max_steps = int(sim_p["warmup_max_s"] / dt)
     burn_in_steps = int(sim_p["steady_burn_in_s"] / dt) if warmup_rule == "steady" else 0
-    pilot_steps = int((200.0 + sim_p["calibration_window_s"]) / dt)
+    # Pilot settling must clear the fill transient (tail support / r), like calibration.
+    pilot_settle_steps = int(sim_p["pilot_settle_s"] / dt)
+    pilot_steps = pilot_settle_steps + int(sim_p["pilot_measure_s"] / dt)
     snap_every = int(round(sim_p["snapshot_every_s"] / dt))
 
     warm_done_step = None
@@ -221,7 +223,7 @@ def run_cell(regime: str, target_n: int, seed: int, params: dict,
 
         if capacity is None:
             # Pilot: measure occupancy after a settling period.
-            if step > pilot_steps // 2:
+            if step > pilot_settle_steps:
                 occ_accum.append(pool.occupancy())
             if step >= pilot_steps:
                 res.capacity = float(np.mean(occ_accum)) / sim_p["target_utilization"]

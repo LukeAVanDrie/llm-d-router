@@ -42,6 +42,17 @@ oracle q95 coverage per verdict cell in [0.93, 0.98]. Coverage floors carry over
 voids a cell for a mode, width comparisons need >= 0.93. Under drift the oracle is the
 per-lease component-true survival, so the gate applies unchanged.
 
+- **Pilot amendment (recorded after a first grid run failed its own Little gate, before
+  any verdict was adopted; all runs below are from the re-run).** Capacity pilots settle
+  `pilot_settle_s = 600` s and measure over the following `pilot_measure_s = 600` s
+  (previously ~250/250). The settling period must clear the same fill transient as
+  calibration (tail support / r = 410 s): the short pilot undersized capacity in tail
+  regimes, and with the round-2 eval window sitting post-transient, R2/N=100 dropped
+  6-10% of arrivals at the 0.95 C threshold and realized N fell 9-12% under target,
+  failing the pre-registered Little gate (first-run record: results are not adopted from
+  that run; the gate did its job). Uniform across all cells and estimators; beneficiary:
+  the harness gate itself.
+
 ## Questions and decision rules
 
 ### A — attribution of the R2/N=1000 collapse (factorial, no kill)
@@ -129,12 +140,29 @@ standing is data-starvation.
 
 ### A — attribution factorial (best fitted mode, seed-pooled cov95 / width95, t = 5 s)
 
+(`eval.run_window_factorial`, seeds 0-2, R2/N=1000; all windows are trailing slices of
+one 2400 s calibration window, so every slice sits in steady state.)
+
 | Warm-up | W = 300 | W = 600 | W = 1200 | W = 2400 |
 |---|---|---|---|---|
-| legacy | | | | |
-| steady | | | | |
+| legacy | 0.978 / 65772 (B2) | 0.971 / 65400 (B2) | 0.972 / 62847 (B2) | 0.973 / 64602 (B2) |
+| steady | 0.942 / 53156 (B2) | 0.954 / 56470 (B2) | 0.950 / 55295 (B2) | 0.952 / 54233 (B2) |
 
-Reading:
+Reading: neither pre-registered reading's premise held, and the reason is a design flaw
+in the factorial itself: trailing slices of one long calibration window confound window
+length with window placement, so every cell — including legacy/W=300 — sits in steady
+state and is valid. A confirmatory cell decomposes the mechanisms: steady warm-up with
+the same 300 s window placed immediately after warm-up (post-burn-in;
+`run_grid --ns 1000 --regimes R2 --calib-rule fixed`, results/summary-r2fixed300.txt) is
+also valid (B2 +1.4% skill at t = 5 s, pooled oracle coverage 0.967), while the round-1
+record — legacy warm-up, the same window length placed at ~10-310 s, inside the
+pool-fill transient — is void. Attribution: the round-1 collapse required both defects
+at once; either repair alone (unbiased training, or a calibration window outside the
+fill transient) restores validity. Window length is not the driver: 300 s post-transient
+windows hold ~10-15 effective samples in R2 and are valid everywhere observed, refuting
+the effective-samples hypothesis carried in the work table. Training truncation costs
+width, not validity: legacy widths run ~20% above steady at every W (65772 vs 53156
+tokens at W = 300).
 
 ### K1' inputs
 
@@ -160,12 +188,15 @@ Reading:
 
 ### KD — drift (N = 1000, post-drift slice, best fitted (mode, window) vs best trivial)
 
+(`eval.run_drift`, seeds 0-2; gates passed: Little dev <= 5.3% at N = 1000, per-lease
+oracle post-slice coverage in band.)
+
 | Scenario | t (s) | Best fitted cov95 | Skill vs trivial | Pass |
 |---|---|---|---|---|
-| DS | 5 | | | |
-| DS | 10 | | | |
-| DR | 5 | | | |
-| DR | 10 | | | |
+| DS | 5 | VOID (max cov 0.803) | - | FAIL |
+| DS | 10 | VOID (max cov 0.775) | - | FAIL |
+| DR | 5 | 0.937 (B2, rolling 150 s) | -5.4% vs B0 rolling 300 s | FAIL |
+| DR | 10 | 0.939 (B2, rolling 150 s) | -7.8% vs B0 rolling 300 s | FAIL |
 
 ### Context: training size (~5000 vs ~500 completions, N = 1000)
 
@@ -178,8 +209,24 @@ Reading:
 
 ## Verdicts
 
-- **A:**
+- **A: both pre-registered readings were mis-designed; the factorial answered a better
+  question.** The round-1 R2/N=1000 collapse required two defects at once — a
+  length-truncated training set AND a calibration window inside the pool-fill transient.
+  Either repair alone restores validity; window length was never the driver (300 s
+  post-transient windows are valid with ~10-15 effective samples, refuting the
+  effective-samples hypothesis); truncation costs ~20% interval width but not coverage.
+  Operational consequence: calibration residuals must come from a settled pool, and
+  training from steady-state completions; neither requires a long window.
 - **K1':**
 - **K2':**
 - **B4:**
-- **KD:**
+- **KD: FAIL at both horizons, differently per scenario.** Under the abrupt shift no
+  fitted mode reaches 0.90 post-shift coverage at N = 1000 at any rolling window (max
+  0.803). Under the ramp, a 150 s rolling window restores validity (0.937/0.939) but
+  the fitted layer's skill against rolling-conformal persistence is negative
+  (-5.4%/-7.8%): the adaptation value lives entirely in the conformal layer, and the
+  stale survival fit degrades the point forecast it wraps. Design consequence, as
+  pre-registered: calibrated forecasting cannot be assumed through drift at scale; the
+  ledger must detect drift (coverage canary) and fall back to the deterministic bound or
+  a governor, and the cheapest robust adaptation observed is rolling-conformal residuals
+  on a trivial point forecast, not refitting the survival model.

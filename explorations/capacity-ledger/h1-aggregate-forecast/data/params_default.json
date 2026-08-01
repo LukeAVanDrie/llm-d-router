@@ -31,6 +31,8 @@
     "warmup_min_completions": 500,
     "warmup_max_s": 5000,
     "steady_burn_in_s": 500,
+    "pilot_settle_s": 600,
+    "pilot_measure_s": 600,
     "calibration_window_s": 300,
     "eval_window_s": 600,
     "snapshot_every_s": 1.0
