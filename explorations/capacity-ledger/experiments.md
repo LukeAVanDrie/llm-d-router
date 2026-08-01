@@ -64,4 +64,8 @@ body ([STYLE.md](STYLE.md)).
    recalled, per the assessment's standing table); precedes any EPP wiring. Bernstein-bound note for the conservative end of the dial (paper exercise).
    Small-pool (N = 10) regime treatment (MC quantiles throughout; Little deviations
    11-32% are expected time-average variance). Reads for the still-machine-read sources
-   (PLP, remlen, UniBoost) if any claim comes to lean on them.
+   (PLP, remlen, UniBoost) if any claim comes to lean on them. Deployment threshold
+   setting for the canary: DD calibrated theta from stationary null runs the harness
+   can manufacture and a deployment cannot; the online analog (trailing quantiles of
+   the detector statistic during canary-quiet operation, or an operator-set false-alarm
+   budget) is an H2-design detail with no committed answer.
