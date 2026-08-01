@@ -24,7 +24,7 @@ not itself a proposal.
 | Hold-then-lease protocol | Change requested: hold placement conflicts with admission-time information ordering (finding 3) |
 | Endpoint and pool ledgers, dual admission check | Agree |
 | Reconciliation: event truth-up over filtering | Agree; two telemetry gaps block the estimation track (finding 4) |
-| Stochastic layer | Open: H1 complete — K1 killed the nonparametric machinery; K2 robust at 10 s, conditional at 5 s; H2/H3 pending (finding 5) |
+| Stochastic layer | Open: H1 rounds 1-2 complete — nonparametric machinery killed twice (K1, K1'); layer passes at 5-10 s under both void rules (K2'); drift verdict KD failed, so drift is a detected regime with a deterministic fallback; H2/H3 pending (finding 5) |
 | Tiered admission | Open: generalize to confidence-level knob (finding 7) |
 | Migration path (stage 2 grows from in-flight load accounting) | Agree; confirmed viable (finding 1) |
 | Multi-EPP posture | Open: absent from the document; needs a stated position (finding 9) |
@@ -65,8 +65,9 @@ Severity: medium (blocks the `Footprint` type definition). Concurs with the prio
 finding 1; re-derived independently.
 
 The engine enforces a per-iteration token budget shared between prefill chunks and decode
-steps. That budget is a service rate; no engine-enforced inventory of outstanding prefill
-tokens exists. A vector coordinate for prefill therefore has no unit for its limit, which the
+steps (recalled engine behavior; the standing table's engine-source verification item
+covers it). That budget is a service rate; no engine-enforced inventory of outstanding
+prefill tokens exists. A vector coordinate for prefill therefore has no unit for its limit, which the
 document itself flags ("limit's semantics and units undefined").
 
 The resolution is already running in production configuration: token-mode accounting
@@ -165,16 +166,19 @@ rate and none completes", which requires no training data. The pre-registered ex
   length-truncated during pool fill, calibration residuals were drawn from the fill
   transient, and capacity pilots were sized inside it. Round 2 (RESULTS-2.md) fixed the
   harness and re-adjudicated everything under the original criteria. Outcome: K1' kills
-  B3 again on unbiased data (+0.0% CI-gated median over the censored lognormal, no width
-  win in its favorable regimes; 10x training data still leaves its best cell ~2 skill
-  points over the best parametric alternative), the B4 mixture also fails to earn a slot
-  (the R3/N=1000 prize it chased was a round-1 artifact that shrank from +22%/+49% to
-  +3%/+4%), and K2' passes at t in {2, 5, 10} s under both void-cell rules
-  (+6.8%/+15.4%/+19.8%), unconditionally superseding the round-1 conditional verdict at
-  5 s. The round-1 "bias binds at scale" emergent finding is superseded: with settled
-  training and calibration, fitted estimators are valid at N = 1000 and the censored
-  lognormal with conformal calibration sits essentially at the oracle ceiling in the
-  hard heavy-tail regime (R2/N=1000: +6.4% vs oracle +6.1% at 5 s). The new negative
+  B3 again on unbiased data (+0.0% CI-gated median over the censored lognormal, and no
+  width reduction near the 10% bar in its favorable regimes: R3 +2.8%, R4 -1.7%; 10x
+  training data still leaves its best cell ~2 skill points over the best parametric
+  alternative), the B4 mixture also fails to earn a slot (the R3/N=1000 prize it chased
+  was a round-1 artifact that shrank from +22%/+49% to +3%/+4%), and K2' passes at its
+  verdict horizons t in {5, 10} s under both void-cell rules (+15.4%/+19.8%),
+  unconditionally superseding the round-1 conditional verdict at 5 s; the t = 2 s
+  context cells also clear their 5% threshold (+6.8%). The round-1 "bias binds at
+  scale" emergent finding is superseded: with settled training and calibration, fitted
+  estimators are valid at N = 1000 and the parametric lognormal with conformal
+  calibration (censoring-aware fitting is inert in the uncapped R2) sits essentially at
+  the oracle ceiling in the hard heavy-tail regime (R2/N=1000: +6.4% vs oracle +6.1% at
+  5 s). The new negative
   result is drift (KD): under an abrupt or ramped mix shift at N = 1000 the fitted layer
   either loses coverage entirely or, when a short rolling conformal window restores it,
   underperforms rolling-conformal persistence — calibrated forecasting does not survive
@@ -298,16 +302,17 @@ Repositories:
   retained only because phase-1 attribution needs fixed decode rates and an analytically known
   generating distribution (the oracle gate). Workload parameter conventions stay mappable to
   inference-perf's synthetic workload configs; no custom trace-format or download code.
-- L0.5: the same estimator ladder re-scored on IBM BLIS (discrete-event cluster simulator:
-  arrival, routing, queueing, batching, token generation, KV utilization; runs in seconds).
-  BLIS owns the load-coupled decode-rate and arrivals-realism questions the L0 simulator
-  deliberately excludes.
+- L0.5: the same estimator ladder re-scored on BLIS (a discrete-event cluster simulator
+  per its repository description; not yet read, `blis` in sources.md). BLIS owns the
+  load-coupled decode-rate and arrivals-realism questions the L0 simulator deliberately
+  excludes; its actual capability surface is confirmed at the read that precedes the
+  re-score.
 - L1: Go port of any surviving estimator, differential-tested against the L0 reference via
   fixed-seed golden files; replay harness and shadow-mode calibration inside the EPP.
 - L2: end-to-end through a real EPP: kubernetes-sigs/inference-perf for load generation and
   trace replay (its dataset loaders are also the day-2 path for calibrating L0 regimes against
-  Azure/ShareGPT-class traces), llm-d-inference-sim (OpenAI-compatible vLLM mock with latency
-  modeling and vLLM-subset metrics) as the backend.
+  Azure/ShareGPT-class traces), llm-d-inference-sim as the backend. Both tools'
+  capability descriptions are machine-read standing (sources.md).
 
 ## Field inventory
 
@@ -344,7 +349,7 @@ collapse or strengthen as work-table items resolve.
 |---|---|---|
 | Scalar-gauge defects motivate the ledger | finding 1; dispatchCycle, both detectors | verified in code |
 | Deterministic ledger grows from in-flight load accounting | finding 1; producer.go paths | verified in code |
-| Residency stocks (block pool, max_num_seqs) are engine-enforced, abort frees on disconnect | resource model's axis selection | recalled engine behavior; unverified against engine source this branch |
+| Residency stocks (block pool, max_num_seqs) are engine-enforced, abort frees on disconnect, prefill and decode share a per-iteration token budget | resource model's axis selection; finding 2's premise | recalled engine behavior; unverified against engine source this branch |
 | Prefill is a rate; the backlog gate is the existing token-mode accounting | finding 2 | derived; accounting verified in code |
 | Hold placement | finding 3 | open; candidates named, none validated |
 | Absolute KV telemetry exists; slots telemetry does not | finding 6; extractor factories | verified in code |
@@ -410,7 +415,7 @@ The nearest published work, and where this design differs:
 Unclaimed in this set: content-blind, age-conditioned survival estimation driving pool-scope
 (gateway) admission with revocation as the enforcement mechanism, and the informative-censoring
 feedback loop that revocation introduces into the estimator. For the read subset this is
-now verified rather than recalled: none of the six read papers is content-blind or
+checked against the texts rather than recalled: none of the six read papers is content-blind or
 age-conditioned (every predictor reads the prompt; TetriInfer's remaining-token
 arithmetic decrements a frozen arrival estimate rather than re-conditioning); the only
 pool-scope system among them admits everything, and the only revoking one revokes as

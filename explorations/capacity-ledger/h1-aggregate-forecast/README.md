@@ -1,8 +1,15 @@
 # H1: does age-conditioned survival modeling earn its complexity?
 
 Falsification experiment for the capacity ledger's stochastic layer
-(`docs/flow-control-capacity-ledger.md`). Pre-registered protocol; kill criteria live in
-[RESULTS.md](RESULTS.md) and are committed before any evaluation code produces numbers.
+(`docs/flow-control-capacity-ledger.md`, PR #2061). Pre-registered protocol; kill
+criteria live in [RESULTS.md](RESULTS.md) and are committed before any evaluation code
+produces numbers.
+
+This file is the round-1 protocol as registered. [RESULTS-2.md](RESULTS-2.md)
+re-adjudicates its verdicts under a corrected harness (steady warm-up, adaptive
+calibration window, settled pilots), adds the B4 mixture to the ladder, and extends
+scope to non-stationary regimes (drift scenarios, rolling conformal); where this file
+and RESULTS-2.md disagree on harness rules, RESULTS-2.md governs.
 
 ## Question
 
@@ -118,13 +125,18 @@ conventions.
 ## Layout
 
 ```
-README.md            this protocol
-RESULTS.md           pre-registered criteria + result tables (criteria committed first)
+README.md            this protocol (round 1)
+RESULTS.md           round-1 pre-registered criteria + result tables (criteria committed first)
+RESULTS-2.md         round-2 pre-registration and verdicts (harness amendments, drift)
 data/                params_default.json (frozen parameters; trace calibration goes
                      through inference-perf loaders, no scripts written here)
-sim/                 workloads.py (regime samplers), simulator.py (pool dynamics, sanity gates)
-estimators/          base.py (interface + aggregation), baselines.py, b3_km.py, conformal.py
-eval/                metrics.py, run_grid.py, bootstrap.py, plots.py
+sim/                 workloads.py (regime samplers, drift mixtures), simulator.py
+                     (pool dynamics, warm-up rules, sanity gates)
+estimators/          base.py (interface + aggregation), baselines.py, b3_km.py,
+                     mixture_em.py (B4), conformal.py (static + rolling)
+eval/                metrics.py, run_grid.py, run_window_factorial.py, run_drift.py,
+                     diag_training_bias.py, diag_drop_invariance.py, forecast_common.py,
+                     bootstrap.py, plots.py
 phase2/              deferred and unwritten: independent + informative censoring preview
 results/             gitignored
 .venv/               gitignored (python3 -m venv; numpy, scipy, matplotlib)

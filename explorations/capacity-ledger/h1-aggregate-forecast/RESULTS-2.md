@@ -1,9 +1,10 @@
 # H1 results, round 2 (pre-registered): corrected warm-up, calibration windows, drift
 
 Round-2 criteria for the H1 harness. As in [RESULTS.md](RESULTS.md), the commit that adds
-this file with empty result tables is the pre-registration record; criteria changes after
-that commit are amendments, dated relative to the runs by commit and stating whom they
-favor. Round-1 criteria, thresholds, and gate bands carry over unless restated here.
+this file with empty result tables (`91b58fa4`) is the pre-registration record; criteria
+changes after that commit are amendments, dated relative to the runs by commit and
+stating whom they favor. Round-1 criteria, thresholds, and gate bands carry over unless
+restated here.
 
 ## Motivating measurement: warm-up length truncation
 
@@ -20,7 +21,10 @@ where round 1 recorded coverage collapse. Round 2 fixes the harness, re-adjudica
 and K2 on unbiased training sets, and separates this mechanism from the
 calibration-window mechanism by a factorial (question A below).
 
-## Harness amendments (uniform, pre-registered before any round-2 run)
+## Harness amendments (uniform across all round-2 runs)
+
+The steady-warm-up and adaptive-window amendments precede every round-2 run
+(`91b58fa4`). The pilot amendment's ordering is recorded in its own bullet.
 
 - **Steady warm-up.** Training completions are collected only after a burn-in of
   `steady_burn_in_s = 500` s (derived: completions of length L cannot be observed before
@@ -34,8 +38,9 @@ calibration-window mechanism by a factorial (question A below).
   40 * mean(training lengths) / r, rounded up to 60 s). The 40 is a convention: with
   residual decorrelation time ~ E[T] = E[L]/r, W holds ~40 effective residual samples,
   i.e. ~2 expected q95 exceedances. The calibration window of the simulation equals W.
-  Round 1's fixed 300 s window held ~10 effective samples in R2 (derived in the round-1
-  work-table entry).
+  Round 1's fixed 300 s window held ~15 effective samples in R2 (derived: W / E[T] with
+  E[T] = 756 / 40 ~ 19 s, the true mean per the diagnostic's 200k-draw reference
+  sample).
 
 Sanity gates carry over: Little's-law deviation <= 10% on verdict cells; seed-pooled
 oracle q95 coverage per verdict cell in [0.93, 0.98]. Coverage floors carry over: < 0.90
@@ -51,7 +56,11 @@ per-lease component-true survival, so the gate applies unchanged.
   6-10% of arrivals at the 0.95 C threshold and realized N fell 9-12% under target,
   failing the pre-registered Little gate (first-run record: results are not adopted from
   that run; the gate did its job). Uniform across all cells and estimators; beneficiary:
-  the harness gate itself.
+  the harness gate itself. The A and KD tables were first filled from pre-amendment
+  runs; the re-runs under the resized pilots reproduced every reported number exactly,
+  because capacity enters the simulation only through the drop branch and no arrival is
+  dropped in those cells at either sizing (measured: `eval/diag_drop_invariance.py`,
+  zero drops across all A and KD verdict cells at both capacities).
 
 ## Questions and decision rules
 
@@ -151,25 +160,52 @@ one 2400 s calibration window, so every slice sits in steady state.)
 Reading: neither pre-registered reading's premise held, and the reason is a design flaw
 in the factorial itself: trailing slices of one long calibration window confound window
 length with window placement, so every cell — including legacy/W=300 — sits in steady
-state and is valid. A confirmatory cell decomposes the mechanisms: steady warm-up with
-the same 300 s window placed immediately after warm-up (post-burn-in;
+state and is valid. A confirmatory cell, added after the flaw was seen
+(post-registration; beneficiary: attribution clarity, it can only refine the mechanism
+story, not any kill verdict), decomposes further: steady warm-up with the same 300 s
+window placed immediately after warm-up (post-burn-in;
 `run_grid --ns 1000 --regimes R2 --calib-rule fixed`, results/summary-r2fixed300.txt) is
 also valid (B2 +1.4% skill at t = 5 s, pooled oracle coverage 0.967), while the round-1
 record — legacy warm-up, the same window length placed at ~10-310 s, inside the
-pool-fill transient — is void. Attribution: the round-1 collapse required both defects
-at once; either repair alone (unbiased training, or a calibration window outside the
-fill transient) restores validity. Window length is not the driver: 300 s post-transient
-windows hold ~10-15 effective samples in R2 and are valid everywhere observed, refuting
-the effective-samples hypothesis carried in the work table. Training truncation costs
-width, not validity: legacy widths run ~20% above steady at every W (65772 vs 53156
-tokens at W = 300).
+pool-fill transient — is void. Attribution: the transient-placed window is necessary to
+the collapse — repairing placement alone (legacy training, late window) restores
+validity. Whether repairing training alone would also suffice is untestable in this
+harness: the steady warm-up's burn-in forces every subsequent calibration window
+post-transient, so no unbiased-training/transient-window arm exists. Window length is
+not the driver: 300 s post-transient windows hold ~15 effective samples in R2 (derived
+in the adaptive-window amendment above) and are valid everywhere observed, refuting the
+effective-samples hypothesis. Training truncation costs width, not validity: legacy
+widths run 14-24% above steady across the sweep (65772 vs 53156 tokens at W = 300).
 
-### K1' inputs
+### T1 pinball@q95 skill vs best trivial — verdict cells
 
 (`eval.run_grid --ns 100,1000`, steady warm-up, adaptive window, seeds 0-2; all gates
 passed: Little dev <= 4.6% per verdict-cell seed, pooled oracle coverage in band in all
 16 verdict cells. Resolved adaptive windows: R1 300 s, R2 660-900 s, R3 900-1080 s,
-R4 480 s.)
+R4 480 s. * = paired 90% bootstrap CI excludes zero; VOID = no mode reached coverage
+0.90. Context horizons and the training-size run's full table are in the regenerable
+summaries.)
+
+| Regime | N | t (s) | B1 | B2/B2c | B3 | B4 | Oracle |
+|---|---|---|---|---|---|---|---|
+| R1 | 100 | 5 | +23.3%* | +27.3%* | +25.9%* | +25.6%* | +27.6%* |
+| R1 | 100 | 10 | +36.6%* | +41.5%* | +41.6%* | +40.6%* | +41.7%* |
+| R1 | 1000 | 5 | +33.9%* | +32.5%* | +32.1%* | +32.8%* | +33.0%* |
+| R1 | 1000 | 10 | +48.4%* | +47.0%* | +46.8%* | +47.3%* | +46.6%* |
+| R2 | 100 | 5 | VOID | +2.9%* | -1.4% | +2.4% | +1.7% |
+| R2 | 100 | 10 | VOID | +5.7%* | -7.0% | +5.3%* | +2.7% |
+| R2 | 1000 | 5 | -26.7% | +6.4%* | -2.2% | +6.2%* | +6.1%* |
+| R2 | 1000 | 10 | VOID | +9.4%* | -8.1% | +9.1%* | +10.6%* |
+| R3 | 100 | 5 | -4.5% | -1.6% | -0.4% | -1.7% | +3.0%* |
+| R3 | 100 | 10 | -2.6% | -1.0% | +3.5% | +0.8% | +3.3% |
+| R3 | 1000 | 5 | +0.1% | -1.2% | +3.2%* | +2.3% | +2.8% |
+| R3 | 1000 | 10 | -2.0% | -3.2% | +4.1%* | +2.6% | +3.0% |
+| R4 | 100 | 5 | +13.1%* | +24.8%* | +20.5%* | +24.4%* | +26.2%* |
+| R4 | 100 | 10 | +31.0%* | +39.3%* | +38.0%* | +39.6%* | +39.6%* |
+| R4 | 1000 | 5 | +11.4%* | +24.5%* | +22.1%* | +24.1%* | +26.5%* |
+| R4 | 1000 | 10 | +18.9%* | +30.2%* | +30.2%* | +30.2%* | +32.4%* |
+
+### K1' inputs
 
 | Quantity | Value |
 |---|---|
@@ -230,23 +266,25 @@ marginally under the 0.93 band floor; no verdict rides on this run.
 
 Reading: the parametric fits are data-insensitive at 10x training (deltas within ~2
 points, indistinguishable from noise); B3 alone moves materially, recovering from
-negative to parity in R2 (+8.4/+16.7, its geometric-bucket tail was data-starved) and
-widening its R3 edge at 10 s (+4.1% to +7.7%). Even so, at 5000 completions B3's best
-cell beats the best simpler alternative by ~2 skill points (R3/t=10: B3 +7.7% vs B4
-+5.6%) and still trails B2c in R2 (+8.6% vs +9.4%). B3's kill is partly data
+negative to parity in R2 (+8.4/+16.7 from the verdict-table bases above, its
+geometric-bucket tail was data-starved) and widening its R3 edge at 10 s (+4.1% to
++7.7%). Even so, at 5000 completions B3's best cell beats the best simpler alternative
+by ~2 skill points (R3/t=10: B3 +7.7% vs B4 +5.6%) and still trails B2/B2c in R2 at
+10 s (+8.6% vs +9.4%, from the training-size run's summary). B3's kill is partly data
 starvation, and repairing it with 10x data still leaves the machinery under the 10%
 materiality bar it was registered against.
 
 ## Verdicts
 
 - **A: both pre-registered readings were mis-designed; the factorial answered a better
-  question.** The round-1 R2/N=1000 collapse required two defects at once — a
-  length-truncated training set AND a calibration window inside the pool-fill transient.
-  Either repair alone restores validity; window length was never the driver (300 s
-  post-transient windows are valid with ~10-15 effective samples, refuting the
-  effective-samples hypothesis); truncation costs ~20% interval width but not coverage.
-  Operational consequence: calibration residuals must come from a settled pool, and
-  training from steady-state completions; neither requires a long window.
+  question.** The round-1 R2/N=1000 collapse hinges on the calibration window sitting in
+  the pool-fill transient: repairing placement alone restores validity (legacy training,
+  late window), the training-only arm is untestable by construction, and window length
+  was never the driver (300 s post-transient windows are valid with ~15 effective
+  samples, refuting the effective-samples hypothesis); truncation costs 14-24% interval
+  width but not coverage. Operational consequence: calibration residuals must come from
+  a settled pool, and training from steady-state completions; neither requires a long
+  window.
 - **K1': B3 stays KILLED, now on clean footing.** Both arms hold on unbiased training:
   median CI-gated improvement +0.0% (< 10%), and no >= 10% valid-coverage width
   reduction in either favorable regime (R3 +2.8%, R4 -1.7%). The round-1 kill's scope
@@ -271,7 +309,8 @@ materiality bar it was registered against.
   B4 earns a slot beyond B2c; the residual latent-bimodality edge at R3/N=1000 is 1-2
   points of pinball skill and does not pay for either estimator's surface. The
   training-size context (B3 +7.7% at R3/t=10 on 5000 completions) does not change this:
-  still ~2 points over B4 and under the bar.
+  still ~2 points over B4 and under the bar. Beneficiary of the adjudication: the kill
+  and simplicity — recorded so the direction is explicit.
 - **KD: FAIL at both horizons, differently per scenario.** Under the abrupt shift no
   fitted mode reaches 0.90 post-shift coverage at N = 1000 at any rolling window (max
   0.803). Under the ramp, a 150 s rolling window restores validity (0.937/0.939) but
