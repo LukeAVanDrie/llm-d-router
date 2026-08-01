@@ -34,8 +34,9 @@ against a gauge. Prefill compute, which is a rate rather than a stock, is govern
 backlog gate beside the ledger, not by a vector coordinate.
 
 The engine's own scheduler already runs this accounting model inside each replica
-(recalled engine behavior; the resource model section carries the verification
-obligation). This design raises it to pool scope, the one place the engine cannot.
+(verified against engine source at vLLM v0.26.0; locators in the exploration's
+sources.md, `vllm-src`). This design raises it to pool scope, the one place the engine
+cannot.
 
 The design also carries the QoS story: tiers are admission against different confidence
 levels of the same ledger. The operator tunable is a one-sided confidence level on
@@ -97,8 +98,15 @@ KV.
 
 The engine-side premises here — that the block pool and `max_num_seqs` are
 engine-enforced stocks, that abort frees on disconnect, and that prefill and decode
-share a per-iteration token budget — are recalled engine behavior, not yet verified
-against engine source; that verification precedes any EPP wiring.
+share a per-iteration token budget — are verified against engine source at vLLM
+v0.26.0 (locators in sources.md, `vllm-src`). Three qualifications from that read:
+`max_num_seqs` bounds concurrently scheduled sequences per step, not admission — the
+engine-side waiting queue is unbounded, so the slots stock is enforced at scheduling
+time; the engine holds new admissions to a stricter bar than decode growth (a
+watermark reserve applies only to waiting and preempted requests, and an optional
+full-sequence fit check exists as an engine-local admission gate); and pool exhaustion
+during decode is enforced by preemption-with-recompute, which is the engine-side
+backstop this design's guaranteed tier leans on.
 
 ### Prefill is a rate, not a stock
 
@@ -311,9 +319,13 @@ Event truth-up instead:
 - **At EOS**: actual output length is known; the lease releases its committed footprint
   exactly (zero-sum), and the prediction error feeds the predictor, not the ledger.
 - **At abort/eviction**: the revocation event marks the lease reclaiming; engine
-  acknowledgment (completion/abort counters, block counts) retires it. *(Open: engines
-  count aborts and natural completions in different metrics; the acknowledgment channel
-  must include both or reclaiming entries stall.)*
+  acknowledgment (completion/abort counters, block counts) retires it. In vLLM both
+  outcomes land in one counter under a `finished_reason` label whose values include
+  abort (sources.md `vllm-src`), so the acknowledgment channel is a single labeled
+  metric there; equivalent coverage in SGLang and TRT-LLM is unchecked. The engine
+  source also confirms the reclaiming state models real lag, not just scrape delay:
+  block frees are deferred while an in-flight step may still write the blocks, and
+  P/D KV-transfer connectors can delay them further.
 - **Per scrape**: telemetry validates the roll-up and catches drift (translation error,
   missed events, the prefix-sharing gap); persistent per-endpoint discrepancy is
   surfaced as calibration error on the Translator rather than silently absorbed.

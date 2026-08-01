@@ -221,8 +221,8 @@ independence alone. This absorbs the field inventory's "Bernstein-bound note" it
 | Lease independence | Prop 2, 3, 4, 11 | burst-correlated lengths | Theorem 5 (conformal validity survives); L0 backlog sensitivity; BLIS re-score |
 | Fixed known decode rate r | the target X(t) itself | load-coupled batching | BLIS re-score (L0.5); engine co-design telemetry |
 | Residual exchangeability over time | Theorem 5 | any distribution shift (Prop 6) | canary + fallback (DD, KR); stratification for labeled shifts |
-| Output side booked at an enforced ceiling | Prop 8 | engines not enforcing cap | engine-source verification (work table row 1) |
-| Work-conserving prefill at measurable mu_p | Prop 9 | scheduler priorities preempting prefill | engine-source verification |
+| Output side booked at an enforced ceiling | Prop 8 | engines not enforcing cap | verified in vLLM source: generation stops at `max_tokens` (`v1/core/sched/utils.py:114-116`, finish reason "length"; sources.md `vllm-src`) |
+| Work-conserving prefill at measurable mu_p | Prop 9 | scheduler priorities preempting prefill | the break is live in source: running requests draw the step budget before new prefills, and DP prefill balancing defers prefill chunks on throttled steps (`vllm-src`); covered because mu_p is measured from telemetry, so deprioritization lowers the measured rate rather than falsifying the bound — but a mu_p measured under decode-light load overstates decode-heavy service, so the measurement window must track load |
 | Stationarity within stratum | everything statistical | within-stratum drift | KD/KR/DD verdicts; the operating contract |
 
 The table is the theory-side twin of the assessment's standing table: the design's

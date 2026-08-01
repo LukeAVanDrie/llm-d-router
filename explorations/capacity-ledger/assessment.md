@@ -65,8 +65,8 @@ Severity: medium (blocks the `Footprint` type definition). Concurs with the prio
 finding 1; re-derived independently.
 
 The engine enforces a per-iteration token budget shared between prefill chunks and decode
-steps (recalled engine behavior; the standing table's engine-source verification item
-covers it). That budget is a service rate; no engine-enforced inventory of outstanding
+steps (verified against engine source: a single per-step `token_budget` is drawn down by
+both loops; sources.md `vllm-src`). That budget is a service rate; no engine-enforced inventory of outstanding
 prefill tokens exists. A vector coordinate for prefill therefore has no unit for its limit, which the
 document itself flags ("limit's semantics and units undefined").
 
@@ -420,7 +420,7 @@ collapse or strengthen as work-table items resolve.
 |---|---|---|
 | Scalar-gauge defects motivate the ledger | finding 1; dispatchCycle, both detectors | verified in code |
 | Deterministic ledger grows from in-flight load accounting | finding 1; producer.go paths | verified in code |
-| Residency stocks (block pool, max_num_seqs) are engine-enforced, abort frees on disconnect, prefill and decode share a per-iteration token budget | resource model's axis selection; finding 2's premise | recalled engine behavior; unverified against engine source this branch |
+| Residency stocks (block pool, max_num_seqs) are engine-enforced, abort frees on disconnect, prefill and decode share a per-iteration token budget | resource model's axis selection; finding 2's premise | verified against engine source at vLLM v0.26.0, locators in sources.md (`vllm-src`); the max_num_seqs limit bounds concurrent scheduled sequences per step, not admission or queue depth |
 | Prefill is a rate; the backlog gate is the existing token-mode accounting | finding 2 | derived; accounting verified in code |
 | Hold placement | finding 3 | open; candidates named, none validated |
 | Absolute KV telemetry exists; slots telemetry does not | finding 6; extractor factories | verified in code |
