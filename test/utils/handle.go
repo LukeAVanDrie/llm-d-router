@@ -22,6 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/capacity"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
@@ -30,6 +31,7 @@ type testHandle struct {
 	ctx context.Context
 	plugin.HandlePlugins
 	metricsRecorder plugin.MetricsRecorder
+	capacityLedger  capacity.Ledger
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -43,6 +45,10 @@ func (h *testHandle) PodList() []types.NamespacedName {
 
 func (h *testHandle) Metrics() plugin.MetricsRecorder {
 	return h.metricsRecorder
+}
+
+func (h *testHandle) CapacityLedger() capacity.Ledger {
+	return h.capacityLedger
 }
 
 type testHandlePlugins struct {
@@ -70,11 +76,18 @@ func (h *testHandlePlugins) GetAllPluginsWithNames() map[string]plugin.Plugin {
 }
 
 func NewTestHandle(ctx context.Context) plugin.Handle {
+	return NewTestHandleWithCapacity(ctx, nil)
+}
+
+// NewTestHandleWithCapacity builds a handle publishing the given capacity ledger
+// read view. A nil reader models a build with flow control disabled.
+func NewTestHandleWithCapacity(ctx context.Context, reader capacity.Ledger) plugin.Handle {
 	return &testHandle{
 		ctx: ctx,
 		HandlePlugins: &testHandlePlugins{
 			plugins: map[string]plugin.Plugin{},
 		},
 		metricsRecorder: prometheus.NewRegistry(),
+		capacityLedger:  reader,
 	}
 }

@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -56,9 +57,12 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/contracts"
 	fccontroller "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/controller"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/ledger"
 	fcregistry "github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/capacity"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	attrcapacity "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/capacity"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrgpu "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/gpu"
 	attrlatency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/latency"
@@ -67,6 +71,7 @@ import (
 	attrsession "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/session"
 	attrtopology "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/topology"
 	discoveryfile "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/discovery/file"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/capacityledger"
 	extdcgm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/dcgm"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	extmodels "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/models"
@@ -167,6 +172,10 @@ type Runner struct {
 	parserRegistry       *handlers.ParserRegistry
 	dlRuntime            *datalayer.Runtime
 	PluginHandle         fwkplugin.Handle
+	// capacityLedger is the pool capacity accounting owned by flow control. It is
+	// constructed ahead of plugin instantiation so factories can reach its read
+	// view on the handle, and is nil when the flow control gate is off.
+	capacityLedger *ledger.PoolLedger
 	// rawConfig caches the result of parseConfigurationPhaseOne.
 	rawConfig *configapi.EndpointPickerConfig
 
@@ -619,6 +628,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.RegisterAsDefaultProducer(tokenizer.PluginType, tokenizer.PluginFactory, tokenizer.TokenizedPromptDataKey)
 	fwkplugin.Register(tokenizer.LegacyPluginType, tokenizer.LegacyPluginFactory) //nolint:staticcheck // intentional: keep backward compatibility
 	fwkplugin.RegisterAsDefaultProducer(sessionid.SessionIDProducerType, sessionid.Factory, attrsession.SessionIDDataKey)
+	fwkplugin.RegisterAsDefaultProducer(capacityledger.CapacityLedgerAdapterType, capacityledger.AdapterFactory, attrcapacity.AvailableCapacityDataKey)
 
 	// Latency predictor plugins
 	fwkplugin.Register(latencyslo.LatencyAdmissionPluginType, latencyslo.LatencyAdmissionFactory)
@@ -712,10 +722,28 @@ func makePodListFunc(ds datastore.Datastore) func() []types.NamespacedName {
 	}
 }
 
+// capacityLedgerView converts an optional ledger to its plugin-visible view
+// without producing a non-nil interface wrapping a nil pointer, which would
+// defeat the nil check that tells a plugin no ledger exists.
+func capacityLedgerView(l *ledger.PoolLedger) capacity.Ledger {
+	if l == nil {
+		return nil
+	}
+	return l
+}
+
 func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *configapi.EndpointPickerConfig, ds datastore.Datastore) (*config.Config, error) {
 	logger := log.FromContext(ctx)
 
-	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds), fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry))
+	// The ledger predates the parsed flow control config, so it takes the accounting
+	// defaults here; the gate is the only input available this early.
+	if r.featureGates[flowcontrol.FeatureGate] {
+		r.capacityLedger = ledger.NewPoolLedger(clock.RealClock{}, ledger.TokenTranslator{}, ledger.DefaultConfig())
+	}
+
+	handle := fwkplugin.NewEppHandle(ctx, makePodListFunc(ds),
+		fwkplugin.WithMetricsRecorder(ctrlmetrics.Registry),
+		fwkplugin.WithCapacityLedger(capacityLedgerView(r.capacityLedger)))
 	r.PluginHandle = handle
 	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)
 

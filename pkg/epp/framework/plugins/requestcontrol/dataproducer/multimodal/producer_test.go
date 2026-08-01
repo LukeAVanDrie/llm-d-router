@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/capacity"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
@@ -229,6 +230,10 @@ func (h *testHandle) GetAllPlugins() []plugin.Plugin {
 }
 
 func (h *testHandle) GetAllPluginsWithNames() map[string]plugin.Plugin {
+	return nil
+}
+
+func (h *testHandle) CapacityLedger() capacity.Ledger {
 	return nil
 }
 

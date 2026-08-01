@@ -11,6 +11,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/capacity"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -29,6 +30,10 @@ type fakeHandle struct {
 
 func newFakeHandle(ctx context.Context) *fakeHandle {
 	return &fakeHandle{ctx: ctx, plugins: map[string]plugin.Plugin{}}
+}
+
+func (h *fakeHandle) CapacityLedger() capacity.Ledger {
+	return nil
 }
 
 func (h *fakeHandle) Context() context.Context {

@@ -21,6 +21,8 @@ import (
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/capacity"
 )
 
 // Handle provides plugins a set of standard data and tools to work with
@@ -36,6 +38,12 @@ type Handle interface {
 	// Metrics returns a recorder plugins can use to register metrics. It may return
 	// nil when no recorder is configured.
 	Metrics() MetricsRecorder
+
+	// CapacityLedger returns the plugin-visible view of the pool capacity ledger.
+	// It returns nil when flow control is disabled and no ledger exists, so a
+	// plugin that requires capacity accounting must fail at construction rather
+	// than silently reading a pool it cannot see.
+	CapacityLedger() capacity.Ledger
 }
 
 // HandlePlugins defines a set of APIs to work with instantiated plugins
@@ -62,6 +70,7 @@ type eppHandle struct {
 	HandlePlugins
 	podList         PodListFunc
 	metricsRecorder MetricsRecorder
+	capacityLedger  capacity.Ledger
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -111,6 +120,11 @@ func (h *eppHandle) Metrics() MetricsRecorder {
 	return h.metricsRecorder
 }
 
+// CapacityLedger returns the plugin-visible capacity ledger view.
+func (h *eppHandle) CapacityLedger() capacity.Ledger {
+	return h.capacityLedger
+}
+
 // HandleOption configures an eppHandle constructed via NewEppHandle.
 type HandleOption func(*eppHandle)
 
@@ -120,6 +134,16 @@ func WithMetricsRecorder(recorder MetricsRecorder) HandleOption {
 	return func(h *eppHandle) {
 		if recorder != nil {
 			h.metricsRecorder = recorder
+		}
+	}
+}
+
+// WithCapacityLedger sets the capacity ledger view published to plugins. A nil
+// ledger is ignored.
+func WithCapacityLedger(l capacity.Ledger) HandleOption {
+	return func(h *eppHandle) {
+		if l != nil {
+			h.capacityLedger = l
 		}
 	}
 }

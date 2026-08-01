@@ -14,10 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package ledger implements the capacity ledger: pool-scope accounting of the two
-// engine-enforced residency stocks (KV tokens and sequence slots) as a two-phase
-// hold-then-lease reservation protocol over per-endpoint ledgers that roll up to a
-// pool ledger.
+// Package ledger implements the capacity ledger: pool-scope accounting of the
+// stocks a request occupies (KV residency, prefill backlog, sequence slots) as a
+// two-phase hold-then-lease reservation protocol over per-endpoint ledgers that
+// roll up to a pool ledger.
 //
 // The hold is the only operation that can refuse. Commit, Release, Revoke, and
 // Retire record facts about requests that are already in flight; a ledger that
@@ -27,14 +27,21 @@ package ledger
 
 import (
 	"errors"
-	"fmt"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/capacity"
+)
+
+// Footprint and Reader are aliased from the capacity vocabulary so the plugin
+// handle can publish a read view without importing flow control.
+type (
+	Footprint        = capacity.Footprint
+	Reader           = capacity.Reader
+	EndpointCapacity = capacity.EndpointCapacity
 )
 
 var (
-	// ErrUnderflow reports a Footprint subtraction that would go negative. It is
-	// surfaced as ledger corruption: correctness comes from zero-sum discipline (a
-	// lease releases exactly what it committed), so underflow is never clamped.
-	ErrUnderflow = errors.New("footprint underflow")
+	// ErrUnderflow is re-exported so callers match on a single sentinel.
+	ErrUnderflow = capacity.ErrUnderflow
 
 	// ErrPoolSaturated reports that the pool-wide aggregate check failed.
 	ErrPoolSaturated = errors.New("pool capacity exhausted")
@@ -56,53 +63,6 @@ var (
 	// hold. Release treats it as an idempotent no-op; Revoke and Retire surface it.
 	ErrLeaseNotFound = errors.New("lease not found")
 )
-
-// Footprint is the hardware-agnostic residency claim of one request. Pool-level
-// admission reasons exclusively in these units.
-type Footprint struct {
-	// KVTokens is the block-pool residency held for the whole request lifetime.
-	KVTokens int64
-	// PrefillTokens is the prompt backlog: tokens admitted but not yet prefilled.
-	// It is released at first token rather than at end of stream, so it is a
-	// transient stock that the two lifetime-scoped axes cannot express.
-	PrefillTokens int64
-	// Slots is the concurrent-sequence claim.
-	Slots int64
-}
-
-// Add returns the coordinate-wise sum.
-func (f Footprint) Add(o Footprint) Footprint {
-	return Footprint{
-		KVTokens:      f.KVTokens + o.KVTokens,
-		PrefillTokens: f.PrefillTokens + o.PrefillTokens,
-		Slots:         f.Slots + o.Slots,
-	}
-}
-
-// Sub returns the coordinate-wise difference. Underflow in any dimension returns
-// ErrUnderflow; the result is not usable on error.
-func (f Footprint) Sub(o Footprint) (Footprint, error) {
-	r := Footprint{
-		KVTokens:      f.KVTokens - o.KVTokens,
-		PrefillTokens: f.PrefillTokens - o.PrefillTokens,
-		Slots:         f.Slots - o.Slots,
-	}
-	if r.KVTokens < 0 || r.PrefillTokens < 0 || r.Slots < 0 {
-		return Footprint{}, fmt.Errorf("%w: %v - %v", ErrUnderflow, f, o)
-	}
-	return r, nil
-}
-
-// Fits reports whether f fits within avail in every dimension.
-func (f Footprint) Fits(avail Footprint) bool {
-	return f.KVTokens <= avail.KVTokens &&
-		f.PrefillTokens <= avail.PrefillTokens &&
-		f.Slots <= avail.Slots
-}
-
-func (f Footprint) String() string {
-	return fmt.Sprintf("{kv:%d prefill:%d slots:%d}", f.KVTokens, f.PrefillTokens, f.Slots)
-}
 
 // GatedAxes selects which residency axes carry admission authority. An axis that
 // is not gated is booked, rolled up, and exported, but never refuses a hold.

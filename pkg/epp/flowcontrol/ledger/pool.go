@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"k8s.io/utils/clock"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/capacity"
 )
 
 // defaultHoldTTL bounds the scheduling window a hold covers. Guess: the window
@@ -80,27 +82,6 @@ type CommitOutcome struct {
 	// holds a pessimistic bound that the commit truths down, so this is an
 	// assertion on the translation, not a condition the protocol expects.
 	Escalated bool
-}
-
-// EndpointCapacity is one endpoint's scraped capacity. It carries only the KV
-// axis: the slots and prefill limits are uniform configuration, so the ledger
-// reads them from Config rather than restamping them per endpoint per event.
-type EndpointCapacity struct {
-	ID string
-	// KVTokens is the block-pool capacity in tokens: CacheNumBlocks * CacheBlockSize.
-	KVTokens        int64
-	BlockSizeTokens int64
-}
-
-// Reader is the read-only view of the ledger published to plugins through the
-// plugin handle. Scorers and filters observe capacity; only flow control, which
-// owns the concrete ledger, may reserve or book against it.
-type Reader interface {
-	// EndpointAvailable reports unclaimed capacity on one endpoint. An unknown or
-	// draining endpoint reports zero.
-	EndpointAvailable(id string) Footprint
-	// Saturation is the pool-wide gated utilization in [0,1].
-	Saturation() float64
 }
 
 // EndpointSnapshot is a point-in-time logical-unit view of one endpoint ledger.
@@ -209,7 +190,7 @@ type PoolLedger struct {
 	limits    Footprint // sum over non-draining endpoint limits
 }
 
-var _ Reader = (*PoolLedger)(nil)
+var _ capacity.Ledger = (*PoolLedger)(nil)
 
 // NewPoolLedger creates an empty pool ledger.
 func NewPoolLedger(clk clock.PassiveClock, translator Translator, cfg Config) *PoolLedger {
@@ -632,4 +613,24 @@ func (l *PoolLedger) dropHoldLocked(id string) {
 		}
 	}
 	l.held = next
+}
+
+// defaultSlotsPerEndpoint is vLLM's own default for max_num_seqs. The engine
+// exports no metric for it, so the ledger cannot scrape the real value and an
+// operator running a non-default engine must supply it.
+const defaultSlotsPerEndpoint = 256
+
+// DefaultConfig is the accounting-first configuration: slots carry admission
+// authority, and the two token axes are booked and exported without refusing.
+//
+// KV stays in shadow because the deterministic translator books the client's
+// output ceiling rather than a calibrated bound, so gating on it would refuse
+// admission far below true occupancy. Prefill stays in shadow because its limit
+// is a TTFT budget nobody has stated yet, which zero leaves disabled.
+func DefaultConfig() Config {
+	return Config{
+		Gated:            GatedAxes{Slots: true},
+		SlotsPerEndpoint: defaultSlotsPerEndpoint,
+		HoldTTL:          defaultHoldTTL,
+	}
 }
