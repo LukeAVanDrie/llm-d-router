@@ -425,22 +425,52 @@ Findings the design now rests on:
   length bias that defeats refit at long horizons, so mix distance must never be the
   sole trigger (RESULTS-3.md, DD).
 
+### Cold start
+
+The layer has no pretrained state and no history requirement. A fresh deployment boots
+as the deterministic ledger (the confidence dial's 100% default), acquires the
+degraded mode once a settled residual window exists (minutes of steady traffic, per
+the window rule above), and earns fitted curves stratum by stratum as completions
+accrue. Because the estimators are content-blind — they consume completion lengths and
+decode ages, never prompts, activations, or model internals — nothing couples them to
+a model family, tokenizer, or workload; every deployment learns its own curves in
+place. Value is monotone in data and correctness never depends on it. The telemetry
+prerequisites gate when this in-place clock starts, which is why they land first; no
+corpus is assembled offline and none could be shipped. History matters in exactly two
+places: the coverage evidence required before an operator moves the dial below 100%,
+and strata too rare to earn their own curves (next section).
+
 ### Many workloads, one pool
 
 Fits are per stratum, keyed by what is known at admission (flow identity, model,
 priority class), and the pool forecast sums each lease against its own stratum's
-curve. This ordering matters for what counts as drift: when two differently-shaped
-workloads are separately labeled, one growing from a minority to a majority of traffic
-is not drift — the sum tracks the admitted composition automatically, because every
-lease carries the right curve from admission. The harness's per-lease oracle is
-exactly this construction with perfect labels, and it held valid coverage through
-every drift scenario, including mid-ramp, while every marginal model failed
-(RESULTS-3.md slice detail). The drift verdicts therefore bound the residual case: a
-shift inside one stratum, or between populations no admission-time label separates.
-Stratification is the first line of drift defense; the canary and fallback cover what
-labels cannot see. Its limit is data sparsity — a stratum that cannot reach the
-~500-completion requirement never earns its own curve and pools with its neighbors —
-and the right depth is an open question below.
+curve. Two cases, with different evidence:
+
+- **Labels that correlate with output shape** are the best case: separately-labeled
+  workloads changing share is composition, not drift — every lease carries the right
+  curve from admission, so the sum tracks the admitted mix automatically. The
+  harness's per-lease oracle is this construction with perfect labels, and it held
+  valid coverage through every drift scenario, including mid-ramp, while every
+  marginal model failed (RESULTS-3.md slice detail).
+- **Labels that do not** are priced by the measured verdicts, not assumed away. The
+  test regimes are deliberate within-stratum pathologies: a single stratum with hard
+  bimodality holds valid coverage under the two-parameter fit at near-oracle skill
+  (explicit mixture modeling fails to pay; RESULTS-2.md, B4), and a single stratum
+  with a Pareto tail is valid at the oracle ceiling. Variance inside a stratum widens
+  the bound — it costs yield, never coverage. What breaks calibration is
+  nonstationarity inside a stratum, and that is the case the drift verdicts bound
+  (KD, KR, DD).
+
+Stratification is therefore a variance-reduction opportunity, not an assumption the
+design rests on. Sparse and new strata fall up a hierarchy rather than off a cliff: a
+stratum starts on the pool-wide curve and blends continuously toward its own as its
+completions accrue (credibility weighting in the Buhlmann sense, replacing any hard
+sample cutoff; the blend-weight design is open). Two backstops hold beneath the
+hierarchy: conformal calibration operates on the pool forecast's residuals, so a
+stratum running on a borrowed curve stays inside the coverage guarantee — its
+miscalibration surfaces in pool residuals and is absorbed into the bound as width —
+and the canary watches those same residuals, so label schemes that stop tracking
+reality trip the same fallback as any other calibration loss.
 
 ### The operating contract
 
@@ -494,9 +524,10 @@ admission.
   stationary null runs, which a deployment cannot manufacture; the online analog
   (trailing quantiles of the detector statistic during canary-quiet operation, or an
   operator-set false-alarm budget) is undesigned.
-- Stratification depth (flow, prompt length, model) before data sparsity dominates;
-  decode-rate variability under load (excluded from the simulation by design; owned by
-  the external-simulator re-score).
+- Stratification depth (flow, prompt length, model) before data sparsity dominates,
+  and the credibility blend weight for the stratum-to-pool hierarchy; decode-rate
+  variability under load (excluded from the simulation by design; owned by the
+  external-simulator re-score).
 
 ## Tiered admission: the confidence dial
 
