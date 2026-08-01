@@ -92,9 +92,12 @@ already scraped per endpoint (`vllm:cache_config_info` populates
 `Metrics.CacheNumBlocks` and `Metrics.CacheBlockSize`, with equivalent mappings for
 SGLang and TRT-LLM in
 `pkg/epp/framework/plugins/datalayer/extractor/metrics/factories.go`). `max_num_seqs`
-is scraped nowhere in the repository; the slots axis therefore starts as a configured
-limit, and scraping for it is deferred until a deployment shows slots binding before
-KV.
+is scraped nowhere in the repository, and vLLM v0.26.0 does not export it at all: the
+only config info metrics are `vllm:cache_config_info` and `vllm:lora_requests_info`,
+and only `CacheConfig` implements `metrics_info()` (sources.md `vllm-src`). The slots
+axis therefore starts as a configured limit; the durable fix is a small upstream vLLM
+change adding a scheduler-config info metric, which the `log_metrics_info`
+scaffolding makes nearly mechanical.
 
 The engine-side premises here — that the block pool and `max_num_seqs` are
 engine-enforced stocks, that abort frees on disconnect, and that prefill and decode
@@ -186,12 +189,17 @@ Design rules:
 
 ## The ledger architecture
 
-*(Proposed: the protocol, the ledgers, the dual admission check. Open: where the hold
-is taken.)*
+*(Proposed: the protocol, the ledgers, the dual admission check, and the hold
+placement.)*
 
 A booking's output side is the `MaxOutputTokens` ceiling and everything else in it is
 measured, so estimation error moves the deterministic ledger in one direction:
-under-admission. Eviction sizing is unaffected — revoking a lease frees its current,
+under-admission. Requests without a client ceiling cannot be refused, so their output
+side books at the operator-capped estimator (the existing token-estimator convention);
+for exactly that traffic the booking is no longer a guaranteed upper bound, the
+one-sided-error property (theory Prop 8) holds strictly only for capped requests, the
+operator cap restores a hard bound where configured, and the engine's
+preemption-with-recompute remains the backstop. Eviction sizing is unaffected — revoking a lease frees its current,
 measured footprint, not its booking — and so are the race closure and the fit check.
 What loose ceilings cost is utilization (typical outputs run well below their
 ceilings), and that cost is the yield the stochastic layer exists to recover.
@@ -237,32 +245,38 @@ request -------------------------> HOLD ----------------------------------> LEAS
 
 ### Where the hold is taken
 
-*(Open; this is the one unresolved architectural problem in the deterministic design.)*
+*(Proposed: at the flow-control gate, in pessimistic bound units.)*
 
-A footprint-denominated hold cannot exist at the flow-control gate as the code stands:
-tokenization and prefix matching run in data producers after `Admit` returns
-(`pkg/epp/requestcontrol/director.go:309`), and endpoint choice happens later still. At
-the dispatch gate, the only size information is request bytes
-(`hasCapacity`, `processor.go:336-357`). Candidate resolutions, in preference order:
+The hold is the dispatch decision: flow control holds (or, if it cannot, leaves the
+item queued), scheduling commits, the response path releases. The dispatch cycle
+selects the head item, calls `TryAcquireHold`, and on failure enforces head-of-line
+blocking exactly where the scalar saturation comparison blocks today — the request
+stays queued and is never rejected for a failed hold. Taking the hold at the gate
+closes the admit-to-commit race at pool granularity in the same instant the admission
+decision is made; splitting the two (a gate that consults a view, a hold taken later
+in the director) reopens that race for the width of the gap and manufactures a new
+rejection path for requests that pass the gate and lose the hold.
 
-- **(a) Director-side hold.** The gate consumes a ledger view (available capacity per
-  band) as its saturation signal; the hold is taken after tokenization and before
-  `Schedule`, where prompt tokens and `MaxOutputTokens` are known. The hold still
-  closes the admit-to-commit race, which is its purpose. Cost: a request can pass the
-  gate and then fail the hold, and requeue does not exist (dispatch finalizes the
-  item), so the initial answer is rejection with a retryable status, counted and
-  alarmed.
-- **(b) Two-stage hold.** A byte-denominated provisional hold at the gate (the
-  tokenizer's `estimateBackend` already implements a bytes-to-token estimate), upgraded
-  to footprint units at tokenization. Closes the gate-to-tokenize window that (a)
-  leaves open, at the cost of a second reservation state.
-- **(c) Tokenize before enqueue.** Makes footprint holds possible at the gate but moves
-  tokenizer cost onto the pre-queue path of every request, including ones that will be
-  rejected, and changes the `EnqueueAndWait` contract.
+Tokenization and prefix matching run after `Admit` returns
+(`pkg/epp/requestcontrol/director.go:309`), so exact prompt tokens do not exist at
+the gate — but the protocol never needed them there. Holds are pessimistic by design
+and the commit truths them down. A sound upper bound is available pre-queue without
+tokenizing: a UTF-8 prompt of N bytes tokenizes to at most N tokens (every token
+spans at least one byte), and `MaxOutputTokens` and branching are parsed request
+fields. The gate therefore holds `{KV: promptBytes + outputBooking * branching,
+Slots: branching}`; the commit's real uncached prompt tokens plus the same output
+booking is structurally no larger, so the escalation guard stays meaningful — a
+guard failure signals genuine escalation, not estimator noise.
 
-The plan is to prototype (a) in a replay harness and measure the width of the
-gate-to-hold window under burst before deciding whether (b) is needed. (c) is not a
-starting point.
+The cost is transient overbooking: a bytes-bound hold overstates typical prompts by
+roughly the bytes-per-token ratio for the width of the scheduling window (dispatch to
+commit). Holds exist only in that window, so the inflation is bounded by concurrent
+scheduling work, not queue depth. Measuring that inflation under burst is the
+empirical remainder; a bytes-denominated hold upgraded to token units at tokenization
+(a second reservation state) is the tightening available if the measurement ever
+justifies it. Tokenizing before enqueue is rejected: it moves tokenizer cost onto the
+pre-queue path of every request, including ones that will be rejected, and changes
+the `EnqueueAndWait` contract.
 
 ### Endpoint and pool ledgers
 

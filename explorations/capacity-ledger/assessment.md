@@ -422,7 +422,7 @@ collapse or strengthen as work-table items resolve.
 | Deterministic ledger grows from in-flight load accounting | finding 1; producer.go paths | verified in code |
 | Residency stocks (block pool, max_num_seqs) are engine-enforced, abort frees on disconnect, prefill and decode share a per-iteration token budget | resource model's axis selection; finding 2's premise | verified against engine source at vLLM v0.26.0, locators in sources.md (`vllm-src`); the max_num_seqs limit bounds concurrent scheduled sequences per step, not admission or queue depth |
 | Prefill is a rate; the backlog gate is the existing token-mode accounting | finding 2 | derived; accounting verified in code |
-| Hold placement | finding 3 | open; candidates named, none validated |
+| Hold placement | finding 3 | resolved in ledger-revision.md: flow control holds at dispatch in pessimistic bound units (prompt bytes upper-bound tokens), scheduling commits with truth-up; the information-ordering conflict dissolves because holds never needed exact tokens |
 | Absolute KV telemetry exists; slots telemetry does not | finding 6; extractor factories | verified in code |
 | Termination cause and censored age observable to plugins | finding 4 | false today; small plumbing, upstream-early |
 | Footprint = measurement + max_tokens bound; prediction only as an aggregate discount | finding 5 | derived from the definitions |

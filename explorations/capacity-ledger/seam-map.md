@@ -42,16 +42,16 @@ processor and the director. Nothing enters the config-file plugin registry.
 
 | Ledger concept | Seam |
 |---|---|
-| Hold, candidate (a) | The director's post-tokenization window: data producers run at `pkg/epp/requestcontrol/director.go:309`, `Schedule` at `:320`. The hold is a direct director dependency invoked between them; `TryAcquireHold` from tokenized prompt plus the `MaxOutputTokens` ceiling, receipt carried on the request for commit |
-| Hold-fit at the gate | The processor's `saturationDetector` dependency is superseded by the ledger. The per-band scalar viability check (`processor.go:390`, before item selection) becomes select-head-then-fit: peek via `selectItem`, ask whether the head's estimated footprint fits, HoL-block on failure. View-only at the gate: prompt tokens do not exist pre-dispatch (the doc's finding-3 ordering), so the reservation itself stays director-side |
+| Hold, at the gate | The processor's `saturationDetector` dependency is superseded by the ledger. The per-band scalar viability check (`processor.go:390`, before item selection) becomes select-head-then-hold: peek via `selectItem`, `TryAcquireHold` for the head's pessimistic footprint (prompt bytes upper-bound tokens; `MaxOutputTokens` and branching are parsed fields), HoL-block on failure with the item left queued, `ReleaseHold` if the dispatch step itself fails. Flow control holds, scheduling commits |
+| Receipt handoff | The receipt rides the item: FlowItem final state carries it through `EnqueueAndWait` to `FlowControlAdmissionController`, which stores it as a request attribute for the commit hook (the prototype extends `FinalizeWithOutcome` the same way) |
 | Commit (hold to lease) | `PreRequest` (`director.go:484,591`), where the endpoint is known. Consumes the receipt under the escalation guard; the cached-prefix truth-up applies here (`PrefixCacheMatchInfo`), the same discount the prototype applied at its commit |
 | Release at end of stream | `Director.HandleResponseBody` EndOfStream (`director.go:522-566`). Missed-EOS fallback is the PluginState janitor TTL with exactly-once semantics, the `addedTokensEntry` swap-to-zero pattern (`inflightload/producer.go:142-180`); the prototype's `PrefillReleased` CAS is the same idempotency device |
 | Prefill backlog gate | The existing token-mode counter released at StartOfStream (`producer.go:430-445`) stays as-is beside the ledger; the ledger does not absorb it (prefill is a rate, not a stock) |
 | Slots axis | `requestTracker`'s PreRequest-to-EOS request count (`producer.go:369,463-467`) is the precedent; in the ledger it is the lease's Slots coordinate |
 | Reclaiming state | New accounting in the `EndpointLedger`: `Revoke` moves a lease from committed to reclaiming, `Retire` acknowledges. Retirement is stubbed at stage 2 (scrape acknowledgment is stage 3). The state models real engine lag: block frees defer while a step is in flight (sources.md `vllm-src`) |
 | Endpoint lifecycle and limits | The endpoint-notification extractor mechanism (`producer.go:282-315`), registered programmatically by the runner. KV limit from scraped `CacheNumBlocks * CacheBlockSize`; the Slots limit is configured, because engines do not export `max_num_seqs` |
-| Rejection path | A hold denial is backpressure: `errcommon.ResourceExhausted` (429) with a dropped-reason header, the vocabulary of `translateFlowControlOutcome` (`pkg/epp/requestcontrol/admission.go:246-285`). The director must preserve the typed code on this path (the admission-plugin deny at `director.go:317` flattens to Internal; the scheduler-error path at `:327-331` shows the errors.As preservation pattern) |
-| Hold failure topology | The director owns the receipt, so any error between hold and commit (Schedule failure, conditional-decode 412, prepare failure) releases the hold explicitly on the `HandleRequest` error path; TTL expiry is the backstop for paths the director cannot see, per the doc (the TTL reclaims capacity from scheduling stalls, it is not a queueing mechanism) |
+| Rejection path | None added. A failed hold leaves the item queued (HoL block); queue-wait TTL and capacity rejections keep their existing mapping in `translateFlowControlOutcome` (`pkg/epp/requestcontrol/admission.go:246-285`) |
+| Hold failure topology | Dispatch failure releases the hold inside the processor (prototype's `dispatchCycle`). Post-dispatch failures (Schedule error, conditional-decode 412, prepare failure) release it on the `HandleRequest` error path via the receipt on the request; hold TTL expiry is the backstop, and a commit against an expired hold fails, rejecting the stalled request (the TTL reclaims capacity from scheduling stalls, it is not a queueing mechanism) |
 | P/D scope | The lease binds to the primary profile's endpoint only. The prefill worker's transient claim is the backlog gate's domain (released at StartOfStream); a prefill-side residency lease is out of stage-2 scope |
 
 ## Where the prototype and the doc diverge, the doc wins
@@ -64,10 +64,11 @@ processor and the director. Nothing enters the config-file plugin registry.
   epoch buckets); the doc inverts this to event truth-up with per-scrape validation.
   Stage 2 implements the doc's event truth-up; the scrape seam is instrumentation
   only.
-- Hold placement: the prototype acquires the hold at the dispatch gate, which was
-  possible against an upstream where prompt tokens existed pre-dispatch; this tree
-  tokenizes after `Admit` returns, so the hold is director-side (candidate (a)) and
-  the gate check is a fit preview.
+- Hold placement: none. The prototype's placement is adopted — flow control holds at
+  dispatch, scheduling commits. The prototype's upstream had prompt tokens
+  pre-dispatch; this tree does not, and the gap is closed by holding a pessimistic
+  bound (prompt bytes upper-bound prompt tokens) that the commit truths down, which
+  is the protocol's own hold-then-truth-up semantics.
 - Underflow: the prototype floors subtraction at zero (`subAtomicNoNegative`); the
   doc makes underflow a surfaced ledger-corruption error. The ledger core follows the
   doc; clamped floors remain only in the backlog counters that keep their existing
