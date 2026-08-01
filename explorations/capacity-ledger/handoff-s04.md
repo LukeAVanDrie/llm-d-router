@@ -94,51 +94,91 @@ never clamped; `LeaseRecord.Booked` records what commit added so a mid-lease geo
 change cannot desynchronize the release; saturation is max over **gated** axes only, so
 a shadow axis cannot gate through `UsageLimitPolicy`.
 
+## Wiring landed (commit `31a9c82f`)
+
+Items 1 and 2 of the previous plan are done. `go test -count=1 ./pkg/...` is green
+across the whole tree; `go vet` and `gofmt` clean.
+
+**Handle wiring.** `Handle.CapacityLedger() capacity.Ledger`, injected by
+`WithCapacityLedger`, nil when the gate is off. The runner constructs the ledger as
+the first act of `parseConfigurationPhaseTwo`, ahead of every factory call.
+`capacityLedgerView` guards the typed-nil-in-interface trap, which would otherwise
+defeat the nil check the whole contract rests on.
+
+**The published surface is `Ledger`, not `Reader`.** Forced by the adapter: it must
+tell the ledger what endpoints exist, and `Reader` is read-only. Rather than widen
+`Reader`, the vocabulary now splits three ways: `Reader` (observe), `EndpointSink`
+(report hardware), and `Ledger = Reader + EndpointSink`, which is what the handle
+publishes. The reservation protocol is absent from all three, so holding and booking
+stay with flow control, which has the concrete type. Reporting hardware is not an
+admission decision, which is why it is safe on the plugin-visible side.
+
+**`ledger.DefaultConfig()`.** The ledger is built before the flow control config is
+parsed, so the gate is the only input available that early. Slots is the sole gated
+axis; KV and prefill are booked and exported but never refuse. `SlotsPerEndpoint` is
+256, vLLM's own `max_num_seqs` default, because the engine exports no metric for it
+and the ledger cannot scrape the real value. Plumbing a configured value is open work.
+
+**Adapter** at `pkg/epp/framework/plugins/datalayer/extractor/capacityledger`, with
+the attribute at `attribute/capacity` and a `constants` subpackage breaking the
+key/producer import cycle, exactly as `attrconcurrency` does. It implements
+`Registrant` and `EndpointExtractor`, declares `Produces()` and no `Produce()`, and
+keeps the stale-delete pointer-identity guard. It refuses construction when the
+handle has no ledger: an unfed ledger reads as saturated, so degrading quietly would
+stall admission instead of failing at startup.
+
+Verified rather than assumed, as the previous plan required: `datalayer.Metrics`
+carries `CacheBlockSize` and `CacheNumBlocks`, and the adapter multiplies them.
+Noted in passing, not fixed: `Metrics.KvCacheMaxTokenCapacity` is declared and cloned
+but populated by no extractor in the tree. Dead field.
+
+Pinned by test, and worth knowing before writing the director hooks:
+`EndpointAvailable` nets out committed leases but **not** holds. A hold is pool-scope
+and is taken before any endpoint is chosen, so no per-endpoint reading can reflect it.
+
+## Blocker for the flow control integration
+
+The adapter is registered as the default producer for `AvailableCapacityDataKey`, so
+it is instantiated when the config names it or when some plugin consumes that key.
+Neither is guaranteed. Flow control is not a plugin, so it cannot declare consumption,
+which means the gate can be on with no adapter, no endpoints, and a ledger that reads
+as saturated and HoL-blocks every band.
+
+This must be settled before any dispatch-path code reads the ledger. It is why item 3
+below was not started: switching `Deps` over while the ledger can legitimately be
+empty would be a change that breaks the pool rather than an inert one.
+
+Candidates, none yet chosen:
+
+- Runner instantiates the adapter directly when the gate is on. Closest to the
+  previously ruled-out `AddPlugin` scheme, but the objection there was about the
+  *ledger* fighting `CreateMissingDataProducers`; an adapter that is a normal plugin
+  with a normal factory may not carry the same problem. Check before assuming either way.
+- Ledger treats an endpoint set it has never been told about as unknown rather than
+  empty, and reports saturation zero until first populated. Fails open, which is the
+  opposite of the ledger's whole posture; probably wrong, but it is the cheap answer.
+- Flow control declares the dependency through some non-plugin path. No mechanism for
+  this exists today.
+
 ## Remaining work, in order
 
-### 1. Handle wiring
+### 1. Adapter instantiation
 
-- Add `CapacityLedger() ledger.Reader` to the `Handle` interface and a
-  `WithCapacityLedger(ledger.Reader)` `HandleOption`, mirroring `Metrics()` /
-  `WithMetricsRecorder` exactly (`handle.go:36-37`, `:113-120`).
-- Runner constructs `*ledger.PoolLedger` and passes it into `NewEppHandle` at
-  `runner.go:718`. That is the first statement of `parseConfigurationPhaseTwo`, ahead of
-  `CreateMissingDataProducers` (`:729`) and every factory call, so plugin factories can
-  reach it. No ordering hazard remains; the earlier one was an artifact of the wrong
-  design.
-- Open sub-question, not yet decided: what `CapacityLedger()` returns when the flow
-  control gate is off. Nil is consistent with `Metrics()`, and a plugin that requires it
-  can fail at construction. Confirm with the user rather than picking.
+Resolve the blocker above. Ask rather than pick: the three candidates differ in
+failure posture, not just plumbing.
 
-### 2. Adapter plugin
-
-Small plugin in the plugins tree that owns none of the accounting:
-
-- Implements `Registrant`, registering a `PendingRegistration` against
-  `sourcenotifications.EndpointNotificationSourceType` with a `DefaultSource`, copying
-  `producer.go:272-279`.
-- Implements `EndpointExtractor`. On `EventAddOrUpdate`, calls `ledger.UpsertEndpoint`
-  with scraped KV capacity and publishes a `DynamicAttribute` closure over
-  `Reader.EndpointAvailable(id)`, following `producer.go:302-311`. On `EventDelete`,
-  calls `ledger.DeleteEndpoint`. Keep the stale-delete pointer-identity guard from
-  `producer.go:290-300`.
-- Pulls the `Reader` off the handle in its factory. Declares `Produces()`; does **not**
-  implement `Produce()` (no per-request pre-scheduling materialization, and the gate
-  needs the footprint before `Produce` runs anyway).
-- Needs a `Cloneable` attribute type for the published footprint; see
-  `attrconcurrency.InFlightLoad` for the shape.
-
-Where the KV capacity number comes from on the endpoint event still needs checking
-against what the metrics extractor actually populates (`CacheNumBlocks *
-CacheBlockSize`). Verify before writing, do not assume.
-
-### 3. Flow control integration
+### 2. Flow control integration
 
 - Processor `dispatchCycle`: typed `*ledger.PoolLedger` in `Deps`. When present it
   supersedes the saturation detector outright, for both the saturation read and the
-  hold. The `saturationDetector` field stays only for the gate-off path. **This was
-  recommended to the user and neither vetoed nor explicitly confirmed. Confirm before
-  building on it.**
+  hold. The `saturationDetector` field stays only for the gate-off path. Confirmed by
+  the user.
+- The hold needs a `ledger.Prediction` built from the queued item. The inputs exist:
+  `FlowControlRequest.InferenceRequest().Body.TokenizedPrompt` when a tokenizer ran,
+  `RequestSizeBytes` as the pessimistic bound otherwise, and `Body.MaxOutputTokens`
+  for the output ceiling. No estimator supplies an output figure when the client sets
+  no ceiling, so that default is an open config question. It only moves the exported
+  number while KV is shadow-gated.
 - Controller `Deps`, runner wiring at `initAdmissionControl` (`runner.go:451`) — passes
   the concrete ledger, no plugin lookup, no defaulting question.
 - Director: commit at `runPreRequestPlugins` (`director.go:484`), EOS release in
@@ -151,7 +191,7 @@ CacheBlockSize`). Verify before writing, do not assume.
 - Targeted package tests green in the builder container before claiming done, then
   `make presubmit` if there is room.
 
-### 4. Close-out
+### 3. Close-out
 
 - `experiments.md`: mark work-table row 1 done (sources.md reached "read" standing at
   `568afb3a`); rewrite row 2, which still says "extend `InFlightLoadProducer` toward the
@@ -170,10 +210,15 @@ CacheBlockSize`). Verify before writing, do not assume.
 
 ## Undecided, needs the user
 
+- How the adapter gets instantiated when the gate is on. See the blocker section; this
+  is the one that blocks progress.
+- Where `SlotsPerEndpoint` and the prefill TTFT budget come from once they stop being
+  `DefaultConfig` constants.
 - Receipt-by-value vs request-ID keying. The current code keys by request ID, argued on
   the grounds that the request already carries the ID end to end. The user has not ruled.
-- `CapacityLedger()` nil semantics when the gate is off (item 1).
-- Whether the ledger supersedes the detector outright in `Deps` (item 3).
+
+Answered since the last handoff: `CapacityLedger()` returns nil when the gate is off;
+the ledger supersedes the detector outright in `Deps`; request-ID keying stays.
 
 ## Process rules for the next session
 
