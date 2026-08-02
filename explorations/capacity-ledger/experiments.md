@@ -33,26 +33,33 @@ source verification), and statistical rows are parked until a design question de
 a number. A row re-earns its place at triage or is deleted with the reason in the
 commit body ([STYLE.md](STYLE.md)).
 
-1. **Engine-source verification.** The resource model's premises — block-pool and
-   `max_num_seqs` enforcement, abort-frees-on-disconnect, the shared per-iteration
-   token budget — are recalled, not verified, and every axis choice rests on them.
-   Read the engine scheduler/block-manager source, pin locators in sources.md, upgrade
-   the assessment's standing row. Cheap, precedes any EPP wiring. Waits on nothing.
-2. **Stage-2 skeleton in the EPP.** The working prototype's first half: extend
-   `InFlightLoadProducer` toward the dual ledger (lease record, KV axis held to EOS,
-   reclaiming state), the gate consuming a ledger view in place of the saturation
-   check in processor.go, and the director-side hold (candidate (a)) with its
-   rejection path. Includes the empirical question that used to be its own row: the
-   gate-to-hold window width under burst, measured in-repo (bench or replay), which
-   decides whether the two-stage hold (b) is ever needed. Grounding rule for the
-   session that takes this row: start from docs/architecture.md and the
-   director/processor code paths, map every ledger concept to an existing plugin seam
-   before writing new machinery.
+1. ~~**Engine-source verification.**~~ Done at `568afb3a`: the block-pool,
+   `max_num_seqs`, abort-frees-on-disconnect and per-iteration token budget premises
+   are read with locators in sources.md, and the prefill axis was reframed from rate to
+   stock as a result. One premise remains unverifiable from inside the EPP: the engine
+   exports no metric for `max_num_seqs`, so the slots limit is configuration, not
+   observation.
+2. **Ledger integration into the dispatch path.** The accounting core, the plugin-handle
+   publication, and the endpoint-feeding adapter exist and are green
+   (`6e0fdc1e`, `31a9c82f`); the ledger is a handle service rather than an extension of
+   `InFlightLoadProducer`, and the hold is taken by flow control at dispatch rather than
+   by the director. What remains is the part that makes any of it reachable: the
+   processor consuming the ledger in place of the saturation check, the director's
+   commit and release hooks, and a reconciliation path for leases that never see a
+   terminal signal. Blocked on an independent review
+   ([prompt-s05-review.md](prompt-s05-review.md)) and on the adapter-instantiation
+   decision in [handoff-s04.md](handoff-s04.md). Still open underneath it: the
+   gate-to-hold window width under burst, measured in-repo, which decides whether a
+   two-stage hold is ever needed.
 3. **Telemetry change (upstream).** Termination-cause enum and a streamed-token counter
    (assessment finding 4); without them every process lifetime's training stream is
    corrupted, and the exported observation record — the only history that survives EPP
    restarts — cannot be backfilled. Waits on the user's go-ahead to prepare an
-   upstream issue and PR.
+   upstream issue and PR. A second, engine-side ask belongs with it: vLLM exports no
+   metric for its scheduler configuration, so `max_num_seqs` cannot be scraped and the
+   only gated axis is governed by an operator-supplied number that nothing validates.
+   A scheduler-config info metric would close that, and it is the cheapest fix to the
+   soundest objection against the slots gate.
 4. **Ledger-revision review and upstreaming.** The local rewrite is drafted at
    [ledger-revision.md](ledger-revision.md). Waits on the user's read, a decision on
    the PR #2061 document's fate, and public homes for the exploration citations.
@@ -64,7 +71,16 @@ commit body ([STYLE.md](STYLE.md)).
    completion-bias fix via in-flight ages as right-censored observations; would also
    repair D-mix's lag and simplify the re-admission rule); T2/K3 admissions dominance;
    the phase-2 censoring preview; the BLIS re-score (L0.5).
-7. **Backlog.** L0 sensitivities from the protocol not yet run: noisy decode rates
+7. **Ledger-side open threads.** No home in a landed artifact, each waiting on the
+   review or on row 2. Whether the ledger subsumes `InFlightLoadProducer` or the two
+   coexist permanently, given that both now track a request count from PreRequest to
+   EOS. Whether the pool-wide exclusive mutex survives contact with a large pool, since
+   `EndpointAvailable` is read per endpoint per scheduling cycle through a dynamic
+   attribute and takes the same lock the dispatch loop holds against. Whether pool
+   saturation can carry the empty-pool case at all, given that the error taxonomy
+   already separates "no capacity exists" (503) from "capacity contended" (429) and a
+   scalar cannot.
+8. **Backlog.** L0 sensitivities from the protocol not yet run: noisy decode rates
    (estimated r with lognormal error, applied to all estimators alike) and
    burst-correlated lengths (the lease-independence stress).
    Small-pool (N = 10) regime treatment (MC quantiles throughout; Little deviations

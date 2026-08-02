@@ -111,16 +111,17 @@ full-sequence fit check exists as an engine-local admission gate); and pool exha
 during decode is enforced by preemption-with-recompute, which is the engine-side
 backstop this design's guaranteed tier leans on.
 
-### Prefill is a rate, not a stock
+### Prefill is enforced as a rate and gated as a stock
 
 Prefill compute is the third bottleneck, and it is different in kind: the engine
 enforces a per-iteration token budget shared between prefill chunks and decode steps.
-That budget is a service rate. No engine-enforced inventory of outstanding prefill
-tokens exists, so a vector coordinate for prefill has no unit for its limit.
+That budget is a service rate, and no engine-enforced inventory of outstanding prefill
+tokens exists, so the engine's own limit supplies no unit for a vector coordinate.
 
-The resolution is already running in production configuration: token-mode accounting —
-incremented at dispatch, released at first token — is a per-endpoint backlog counter of
-admitted-but-not-yet-prefilled work. Gate it directly: bound the backlog at
+The gate-worthy quantity is not the engine's limit but the backlog it drains, and a
+backlog is a stock with a unit Little's law supplies. Token-mode accounting —
+incremented at dispatch, released at first token — already counts exactly that:
+admitted-but-not-yet-prefilled work per endpoint. Bound it at
 
 ```
 Q_p_max = mu_p * TTFT_budget
@@ -130,8 +131,10 @@ where `mu_p` is the endpoint's measured uncached-prompt-token throughput (tokens
 `TTFT_budget` is the operator's time-to-first-token target in seconds. This turns the
 existing `maxTokenConcurrency` constant into a quantity an operator can state in
 seconds. The lifecycle split survives — the transient claim releases at TTFT, the
-persistent claim at end of stream — but the transient side is enforced by the backlog
-gate beside the ledger, and `Footprint` reduces to residency.
+persistent claim at end of stream — and both belong inside `Footprint`, which is
+therefore not purely a residency vector: a stock released at first token is still a
+stock, and holding it outside the ledger would put two admission authorities on the
+same request with no shared critical section.
 
 ### Types
 
@@ -143,7 +146,7 @@ type Prediction struct {
     PromptTokens int64 // ISL, known at admission
     OutputTokens int64 // predicted OSL (see Stochastic layer)
     CachedTokens int64 // prefix-cache hit, known at scheduling; zero at admission
-    Branching    int64 // decode width (best_of, beam, n)
+    Branching    int64 // decode width (best_of, beam, n); no parser supplies it today
     BlockSize    int64 // engine KV block size
 }
 
@@ -262,11 +265,14 @@ Tokenization and prefix matching run after `Admit` returns
 the gate — but the protocol never needed them there. Holds are pessimistic by design
 and the commit truths them down. A sound upper bound is available pre-queue without
 tokenizing: a UTF-8 prompt of N bytes tokenizes to at most N tokens (every token
-spans at least one byte), and `MaxOutputTokens` and branching are parsed request
-fields. The gate therefore holds `{KV: promptBytes + outputBooking * branching,
-Slots: branching}`; the commit's real uncached prompt tokens plus the same output
-booking is structurally no larger, so the escalation guard stays meaningful — a
-guard failure signals genuine escalation, not estimator noise.
+spans at least one byte), and `MaxOutputTokens` is a parsed request field. Branching
+is not: no request parser in this tree extracts `best_of`, `beam`, or `n`, so the
+translation reads a branching factor of one until a parser supplies it, and a client
+using decode width is under-booked by that factor. The gate therefore holds
+`{KV: promptBytes + outputBooking * branching, Slots: branching}`; the commit's real
+uncached prompt tokens plus the same output booking is structurally no larger, so the
+escalation guard stays meaningful — a guard failure signals genuine escalation, not
+estimator noise.
 
 The cost is transient overbooking: a bytes-bound hold overstates typical prompts by
 roughly the bytes-per-token ratio for the width of the scheduling window (dispatch to

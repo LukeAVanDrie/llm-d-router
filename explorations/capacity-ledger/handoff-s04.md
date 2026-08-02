@@ -205,20 +205,14 @@ failure posture, not just plumbing.
 
 ### 3. Close-out
 
-- `experiments.md`: mark work-table row 1 done (sources.md reached "read" standing at
-  `568afb3a`); rewrite row 2, which still says "extend `InFlightLoadProducer` toward the
-  dual ledger" and references "the director-side hold (candidate (a))". Both are stale.
-- `seam-map.md`: the "core layer, not a plugin" section is drawn in the wrong place;
-  replace with the Handle-service framing above. Also wrong there: the receipt-handoff
-  row, and the claim that branching factors are parsed fields (no request parser
-  extracts `best_of` or `n`; also wrong in `ledger-revision.md`). The TTL-rejection
-  language is stale too.
-- Homeless-threads sweep. Open threads noted but not filed: vLLM scheduler-config info
-  metric upstream; hold-inflation-under-burst measurement; P/D per-profile lease
-  placement (stage 3, deferred when prefill scope was fixed to single-endpoint lease on
-  the primary); `InFlightLoadProducer` subsumption.
-- Cold read if more than a couple of docs changed. Then tag `s04` **only with explicit
-  authorization**.
+Done: `experiments.md` work table retriaged (row 1 closed, row 2 rewritten to the landed
+shape, row 7 added for the ledger-side open threads), `seam-map.md` rewritten against
+the code with a landed/open column, the branching and prefill errors corrected in
+`ledger-revision.md`, homeless threads swept into rows 3 and 7, cold read run over the
+directory.
+
+Remaining: tag `s04`, **only with explicit authorization**. The exploration is not on
+the fork past `s01-h1-verdicts`; pushing is a separate ask.
 
 ## Undecided, needs the user
 
