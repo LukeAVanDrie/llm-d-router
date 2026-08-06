@@ -929,6 +929,80 @@ func TestInFlightLoadProducer_LateResponseAfterReap(t *testing.T) {
 	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
 }
 
+// newTestProducerWithFastJanitor rebuilds the producer's PluginState with a
+// short staleness threshold and cleanup interval so tests can exercise the real
+// janitor goroutine.
+func newTestProducerWithFastJanitor(t testing.TB) *InFlightLoadProducer {
+	producer := newTestProducer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	producer.PluginState = fwkplugin.NewPluginState(ctx,
+		fwkplugin.WithStalenessThreshold(50*time.Millisecond),
+		fwkplugin.WithCleanupInterval(10*time.Millisecond))
+	return producer
+}
+
+// TestInFlightLoadProducer_JanitorSkipsLiveRequest is the issue #2295
+// regression: a request that produces no response chunk past the staleness
+// threshold must keep its in-flight contribution while its stream ctx is
+// alive, and lose it once the ctx dies without end-of-stream cleanup.
+func TestInFlightLoadProducer_JanitorSkipsLiveRequest(t *testing.T) {
+	producer := newTestProducerWithFastJanitor(t)
+	endpointName := "janitor-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+	t.Cleanup(reqCancel)
+
+	req := makeTokenRequest("req-janitor", 4) // 4 input + 6 output = 10 tokens
+	res := makeSchedulingResult(endpointName)
+	producer.PreRequest(reqCtx, req, res)
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))
+
+	// Several janitor sweeps past the threshold, no chunks: counters must hold.
+	time.Sleep(150 * time.Millisecond)
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID),
+		"janitor rolled back counters of a live request")
+	require.Equal(t, int64(10), producer.tokenTracker.get(endpointID))
+
+	// Ctx dies without EndOfStream (a genuinely leaked entry): the janitor
+	// reclaims it. This also proves the janitor is running in this test, so the
+	// hold-assertions above are not passing vacuously.
+	reqCancel()
+	require.Eventually(t, func() bool {
+		return producer.requestTracker.get(endpointID) == 0 && producer.tokenTracker.get(endpointID) == 0
+	}, 2*time.Second, 10*time.Millisecond, "janitor should reap once the request ctx is done")
+}
+
+// TestInFlightLoadProducer_EndOfStreamAfterJanitorSkip verifies the normal
+// completion path still decrements exactly once after the janitor has been
+// skipping a live request.
+func TestInFlightLoadProducer_EndOfStreamAfterJanitorSkip(t *testing.T) {
+	producer := newTestProducerWithFastJanitor(t)
+	endpointName := "janitor-eos-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+
+	req := makeTokenRequest("req-janitor-eos", 4)
+	res := makeSchedulingResult(endpointName)
+	producer.PreRequest(reqCtx, req, res)
+
+	time.Sleep(150 * time.Millisecond)
+
+	req.SchedulingResult = res
+	producer.ResponseBody(context.Background(), req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
+
+	// Late ctx cancellation plus further sweeps must not decrement again.
+	reqCancel()
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID), "no double decrement after EndOfStream")
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
+}
+
 func TestInFlightLoadProducer_AtomicTokenRelease_Concurrent(t *testing.T) {
 	producer := newTestProducer(t)
 	ctx := context.Background()

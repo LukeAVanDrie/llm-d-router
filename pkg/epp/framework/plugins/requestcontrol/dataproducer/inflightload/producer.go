@@ -395,6 +395,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 
 	inputTokens := p.tokenEstimator.EstimateInput(request)
 
+	tracked := false
 	for profileName, profileResult := range result.ProfileResults {
 		if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
 			continue
@@ -426,6 +427,16 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 			fwkplugin.StateKey(addedTokensKey(eid, profileName)),
 			entry,
 		)
+		tracked = true
+	}
+
+	// ctx is the ext_proc stream context: it stays alive for the request's full
+	// lifetime and is canceled on stream end or client disconnect. Binding it
+	// keeps the janitor from reaping entries (and rolling back counters) for
+	// requests that are still in flight but have produced no response chunk,
+	// e.g. long prefill or a deep model-server queue.
+	if tracked {
+		p.PluginState.BindLiveness(ctx, request.RequestID)
 	}
 }
 
