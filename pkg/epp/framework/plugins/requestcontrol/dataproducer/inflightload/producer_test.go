@@ -990,6 +990,8 @@ func TestInFlightLoadProducer_EndOfStreamAfterJanitorSkip(t *testing.T) {
 	producer.PreRequest(reqCtx, req, res)
 
 	time.Sleep(150 * time.Millisecond)
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID),
+		"counters must still be held when EndOfStream arrives")
 
 	req.SchedulingResult = res
 	producer.ResponseBody(context.Background(), req, &requestcontrol.Response{EndOfStream: true}, nil)

@@ -435,6 +435,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	// keeps the janitor from reaping entries (and rolling back counters) for
 	// requests that are still in flight but have produced no response chunk,
 	// e.g. long prefill or a deep model-server queue.
+	// Bind only when an entry exists: an unbacked binding is never reclaimed.
 	if tracked {
 		p.PluginState.BindLiveness(ctx, request.RequestID)
 	}

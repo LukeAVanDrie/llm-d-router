@@ -176,6 +176,10 @@ func (s *PluginState) Touch(requestID string) {
 // janitor never reaps a bound request whose ctx is still alive; it refreshes
 // the request's last access time instead. Once ctx is done, the entries are
 // reaped on the normal staleness schedule. Delete removes the binding.
+//
+// The caller must have written state for requestID before binding: the janitor
+// reclaims bindings only for request IDs it can reach through the access-time
+// index, so a binding with no state behind it is never reclaimed.
 func (s *PluginState) BindLiveness(ctx context.Context, requestID string) {
 	if requestID == "" || ctx == nil {
 		return
@@ -217,6 +221,7 @@ func (s *PluginState) cleanStaleRequests() {
 		lastAccessTime := v.(time.Time)
 		if time.Since(lastAccessTime) > s.stalenessThreshold {
 			if bound, ok := s.requestLiveness.Load(requestID); ok && bound.(context.Context).Err() == nil {
+				log.Log.V(logutil.TRACE).Info("Holding stale request with a live bound context", "requestID", requestID, "lastAccessTime", lastAccessTime)
 				s.Touch(requestID)
 				return true
 			}
