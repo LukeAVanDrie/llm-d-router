@@ -109,7 +109,7 @@ func TestPluginState_EvictionCallback(t *testing.T) {
 	data.evictedID = ""
 	data.evictedKey = ""
 	state.Write(requestID, key, data)
-	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*stalenessThreshold))
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*defaultStalenessThreshold))
 	state.cleanStaleRequests()
 	assert.Equal(t, requestID, data.evictedID)
 	assert.Equal(t, key, data.evictedKey)
@@ -128,7 +128,7 @@ func TestPluginState_Touch(t *testing.T) {
 	state.Write(requestID, key, data)
 
 	// Set last access time to near-stale
-	nearStale := time.Now().Add(-stalenessThreshold + time.Second*10)
+	nearStale := time.Now().Add(-defaultStalenessThreshold + time.Second*10)
 	state.requestToLastAccessTime.Store(requestID, nearStale)
 
 	// Touch it
@@ -220,7 +220,7 @@ func TestReadPluginStateKey(t *testing.T) {
 }
 
 // TestPluginState_Cleanup verifies the automatic cleanup of stale data.
-// It tests that data which hasn't been accessed for longer than stalenessThreshold
+// It tests that data which hasn't been accessed for longer than defaultStalenessThreshold
 // is properly removed from the storage.
 func TestPluginState_Cleanup(t *testing.T) {
 	ctx, cancel := context.WithCancel(logutil.NewTestLoggerIntoContext(context.Background()))
@@ -235,7 +235,7 @@ func TestPluginState_Cleanup(t *testing.T) {
 	state.Write(requestID, key, data)
 
 	// Manually set last access time to far in the past
-	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*stalenessThreshold))
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*defaultStalenessThreshold))
 	// Manually CleanUp
 	state.cleanStaleRequests()
 
@@ -263,7 +263,7 @@ func TestPluginState_CleanupSkipsLiveRequests(t *testing.T) {
 
 	// Stale by time but bound to a live ctx: the janitor must skip the request
 	// and refresh its last access time.
-	backdated := time.Now().Add(-2 * stalenessThreshold)
+	backdated := time.Now().Add(-2 * defaultStalenessThreshold)
 	state.requestToLastAccessTime.Store(requestID, backdated)
 	state.cleanStaleRequests()
 
@@ -276,7 +276,7 @@ func TestPluginState_CleanupSkipsLiveRequests(t *testing.T) {
 
 	// Once the ctx is done, the request reaps as any other stale request.
 	reqCancel()
-	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*stalenessThreshold))
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*defaultStalenessThreshold))
 	state.cleanStaleRequests()
 
 	_, err = state.Read(requestID, key)
@@ -306,7 +306,7 @@ func TestPluginState_DeleteClearsLiveness(t *testing.T) {
 	// Second request under the same ID, no binding: reaped despite the first
 	// request's ctx still being alive.
 	state.Write(requestID, key, &pluginTestData{value: "second"})
-	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*stalenessThreshold))
+	state.requestToLastAccessTime.Store(requestID, time.Now().Add(-2*defaultStalenessThreshold))
 	state.cleanStaleRequests()
 
 	_, err := state.Read(requestID, key)

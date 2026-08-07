@@ -28,12 +28,12 @@ import (
 )
 
 const (
-	// stalenessThreshold defines the threshold for considering data as stale.
+	// defaultStalenessThreshold defines the threshold for considering data as stale.
 	// if data of a request hasn't been read/write in the last "stalenessThreshold", it is considered as stale data
 	// and will be cleaned in the next cleanup cycle.
-	stalenessThreshold = time.Minute * 5
-	// cleanupInterval defines the periodic interval that the cleanup go routine uses to check for stale data.
-	cleanupInterval = time.Minute
+	defaultStalenessThreshold = time.Minute * 5
+	// defaultCleanupInterval defines the periodic interval that the cleanup go routine uses to check for stale data.
+	defaultCleanupInterval = time.Minute
 )
 
 // PluginStateOption configures a PluginState created by NewPluginState.
@@ -56,8 +56,8 @@ func WithCleanupInterval(interval time.Duration) PluginStateOption {
 // NewPluginState initializes a new PluginState and returns its pointer.
 func NewPluginState(ctx context.Context, opts ...PluginStateOption) *PluginState {
 	pluginState := &PluginState{
-		stalenessThreshold: stalenessThreshold,
-		cleanupInterval:    cleanupInterval,
+		stalenessThreshold: defaultStalenessThreshold,
+		cleanupInterval:    defaultCleanupInterval,
 	}
 	for _, opt := range opts {
 		opt(pluginState)
