@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/utils/clock"
 
 	logutil "github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -91,10 +92,20 @@ type Processor struct {
 	// it needs no synchronization.
 	poolEmpty bool
 
+	// ceilings is the reusable output buffer handed to the UsageLimitPolicy each dispatch cycle,
+	// avoiding a per-cycle allocation. Only accessed from the Run goroutine, so it needs no
+	// synchronization.
+	ceilings []float64
+
 	// wg is used to wait for background tasks (cleanup sweep) to complete on shutdown.
 	wg             sync.WaitGroup
 	isShuttingDown atomic.Bool
 	shutdownOnce   sync.Once
+
+	// dropCounts accumulates non-dispatched request outcomes between periodic summary flushes.
+	// Written by both the main Run goroutine (enqueue, shutdown) and the runCleanupSweep goroutine (sweep),
+	// so each slot is an atomic to avoid a data race.
+	dropCounts [types.NumQueueOutcomes]atomic.Uint64
 }
 
 // NewProcessor creates a new Processor instance.
@@ -184,6 +195,9 @@ func (p *Processor) SubmitOrBlock(ctx context.Context, item *FlowItem) error {
 // It uses a `select` statement to interleave accepting new requests with dispatching existing ones, balancing
 // responsiveness with throughput.
 func (p *Processor) Run(ctx context.Context) {
+	// Log any panic with processor context before the default handlers repanic; the process
+	// fail-stops rather than continuing on state a panicked goroutine may have left inconsistent.
+	defer utilruntime.HandleCrashWithLogger(p.logger)
 	p.logger.V(logutil.DEFAULT).Info("Processor run loop starting.")
 	defer p.logger.V(logutil.DEFAULT).Info("Processor run loop stopped.")
 
@@ -269,6 +283,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 	if finalState := outcome; finalState != nil {
 		p.logger.V(logutil.TRACE).Info("Item finalized externally before processing, discarding.",
 			"outcome", finalState.Outcome, "err", finalState.Err, "flowKey", key, "requestID", req.ID())
+		p.recordDrop(finalState.Outcome)
 		return
 	}
 
@@ -278,6 +293,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 		finalErr := fmt.Errorf("configuration error: failed to get queue for flow key %s: %w", key, err)
 		p.logger.Error(finalErr, "Rejecting request, queue lookup failed", "flowKey", key, "requestID", req.ID())
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
+		p.recordDrop(types.QueueOutcomeRejectedOther)
 		return
 	}
 
@@ -286,6 +302,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 		finalErr := fmt.Errorf("configuration error: failed to get priority band for priority %d: %w", key.Priority, err)
 		p.logger.Error(finalErr, "Rejecting request, priority band lookup failed", "flowKey", key, "requestID", req.ID())
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
+		p.recordDrop(types.QueueOutcomeRejectedOther)
 		return
 	}
 
@@ -296,9 +313,12 @@ func (p *Processor) enqueue(item *FlowItem) {
 		// that state reflects genuine unavailability (surfaced as 503), not backpressure against a contended pool (429).
 		if p.poolEmpty {
 			p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity with no endpoints",
-				"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize())
+				"flowKey", key, "requestID", req.ID(), "reqByteSize", req.ByteSize(),
+				"totalLen", stats.TotalLen, "totalCapacityRequests", stats.TotalCapacityRequests,
+				"totalByteSize", stats.TotalByteSize, "totalCapacityBytes", stats.TotalCapacityBytes)
 			item.FinalizeWithOutcome(types.QueueOutcomeRejectedNoEndpoints, fmt.Errorf("%w: %w",
 				types.ErrRejected, types.ErrNoEndpoints))
+			p.recordDrop(types.QueueOutcomeRejectedNoEndpoints)
 			return
 		}
 		p.logger.V(logutil.DEBUG).Info("Rejecting request, queue at capacity",
@@ -307,6 +327,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 			"totalByteSize", stats.TotalByteSize, "totalCapacityBytes", stats.TotalCapacityBytes)
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedCapacity, fmt.Errorf("%w: %w",
 			types.ErrRejected, types.ErrQueueAtCapacity))
+		p.recordDrop(types.QueueOutcomeRejectedCapacity)
 		return
 	}
 
@@ -317,6 +338,7 @@ func (p *Processor) enqueue(item *FlowItem) {
 		p.logger.Error(finalErr, "Rejecting request, queue add failed",
 			"flowKey", key, "requestID", req.ID())
 		item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther, fmt.Errorf("%w: %w", types.ErrRejected, finalErr))
+		p.recordDrop(types.QueueOutcomeRejectedOther)
 		return
 	}
 	p.logger.V(logutil.TRACE).Info("Item enqueued.",
@@ -374,7 +396,8 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	metrics.RecordFlowControlPoolSaturation(p.poolName, saturation)
 
 	priorities := p.registry.AllOrderedPriorityLevels()
-	ceilings := p.usageLimitPolicy.ComputeLimit(ctx, saturation, priorities)
+	ceilings := p.ceilingsBuffer(len(priorities))
+	p.usageLimitPolicy.ComputeLimit(ctx, saturation, priorities, ceilings)
 
 	for i, priority := range priorities {
 		// --- Viability Check (Saturation/HoL Blocking) ---
@@ -419,6 +442,20 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	return false
 }
 
+// ceilingsBuffer returns the reusable ceilings buffer sized to n, every element reset to 1.0 (no
+// gating). Pre-filling guarantees that an entry the policy does not write fails open rather than
+// carrying a stale value from the previous cycle.
+func (p *Processor) ceilingsBuffer(n int) []float64 {
+	if cap(p.ceilings) < n {
+		p.ceilings = make([]float64, n)
+	}
+	buf := p.ceilings[:n]
+	for i := range buf {
+		buf[i] = 1.0
+	}
+	return buf
+}
+
 // selectItem applies the configured fairness and ordering policies to select a single item.
 func (p *Processor) selectItem(
 	ctx context.Context,
@@ -455,11 +492,15 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 		// This happens benignly if the item was already removed by the cleanup sweep loop.
 		// We log it at a low level for visibility but return nil so the dispatch cycle proceeds.
 		p.logger.V(logutil.DEBUG).Info("Failed to remove item during dispatch (likely already finalized and swept).",
-			"flowKey", key, "requestID", req.ID(), "error", err)
+			"flowKey", key, "requestID", req.ID(), "err", err)
 		return nil
 	}
 
-	removedItem := removedItemAcc.(*FlowItem)
+	removedItem, ok := removedItemAcc.(*FlowItem)
+	if !ok {
+		// Nothing to finalize on an unknown type; surface the error so the cycle moves to the next band.
+		return fmt.Errorf("internal error: item %q for flow %s has unexpected type %T", req.ID(), key, removedItemAcc)
+	}
 	p.logger.V(logutil.TRACE).Info("Item dispatched.", "flowKey", req.FlowKey(), "requestID", req.ID())
 	removedItem.FinalizeWithOutcome(types.QueueOutcomeDispatched, nil)
 	return nil
@@ -470,6 +511,7 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 func (p *Processor) runCleanupSweep(ctx context.Context) {
 	defer p.wg.Done()
 	logger := p.logger.WithName("runCleanupSweep")
+	defer utilruntime.HandleCrashWithLogger(logger)
 	logger.V(logutil.DEFAULT).Info("Cleanup sweep goroutine starting.")
 	defer logger.V(logutil.DEFAULT).Info("Cleanup sweep goroutine stopped.")
 
@@ -482,6 +524,7 @@ func (p *Processor) runCleanupSweep(ctx context.Context) {
 			return
 		case <-ticker.C():
 			p.sweepFinalizedItems()
+			p.flushDropSummary()
 		}
 	}
 }
@@ -491,10 +534,16 @@ func (p *Processor) runCleanupSweep(ctx context.Context) {
 func (p *Processor) sweepFinalizedItems() {
 	processFn := func(managedQ contracts.ManagedQueue, logger logr.Logger) {
 		predicate := func(itemAcc flowcontrol.QueueItemAccessor) bool {
-			return itemAcc.(*FlowItem).FinalState() != nil
+			item, ok := itemAcc.(*FlowItem)
+			return ok && item.FinalState() != nil
 		}
 		removedItems := managedQ.Cleanup(predicate)
 		if len(removedItems) > 0 {
+			for _, itemAcc := range removedItems {
+				if fi, ok := itemAcc.(*FlowItem); ok && fi != nil && fi.FinalState() != nil {
+					p.recordDrop(fi.FinalState().Outcome)
+				}
+			}
 			logger.V(logutil.TRACE).Info("Swept finalized items and released capacity.",
 				"count", len(removedItems))
 		}
@@ -519,6 +568,7 @@ func (p *Processor) shutdown() {
 				// Finalize buffered items.
 				item.FinalizeWithOutcome(types.QueueOutcomeRejectedOther,
 					fmt.Errorf("%w: %w", types.ErrRejected, types.ErrFlowControllerNotRunning))
+				p.recordDrop(types.QueueOutcomeRejectedOther)
 			default:
 				break DrainLoop
 			}
@@ -526,6 +576,7 @@ func (p *Processor) shutdown() {
 		// We do not close enqueueChan because external goroutines (Controller) send on it.
 		// The channel will be garbage collected when the processor terminates.
 		p.evictAll()
+		p.flushDropSummary()
 	})
 }
 
@@ -548,9 +599,34 @@ func (p *Processor) evictAll() {
 			// Finalization is idempotent; safe to call even if already finalized externally.
 			// The per-request log is emitted by EnqueueAndWait when it unblocks.
 			item.FinalizeWithOutcome(outcome, errShutdown)
+			p.recordDrop(item.FinalState().Outcome)
 		}
 	}
 	p.processAllQueuesConcurrently("evictAll", processFn)
+}
+
+func (p *Processor) recordDrop(outcome types.QueueOutcome) {
+	if outcome == types.QueueOutcomeDispatched || outcome == types.QueueOutcomeNotYetFinalized {
+		return
+	}
+	p.dropCounts[outcome].Add(1)
+}
+
+func (p *Processor) flushDropSummary() {
+	var total uint64
+	counts := make(map[string]uint64)
+	for i := range p.dropCounts {
+		if c := p.dropCounts[i].Swap(0); c > 0 {
+			total += c
+			counts[types.QueueOutcome(i).String()] = c
+		}
+	}
+	if total > 0 {
+		p.logger.V(logutil.DEFAULT).Info("Flow control request drop summary",
+			"poolName", p.poolName,
+			"totalDropped", total,
+			"counts", counts)
+	}
 }
 
 // processAllQueuesConcurrently iterates over all queues in all priority bands and executes the given
@@ -607,6 +683,7 @@ func (p *Processor) processAllQueuesConcurrently(
 	var wg sync.WaitGroup
 	for range numWorkers {
 		wg.Go(func() {
+			defer utilruntime.HandleCrashWithLogger(logger)
 			for task := range tasks {
 				processFn(task.mq, task.logger)
 			}
