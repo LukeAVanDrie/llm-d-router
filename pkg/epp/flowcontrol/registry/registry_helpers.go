@@ -64,6 +64,8 @@ type priorityBand struct {
 
 // setQueueActivity is the onActiveTransition callback for this band's queues. It runs inside the
 // queue's critical section, so it must remain lock-free (sync.Map only, never the registry mutex).
+// The stats-propagation callback runs under the same constraint. applyAndPropagateLocked invokes
+// both while the queue mutex is held.
 func (b *priorityBand) setQueueActivity(mq *managedQueue, active bool) {
 	if active {
 		b.activeQueues.Store(mq.key.ID, mq)

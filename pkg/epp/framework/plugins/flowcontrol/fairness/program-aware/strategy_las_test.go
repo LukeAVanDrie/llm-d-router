@@ -38,12 +38,12 @@ func TestLAS_Name(t *testing.T) {
 }
 
 func TestLAS_Pick_PrefersLowerService(t *testing.T) {
-	s := &LASStrategy{weightService: 1.0, weightHeadWait: 0.0, decayFactor: 1.0}
+	s := &LASStrategy{weightService: 1.0, weightHeadWait: 0.0}
 	now := time.Now()
 
 	// Seed alpha with high attained service, beta with low.
-	s.getOrCreateState("alpha").AddService(1000, now, 0, 1.0)
-	s.getOrCreateState("beta").AddService(10, now, 0, 1.0)
+	s.getOrCreateState("alpha").AddService(1000, now, 0)
+	s.getOrCreateState("beta").AddService(10, now, 0)
 
 	idA, qA := makeInfo("alpha", now)
 	idB, qB := makeInfo("beta", now)
@@ -55,7 +55,7 @@ func TestLAS_Pick_PrefersLowerService(t *testing.T) {
 }
 
 func TestLAS_Pick_ColdStartUsesHeadWait(t *testing.T) {
-	s := &LASStrategy{weightService: 1.0, weightHeadWait: 1.0, decayFactor: 1.0}
+	s := &LASStrategy{weightService: 1.0, weightHeadWait: 1.0}
 	now := time.Now()
 
 	// Both have zero service; alpha's head waited longer, so it wins on tiebreak.
@@ -73,7 +73,7 @@ func TestLAS_Pick_ColdStartUsesHeadWait(t *testing.T) {
 // happen lazily when its service is next read. A program with high raw service that idled long
 // enough must outrank a fresh low-service competitor.
 func TestLAS_Pick_UsesDecayedService(t *testing.T) {
-	s := &LASStrategy{weightService: 1.0, weightHeadWait: 0.0, halfLifeSeconds: 1.0, decayFactor: 1.0}
+	s := &LASStrategy{weightService: 1.0, weightHeadWait: 0.0, halfLifeSeconds: 1.0}
 	now := time.Now()
 
 	// alpha accrued heavy service, then idled for 10 half-lives (never visited while idle);
@@ -99,7 +99,7 @@ func TestLAS_Pick_UsesDecayedService(t *testing.T) {
 // program the eviction sweep is concurrently removing: entries with Len == 0 must not reach
 // getOrCreateState.
 func TestLAS_Pick_DoesNotCreateStateForEmptyEntries(t *testing.T) {
-	s := &LASStrategy{weightService: 1.0, weightHeadWait: 0.0, decayFactor: 1.0}
+	s := &LASStrategy{weightService: 1.0, weightHeadWait: 0.0}
 	queues := map[string]QueueInfo{
 		"ghost": {Queue: makeQueue("ghost", 0, time.Time{}), Metrics: &ProgramMetrics{}, Len: 0},
 	}
@@ -110,7 +110,7 @@ func TestLAS_Pick_DoesNotCreateStateForEmptyEntries(t *testing.T) {
 }
 
 func TestLAS_OnCompleted_AccumulatesWeightedCost(t *testing.T) {
-	s := &LASStrategy{decayFactor: 1.0}
+	s := &LASStrategy{}
 	req := &fwksched.InferenceRequest{FairnessID: "alpha"}
 	resp := &fwkrc.Response{EndOfStream: true}
 	resp.Usage.PromptTokens = 100
@@ -119,7 +119,7 @@ func TestLAS_OnCompleted_AccumulatesWeightedCost(t *testing.T) {
 	s.OnCompleted(nil, req, resp)
 
 	// cost = 1*100 + 2*50 = 200
-	assert.Equal(t, 200.0, s.getOrCreateState("alpha").Service(time.Now(), 0, 1.0))
+	assert.Equal(t, 200.0, s.getOrCreateState("alpha").Service(time.Now(), 0))
 }
 
 func TestLAS_OnCompleted_NilSafe(t *testing.T) {
@@ -133,16 +133,15 @@ func TestLAS_TimedDecay_HalvesAtHalfLife(t *testing.T) {
 	now := time.Now()
 	st.decayAnchor = now.Add(-1 * time.Second) // one half-life ago
 
-	assert.InDelta(t, 50.0, st.Service(now, 1.0, 1.0), 0.001)
+	assert.InDelta(t, 50.0, st.Service(now, 1.0), 0.001)
 }
 
-func TestLAS_FactorDecay_AppliesPerElapsedSecond(t *testing.T) {
+func TestLAS_ZeroHalfLife_DisablesDecay(t *testing.T) {
 	st := &lasState{attainedService: 100}
 	now := time.Now()
-	st.decayAnchor = now.Add(-2 * time.Second)
+	st.decayAnchor = now.Add(-1 * time.Hour)
 
-	// factor 0.5/s over 2 s: 100 * 0.5^2 = 25.
-	assert.InDelta(t, 25.0, st.Service(now, 0, 0.5), 0.001)
+	assert.Equal(t, 100.0, st.Service(now, 0), "a half-life of 0 must hold service flat")
 }
 
 // TestLAS_AddService_AppliesPendingDecayFirst pins that a completion does not forfeit the decay
@@ -153,7 +152,7 @@ func TestLAS_AddService_AppliesPendingDecayFirst(t *testing.T) {
 	now := time.Now()
 	st.decayAnchor = now.Add(-1 * time.Second) // one half-life ago
 
-	got := st.AddService(10, now, 1.0, 1.0)
+	got := st.AddService(10, now, 1.0)
 
 	assert.InDelta(t, 60.0, got, 0.001, "100 must halve to 50 before the +10 lands")
 }
@@ -161,12 +160,12 @@ func TestLAS_AddService_AppliesPendingDecayFirst(t *testing.T) {
 func TestLAS_EvictProgram_DropsState(t *testing.T) {
 	s := &LASStrategy{}
 	now := time.Now()
-	s.getOrCreateState("alpha").AddService(100, now, 0, 1.0)
+	s.getOrCreateState("alpha").AddService(100, now, 0)
 
 	s.EvictProgram("alpha")
 
 	// A subsequent getOrCreateState returns a fresh zero entry.
-	assert.Equal(t, 0.0, s.getOrCreateState("alpha").Service(now, 0, 1.0))
+	assert.Equal(t, 0.0, s.getOrCreateState("alpha").Service(now, 0))
 }
 
 func TestRangeNormalize(t *testing.T) {

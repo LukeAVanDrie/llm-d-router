@@ -12,6 +12,7 @@ import (
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/metadata"
@@ -42,8 +43,6 @@ func TestFactory_InvalidConfig(t *testing.T) {
 		"negative ttl":       `{"evictionTtlSeconds":-1}`,
 		"zero sweep":         `{"evictionSweepSeconds":0}`,
 		"negative weight":    `{"lasWeightService":-0.1}`,
-		"decay factor > 1":   `{"lasDecayFactor":1.5}`,
-		"decay factor 0":     `{"lasDecayFactor":0}`,
 		"negative half life": `{"lasHalfLifeSeconds":-1}`,
 	}
 	for name, cfg := range cases {
@@ -52,6 +51,14 @@ func TestFactory_InvalidConfig(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+// TestFactory_RejectsUnknownKeys pins that a config key the plugin does not recognize fails
+// startup. Decay is parameterized by lasHalfLifeSeconds alone, so a config setting lasDecayFactor
+// names a parameter the plugin does not accept, and the operator hears about it.
+func TestFactory_RejectsUnknownKeys(t *testing.T) {
+	_, err := ProgramAwarePluginFactory("test", plugin.StrictDecoder([]byte(`{"lasDecayFactor":0.99997}`)), nil)
+	require.ErrorContains(t, err, "lasDecayFactor")
 }
 
 func TestPick_NilBand(t *testing.T) {
@@ -110,7 +117,6 @@ func TestPick_IdleProgramServiceDecaysWithoutVisits(t *testing.T) {
 		Strategy:           "las",
 		LASWeightService:   1.0,
 		LASWeightHeadWait:  0.0,
-		LASDecayFactor:     1.0,
 		LASHalfLifeSeconds: 1,
 	})
 	require.NoError(t, err)

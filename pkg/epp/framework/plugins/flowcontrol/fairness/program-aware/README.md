@@ -18,7 +18,7 @@ Choose this policy when:
 * **Identifies programs** via the fairness ID header carried on each request.
 * **Tracks per-program metrics** through the request lifecycle: queue wait time, dispatched count, in-flight count, last completion time, and (LAS) attained service in weighted tokens.
 * **Selects a queue to dispatch from** using the configured strategy. Currently `las` (Least Attained Service) is supported; programs with the lowest accumulated service score highest.
-* **Decays attained service** in wall-clock time so a long-idle program is not penalized indefinitely. Decay is applied lazily whenever a program's service is read or accumulated, so it does not depend on the program being visited by the dispatch loop. Two parameterizations are supported: an explicit half-life, or a per-second decay factor.
+* **Decays attained service** in wall-clock time so a long-idle program is not penalized indefinitely. Decay is applied lazily whenever a program's service is read or accumulated, so it does not depend on the program being visited by the dispatch loop. The rate is set by an explicit half-life.
 * **Evicts idle program state** on a periodic sweep so per-program memory and Prometheus label series do not accumulate forever.
 
 ## Unit of Fairness
@@ -54,8 +54,7 @@ flowControl:
 | `strategy` | `las` | Scoring strategy. Only `las` is supported. |
 | `lasWeightService` | `0.8` | Weight on the inverted attained-service signal. Higher values prioritize underserved programs more aggressively. |
 | `lasWeightHeadWait` | `0.2` | Weight on the head-of-queue age. Acts as a tiebreaker on cold start when programs have equal attained service. |
-| `lasDecayFactor` | `0.99997` | Per-second decay factor applied to attained service when `lasHalfLifeSeconds` is `0`. Must be in `(0, 1]`. |
-| `lasHalfLifeSeconds` | `60` | Wall-clock half-life of attained service. When `> 0` it overrides `lasDecayFactor`. |
+| `lasHalfLifeSeconds` | `60` | Wall-clock half-life of attained service. `0` disables decay, making attained service cumulative for the program's lifetime. |
 | `evictionTtlSeconds` | `3600` | A program with no completion in this window is evicted from the metrics map. |
 | `evictionSweepSeconds` | `300` | How often the eviction sweep runs. Must be `> 0`. |
 
@@ -70,6 +69,11 @@ The plugin exports two shared collectors and one strategy-owned collector under 
 | `program_aware_jains_fairness_index` | Gauge | none | Jain's Fairness Index over the average wait time per program. `1.0` indicates perfectly equal waits. |
 | `program_aware_avg_wait_time_milliseconds` | GaugeVec | `program_id` | Cumulative running mean of flow-control queue wait time per program. |
 | `program_aware_attained_service_tokens` | GaugeVec | `program_id` | Time-decayed attained service per program, in weighted tokens. Written by the LAS strategy. |
+
+`program_aware_attained_service_tokens` is written at request completion. Decay is folded in
+lazily, so an idle program's gauge holds the value from its last completion until the program
+completes another request. Scheduling reads the decayed value directly, so a flat series does not
+mean the scheduler is scoring the program on stale service.
 
 ## Trade-offs
 

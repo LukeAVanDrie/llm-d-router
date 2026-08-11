@@ -32,9 +32,8 @@ type lasState struct {
 }
 
 // decayLocked folds in the decay accrued since decayAnchor and advances the anchor to now.
-// halfLifeSeconds > 0 selects half-life decay; otherwise factor is a per-second decay rate.
-// The caller must hold mu.
-func (s *lasState) decayLocked(now time.Time, halfLifeSeconds, factor float64) {
+// halfLifeSeconds of 0 disables decay. The caller must hold mu.
+func (s *lasState) decayLocked(now time.Time, halfLifeSeconds float64) {
 	if s.decayAnchor.IsZero() {
 		s.decayAnchor = now
 		return
@@ -44,26 +43,25 @@ func (s *lasState) decayLocked(now time.Time, halfLifeSeconds, factor float64) {
 		return
 	}
 	if halfLifeSeconds > 0 {
-		s.attainedService *= math.Pow(0.5, elapsed/halfLifeSeconds)
-	} else {
-		s.attainedService *= math.Pow(factor, elapsed)
+		s.attainedService *= math.Exp2(-elapsed / halfLifeSeconds)
 	}
 	s.decayAnchor = now
 }
 
-// Service returns the attained service with decay up to now applied.
-func (s *lasState) Service(now time.Time, halfLifeSeconds, factor float64) float64 {
+// Service returns the attained service with decay up to now applied. Folding the decay in writes
+// the decayed value back and advances the anchor, so Service mutates lasState.
+func (s *lasState) Service(now time.Time, halfLifeSeconds float64) float64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.decayLocked(now, halfLifeSeconds, factor)
+	s.decayLocked(now, halfLifeSeconds)
 	return s.attainedService
 }
 
 // AddService folds in pending decay, then accumulates cost, and returns the new total.
-func (s *lasState) AddService(cost float64, now time.Time, halfLifeSeconds, factor float64) float64 {
+func (s *lasState) AddService(cost float64, now time.Time, halfLifeSeconds float64) float64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.decayLocked(now, halfLifeSeconds, factor)
+	s.decayLocked(now, halfLifeSeconds)
 	s.attainedService += cost
 	return s.attainedService
 }
@@ -82,7 +80,6 @@ var _ Strategy = &LASStrategy{}
 type LASStrategy struct {
 	weightService   float64
 	weightHeadWait  float64
-	decayFactor     float64
 	halfLifeSeconds float64
 
 	state sync.Map // key: program ID (string), value: *lasState
@@ -125,7 +122,7 @@ func (s *LASStrategy) Pick(_ int, queues map[string]QueueInfo) flowcontrol.FlowQ
 			continue
 		}
 
-		service := s.getOrCreateState(id).Service(now, s.halfLifeSeconds, s.decayFactor)
+		service := s.getOrCreateState(id).Service(now, s.halfLifeSeconds)
 		var headWaitMs float64
 		if head := qi.Queue.Peek(); head != nil {
 			headWaitMs = float64(time.Since(head.EnqueueTime()).Milliseconds())
@@ -176,7 +173,7 @@ func (s *LASStrategy) OnCompleted(_ *ProgramMetrics, request *fwksched.Inference
 	completionTokens := int64(response.Usage.CompletionTokens)
 	cost := float64(weightInputToken*promptTokens + weightOutputToken*completionTokens)
 	id := programIDFor(request)
-	service := s.getOrCreateState(id).AddService(cost, time.Now(), s.halfLifeSeconds, s.decayFactor)
+	service := s.getOrCreateState(id).AddService(cost, time.Now(), s.halfLifeSeconds)
 	attainedServiceTokens.WithLabelValues(id).Set(service)
 }
 
