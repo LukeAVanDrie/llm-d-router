@@ -19,7 +19,10 @@ package scheduling
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -64,6 +67,11 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 	}()
 
 	profileRunResults := map[string]*fwksched.ProfileRunResult{}
+	// Keyed like profileRunResults so a profile that fails in one iteration and
+	// succeeds in a later one leaves no stale error behind. Nil until a profile
+	// fails: delete and len are no-ops on a nil map, and the happy path skips
+	// the allocation.
+	var profileRunErrors map[string]error
 
 	for { // get the next set of profiles to run iteratively based on the request and the previous execution results
 		loggerVerbose.Info("Running profile handler, Pick profiles", "plugin", s.profileHandler.TypedName())
@@ -81,8 +89,13 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 			profileRunResult, err := runSchedulerProfile(ctx, name, profile, request, candidateEndpoints)
 			if err != nil {
 				loggerVerbose.Info("failed to run scheduler profile", "profile", name, "error", err.Error())
+				if profileRunErrors == nil {
+					profileRunErrors = map[string]error{}
+				}
+				profileRunErrors[name] = fmt.Errorf("profile %q: %w", name, err)
 			} else {
 				loggerVerbose.Info("Completed running scheduler profile succuessfully", "profile", name)
+				delete(profileRunErrors, name)
 			}
 
 			profileRunResults[name] = profileRunResult // if profile failed to run, the run result is nil
@@ -99,6 +112,21 @@ func (s *Scheduler) Schedule(ctx context.Context, request *fwksched.InferenceReq
 	result, err = s.profileHandler.ProcessResults(ctx, request, profileRunResults)
 	metrics.RecordPluginProcessingLatency(processProfilesResultsExtensionPoint, s.profileHandler.TypedName().Type, s.profileHandler.TypedName().Name, time.Since(before))
 	loggerVerbose.Info("Completed running profile handler ProcessResults successfully", "plugin", s.profileHandler.TypedName())
+
+	// Profile handlers see failed profiles only as nil results and report them
+	// with fresh untyped errors. Join the retained profile errors so a typed
+	// errcommon.Error raised inside a profile run (e.g. filters draining the
+	// candidate set) stays reachable via errors.As in the caller.
+	if err != nil && len(profileRunErrors) > 0 {
+		errs := make([]error, 0, len(profileRunErrors)+1)
+		errs = append(errs, err)
+		// Sorted so error composition, and therefore errors.As selection when
+		// profiles fail with different typed codes, is deterministic.
+		for _, name := range slices.Sorted(maps.Keys(profileRunErrors)) {
+			errs = append(errs, profileRunErrors[name])
+		}
+		err = errors.Join(errs...)
+	}
 
 	return result, err
 }

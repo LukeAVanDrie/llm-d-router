@@ -18,6 +18,7 @@ package scheduling
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -26,7 +27,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	errcommon "github.com/llm-d/llm-d-router/pkg/common/error"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/picker/maxscore"
@@ -158,4 +161,36 @@ func TestSchedule(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Tests that a filter draining the candidate set surfaces a typed capacity
+// rejection from Schedule.
+func TestScheduleFilterDrainReturnsTypedError(t *testing.T) {
+	drainingFilter := &testPlugin{typedName: fwkplugin.TypedName{Type: "drain-filter", Name: "drain-filter"}} // empty FilterRes drops every endpoint
+
+	profile := NewSchedulerProfile().
+		WithFilters(drainingFilter).
+		WithPicker(maxscore.NewMaxScorePicker(picker.DefaultMaxNumOfEndpoints))
+
+	schedulerConfig := NewSchedulerConfig(single.NewSingleProfileHandler(), map[string]fwksched.SchedulerProfile{"default": profile})
+	scheduler := NewSchedulerWithConfig(schedulerConfig)
+
+	req := &fwksched.InferenceRequest{
+		RequestID:   uuid.NewString(),
+		TargetModel: "any-model",
+	}
+	input := []fwksched.Endpoint{
+		fwksched.NewEndpoint(&fwkdl.EndpointMetadata{ID: k8stypes.NamespacedName{Name: "pod1"}}, &fwkdl.Metrics{}, nil),
+	}
+
+	result, err := scheduler.Schedule(context.Background(), req, input)
+	assert.Nil(t, result)
+	assert.Error(t, err)
+
+	var typedErr errcommon.Error
+	if !errors.As(err, &typedErr) {
+		t.Fatalf("Schedule error is not an errcommon.Error: %v", err)
+	}
+	assert.Equal(t, errcommon.ResourceExhausted, typedErr.Code)
+	assert.Equal(t, string(errcommon.RequestDroppedReasonSaturated), typedErr.Headers[errcommon.RequestDroppedReasonHeaderKey])
 }
