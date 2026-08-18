@@ -77,6 +77,9 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 			logger.Error(err, "parsing response")
 		}
 	}
+	if parsedResp != nil {
+		reqCtx.StreamedEvents += parsedResp.StreamedEvents
+	}
 	if parsedResp != nil && parsedResp.Usage != nil {
 		reqCtx.Usage = *parsedResp.Usage
 		metrics.RecordInputTokens(reqCtx.IncomingModelName, reqCtx.TargetModelName, fairnessID, priority, reqCtx.Usage.PromptTokens)

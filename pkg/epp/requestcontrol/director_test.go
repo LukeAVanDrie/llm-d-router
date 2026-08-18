@@ -1648,7 +1648,10 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 		TargetPod: &fwkdl.EndpointMetadata{ID: types.NamespacedName{Namespace: "namespace1", Name: "test-pod-name"}},
 	}
 
+	// Each dispatch snapshots the accumulator, so every invocation carries the total at call time.
+	reqCtx.StreamedEvents = 5
 	director.HandleResponseBody(ctx, reqCtx, false)
+	reqCtx.StreamedEvents = 6
 	director.HandleResponseBody(ctx, reqCtx, false)
 
 	// Intermediate chunks (endOfStream=false) run asynchronously, wait for them.
@@ -1659,6 +1662,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 	}, time.Second, 10*time.Millisecond, "async response body plugins should have been called for intermediate chunks")
 
 	// Final chunk (endOfStream=true) runs synchronously (drains queue first).
+	reqCtx.StreamedEvents = 7
 	director.HandleResponseBody(ctx, reqCtx, true)
 
 	ps1.mu.Lock()
@@ -1674,6 +1678,7 @@ func TestDirector_HandleResponseBody(t *testing.T) {
 		assert.Equal(t, "test-req-id-for-streaming", resp.RequestID)
 		assert.Equal(t, reqCtx.Response.Headers, resp.Headers)
 		assert.Equal(t, "namespace1/test-pod-name", targetPods[i])
+		assert.Equal(t, 5+i, resp.StreamedEvents, "StreamedEvents should carry the accumulator value at dispatch time for chunk %d", i)
 		if i < 2 {
 			assert.False(t, resp.EndOfStream, "EndOfStream should be false for chunk %d", i)
 		} else {

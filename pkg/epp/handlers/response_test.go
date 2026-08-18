@@ -568,6 +568,65 @@ func TestResponseSizeAccumulation(t *testing.T) {
 	}
 }
 
+func TestStreamedEventAccumulation(t *testing.T) {
+	ctx := logutil.NewTestLoggerIntoContext(context.Background())
+
+	tests := []struct {
+		name               string
+		headers            map[string]string
+		chunks             [][]byte
+		wantStreamedEvents int
+	}{
+		{
+			name:    "events accumulate across chunks",
+			headers: map[string]string{"content-type": "text/event-stream"},
+			chunks: [][]byte{
+				[]byte(`data: {"choices":[{"text":"He"}]}` + "\n" + `data: {"choices":[{"text":"llo"}]}` + "\n"),
+				[]byte(`data: {"choices":[{"text":"!"}]}` + "\n" + `data: [DONE]`),
+			},
+			wantStreamedEvents: 3,
+		},
+		{
+			name:               "a truncated stream keeps the count it reached",
+			headers:            map[string]string{"content-type": "text/event-stream"},
+			chunks:             [][]byte{[]byte(`data: {"choices":[{"text":"He"}]}` + "\n")},
+			wantStreamedEvents: 1,
+		},
+		{
+			name:    "an event cut after the prefix at a chunk boundary counts once",
+			headers: map[string]string{"content-type": "text/event-stream"},
+			chunks: [][]byte{
+				[]byte(`data: {"choices":[{"text":"He"}]}` + "\n" + `data: {"cho`),
+				[]byte(`ices":[{"text":"llo"}]}` + "\n" + `data: [DONE]`),
+			},
+			wantStreamedEvents: 2,
+		},
+		{
+			name:               "a non-streamed response counts nothing",
+			headers:            map[string]string{"content-type": "application/json"},
+			chunks:             [][]byte{[]byte(body)},
+			wantStreamedEvents: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &StreamingServer{
+				parserRegistry: NewParserRegistry([]fwkrh.Parser{openai.NewOpenAIParser()}, logr.Discard()),
+				director:       &mockDirector{},
+			}
+			reqCtx := &RequestContext{
+				Response:          &Response{Headers: tt.headers},
+				SchedulingRequest: &fwksched.InferenceRequest{FairnessID: metadata.DefaultFairnessID},
+			}
+			for i, chunk := range tt.chunks {
+				server.HandleResponseBody(ctx, reqCtx, chunk, i == len(tt.chunks)-1)
+			}
+			assert.Equal(t, tt.wantStreamedEvents, reqCtx.StreamedEvents)
+		})
+	}
+}
+
 // TestGenerateResponseBodyResponses_DynamicMetadata verifies that DynamicMetadata is attached
 // to the last ProcessingResponse chunk and not to earlier chunks. This is a regression test for
 // the bug where the metadata was computed by plugins but silently dropped before reaching Envoy.

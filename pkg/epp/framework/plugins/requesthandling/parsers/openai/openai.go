@@ -188,10 +188,26 @@ func (p *OpenAIParser) ParseResponse(ctx context.Context, body []byte, headers m
 }
 
 func (p *OpenAIParser) parseStreamResponse(chunk []byte) (*fwkrh.ParsedResponse, error) {
-	usage := extractUsageStreaming(string(chunk))
+	text := string(chunk)
+	usage := extractUsageStreaming(text)
 	return &fwkrh.ParsedResponse{
-		Usage: usage,
+		Usage:          usage,
+		StreamedEvents: countStreamEvents(text),
 	}, nil
+}
+
+// countStreamEvents counts the SSE data events in a chunk, excluding the terminator. An event
+// split across two chunks is counted with the half that carries the prefix; a split inside the
+// prefix drops the event and a split inside the terminator counts it, both a one-event error.
+func countStreamEvents(responseText string) int {
+	count := 0
+	for line := range strings.SplitSeq(responseText, "\n") {
+		content, ok := strings.CutPrefix(line, streamingRespPrefix)
+		if ok && strings.TrimSuffix(content, "\r") != "[DONE]" {
+			count++
+		}
+	}
+	return count
 }
 
 // determineAPITypeFromPath determines the API type based on the request path.
