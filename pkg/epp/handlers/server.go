@@ -530,14 +530,19 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// served the request, and Envoy only reports that at the response phase.
 			reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
 			respHeadersReceivedAt := time.Now()
+			// The []byte-to-string conversions in the comparisons below do not allocate.
+			traceEnabled := loggerTrace.Enabled()
 			for _, header := range v.ResponseHeaders.Headers.GetHeaders() {
-				value := string(header.RawValue)
-				loggerTrace.Info("header", "key", header.Key, "value", value)
-				if header.Key == "status" && value != "200" {
+				if traceEnabled {
+					loggerTrace.Info("header", "key", header.Key, "value", string(header.RawValue))
+				}
+				if header.Key == "status" && string(header.RawValue) != "200" {
 					reqCtx.ResponseStatusCode = errcommon.ModelServerError
-				} else if header.Key == "content-type" && strings.Contains(value, "text/event-stream") {
+				} else if header.Key == "content-type" && strings.Contains(string(header.RawValue), "text/event-stream") {
 					reqCtx.modelServerStreaming = true
-					loggerTrace.Info("model server is streaming response")
+					if traceEnabled {
+						loggerTrace.Info("model server is streaming response")
+					}
 				}
 			}
 			reqCtx.RequestState = ResponseReceived
