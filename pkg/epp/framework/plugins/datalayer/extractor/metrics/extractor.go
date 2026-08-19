@@ -40,10 +40,8 @@ const (
 	KVCacheUsagePercentKey = "KVCacheUsagePercent"
 	WaitingQueueSizeKey    = "WaitingQueueSize"
 	RunningRequestsSizeKey = "RunningRequestsSize"
-	MaxActiveModelsKey     = "MaxActiveModels"
 	ActiveModelsKey        = "ActiveModels"
 	WaitingModelsKey       = "WaitingModels"
-	UpdateTimeKey          = "UpdateTime"
 
 	// LoRA metrics based on MSP
 	LoraInfoRunningAdaptersMetricName = "running_lora_adapters"
