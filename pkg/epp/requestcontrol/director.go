@@ -572,12 +572,22 @@ func (d *Director) HandleResponseHeader(ctx context.Context, reqCtx *handlers.Re
 // plugins run synchronously because they may produce DynamicMetadata that must be attached
 // to the ext_proc response sent back to Envoy.
 func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.RequestContext, endOfStream bool) *handlers.RequestContext {
+	// Resolved once so every end-of-stream Response carries the same cause.
+	var cause fwkrc.TerminationCause
+	if endOfStream {
+		cause = reqCtx.TerminationCause
+		if cause == "" {
+			cause = fwkrc.TerminationCauseNatural
+		}
+	}
+
 	// The eviction tracker must observe stream termination even when no streaming plugins are
 	// registered, so this runs before the early return below.
 	if endOfStream && d.requestEvictor != nil {
 		d.requestEvictor.ResponseBody(ctx, reqCtx.SchedulingRequest, &fwkrc.Response{
-			RequestID:   reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
-			EndOfStream: true,
+			RequestID:        reqCtx.Request.Headers[reqcommon.RequestIDHeaderKey],
+			EndOfStream:      true,
+			TerminationCause: cause,
 		}, reqCtx.TargetPod)
 	}
 
@@ -597,6 +607,7 @@ func (d *Director) HandleResponseBody(ctx context.Context, reqCtx *handlers.Requ
 	}
 
 	if endOfStream {
+		response.TerminationCause = cause
 		// Drain the async queue: close the channel and wait for the goroutine to finish
 		// processing all previously queued chunks before running the final chunk synchronously.
 		if val, ok := d.responseBodyQueues.LoadAndDelete(reqCtx); ok {
