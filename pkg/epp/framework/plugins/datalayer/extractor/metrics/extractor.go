@@ -197,13 +197,18 @@ func (ext *Extractor) Extract(ctx context.Context, in fwkdl.PollInput[sourcemetr
 		updated = true
 	}
 
-	logger := log.FromContext(ctx).WithValues("endpoint", ep.GetMetadata().ID)
 	if updated {
 		clone.UpdateTime = time.Now()
-		logger.V(logutil.TRACE).Info("Refreshed metrics",
-			"metrics", mapping.MetricNames(),
-			"updated", clone,
-		)
+		// Guarded: this runs per endpoint per scrape tick, and the logger
+		// construction, MetricNames slice, and boxed args all allocate even
+		// when TRACE is off.
+		if trace := log.FromContext(ctx).V(logutil.TRACE); trace.Enabled() {
+			trace.Info("Refreshed metrics",
+				"endpoint", ep.GetMetadata().ID,
+				"metrics", mapping.MetricNames(),
+				"updated", clone,
+			)
+		}
 		ep.UpdateMetrics(clone)
 	}
 
