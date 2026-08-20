@@ -393,15 +393,22 @@ func (p *Processor) hasCapacity(priority int, itemByteSize uint64) (bool, contra
 
 // recordCapacityUtilization emits occupancy/effective-capacity ratio gauges per priority band (aggregated over every
 // flow in the band, never per flow queue), plus the all-bands rollup in its own metric family when a global capacity
-// is configured. It reads a single Stats() snapshot; the data source is expected to move with the engine-merge
-// refactor, but the metric contract (names, labels, semantics) stays stable (#2102).
+// is configured. It reads one CapacitySnapshot per configured band; the metric contract (names, labels, semantics)
+// is defined by #2102.
 //
 // Band capacities always resolve to a value (applyDefaults supplies a fallback), so every configured band reports.
 // Global capacity is optional, so its series is omitted when unset rather than reported as a misleading 0.
 func (p *Processor) recordCapacityUtilization() {
-	stats := p.registry.Stats()
+	var global contracts.CapacityDimension
+	for _, priority := range p.registry.AllOrderedPriorityLevels() {
+		snapshot, err := p.registry.CapacitySnapshot(priority)
+		if err != nil {
+			// The band was deleted between listing the priority levels and the read.
+			continue
+		}
+		global = snapshot.Global
 
-	for priority, band := range stats.PerPriorityBandStats {
+		band := snapshot.Band
 		priorityStr := strconv.Itoa(priority)
 		if band.CapacityRequests > 0 {
 			metrics.RecordFlowControlCapacityUtilizationRequests(priorityStr, p.poolName,
@@ -414,13 +421,13 @@ func (p *Processor) recordCapacityUtilization() {
 	}
 
 	// All-bands rollup, only when a global capacity is configured.
-	if stats.TotalCapacityRequests > 0 {
+	if global.CapacityRequests > 0 {
 		metrics.RecordFlowControlGlobalCapacityUtilizationRequests(p.poolName,
-			float64(stats.TotalLen)/float64(stats.TotalCapacityRequests))
+			float64(global.Len)/float64(global.CapacityRequests))
 	}
-	if stats.TotalCapacityBytes > 0 {
+	if global.CapacityBytes > 0 {
 		metrics.RecordFlowControlGlobalCapacityUtilizationBytes(p.poolName,
-			float64(stats.TotalByteSize)/float64(stats.TotalCapacityBytes))
+			float64(global.ByteSize)/float64(global.CapacityBytes))
 	}
 }
 
