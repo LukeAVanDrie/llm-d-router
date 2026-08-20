@@ -77,6 +77,9 @@ func (s *StreamingServer) HandleResponseBody(ctx context.Context, reqCtx *Reques
 			logger.Error(err, "parsing response")
 		}
 	}
+	if parsedResp != nil {
+		reqCtx.StreamedEvents += parsedResp.StreamedEvents
+	}
 	if parsedResp != nil && parsedResp.Usage != nil {
 		mergeUsage(&reqCtx.Usage, *parsedResp.Usage)
 		// Metrics observe the values this chunk carried, not the accumulated ones: a field
