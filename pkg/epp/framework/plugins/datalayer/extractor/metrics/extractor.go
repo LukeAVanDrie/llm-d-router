@@ -87,10 +87,20 @@ func (ext *Extractor) TypedName() fwkplugin.TypedName {
 var _ fwkplugin.ProducerPlugin = &Extractor{}
 
 // Produces declares the custom scalar metric attributes, whose names come from
-// the per-engine mappings in configuration. Core metrics land on the Metrics
-// struct rather than the attribute map and so are not declared here.
+// the per-engine mappings in configuration, plus the per-pod metric fields this
+// extractor writes into the endpoint's Metrics struct that a scorer or filter
+// declares as a Consumes() dependency. Declaring both lets the data-attribute
+// registry and the DAG builder validate the scorers and filters that read them.
+// The Metrics field types mirror the fwkdl.Metrics struct (float64, int, map
+// of model name to count).
 func (ext *Extractor) Produces() map[fwkplugin.DataKey]any {
-	produced := map[fwkplugin.DataKey]any{}
+	produced := map[fwkplugin.DataKey]any{
+		fwkplugin.NewDataKey(KVCacheUsagePercentKey, MetricsExtractorType): float64(0),
+		fwkplugin.NewDataKey(WaitingQueueSizeKey, MetricsExtractorType):    int(0),
+		fwkplugin.NewDataKey(RunningRequestsSizeKey, MetricsExtractorType): int(0),
+		fwkplugin.NewDataKey(ActiveModelsKey, MetricsExtractorType):        map[string]int{},
+		fwkplugin.NewDataKey(WaitingModelsKey, MetricsExtractorType):       map[string]int{},
+	}
 	for _, mapping := range ext.registry.Mappings() {
 		for _, custom := range mapping.CustomMetrics {
 			produced[attrmetrics.ScalarMetricDataKey(custom.AttributeKey)] = attrmetrics.ScalarMetricValue(0)
