@@ -530,6 +530,8 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
 			respHeadersReceivedAt := time.Now()
 			// The []byte-to-string conversions in the comparisons below do not allocate.
+			// The traceEnabled guard is intentional: passing arguments to a disabled
+			// logger still boxes them into a heap-allocated slice, per header here.
 			traceEnabled := loggerTrace.Enabled()
 			for _, header := range v.ResponseHeaders.Headers.GetHeaders() {
 				if traceEnabled {
