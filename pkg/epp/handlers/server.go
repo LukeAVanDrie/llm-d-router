@@ -529,9 +529,10 @@ func (s *StreamingServer) Process(srv extProcPb.ExternalProcessor_ProcessServer)
 			// served the request, and Envoy only reports that at the response phase.
 			reqCtx.Request.Metadata = envoy.ExtractMetadataValues(req)
 			respHeadersReceivedAt := time.Now()
-			// The []byte-to-string conversions in the comparisons below do not allocate.
 			// The traceEnabled guard is intentional: passing arguments to a disabled
-			// logger still boxes them into a heap-allocated slice, per header here.
+			// logger still boxes them into a heap-allocated slice, and this loop runs
+			// per header. string(header.RawValue) in the status comparison does not
+			// allocate; the content-type check runs at most once per response.
 			traceEnabled := loggerTrace.Enabled()
 			for _, header := range v.ResponseHeaders.Headers.GetHeaders() {
 				if traceEnabled {
