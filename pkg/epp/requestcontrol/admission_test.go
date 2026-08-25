@@ -289,6 +289,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectErr:       true,
 			expectErrCode:   errcommon.Internal,
 			expectErrSubstr: "internal flow control error",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonInternal)},
 		},
 		{
 			name:            "fc_reject_other_preadmission_ttl",
@@ -320,6 +321,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectErr:       true,
 			expectErrCode:   errcommon.Internal,
 			expectErrSubstr: "internal flow control error",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonInternal)},
 		},
 		{
 			name:            "fc_missing_family_sentinel",
@@ -329,6 +331,7 @@ func TestFlowControlAdmissionController_Admit(t *testing.T) {
 			expectErr:       true,
 			expectErrCode:   errcommon.Internal,
 			expectErrSubstr: "internal flow control error",
+			expectHeaders:   map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonInternal)},
 		},
 	}
 
@@ -496,14 +499,16 @@ func TestTranslateFlowControlError(t *testing.T) {
 			wantReason: string(errcommon.RequestDroppedReasonShuttingDown),
 		},
 		{
-			name:     "family sentinel without a recognized cause returns 500",
-			err:      fmt.Errorf("%w: unexpected failure", fctypes.ErrRejected),
-			wantCode: errcommon.Internal,
+			name:       "family sentinel without a recognized cause returns 500",
+			err:        fmt.Errorf("%w: unexpected failure", fctypes.ErrRejected),
+			wantCode:   errcommon.Internal,
+			wantReason: string(errcommon.RequestDroppedReasonInternal),
 		},
 		{
-			name:     "missing family sentinel returns 500",
-			err:      errors.New("unexpected failure"),
-			wantCode: errcommon.Internal,
+			name:       "missing family sentinel returns 500",
+			err:        errors.New("unexpected failure"),
+			wantCode:   errcommon.Internal,
+			wantReason: string(errcommon.RequestDroppedReasonInternal),
 		},
 	}
 

@@ -175,6 +175,13 @@ func TestFlowItem_Finalize_OutcomeClassification(t *testing.T) {
 			expectErrIs:   types.ErrTTLExpired,
 		},
 		{
+			name:          "queued deadline exceeded",
+			cause:         context.DeadlineExceeded,
+			isQueued:      true,
+			expectOutcome: types.QueueOutcomeEvictedTTL,
+			expectErrIs:   types.ErrTTLExpired,
+		},
+		{
 			name:          "queued context cancelled",
 			cause:         context.Canceled,
 			isQueued:      true,

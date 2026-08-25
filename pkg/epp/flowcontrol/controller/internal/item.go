@@ -189,8 +189,10 @@ func (fi *FlowItem) finalizeInternal(err error) {
 func wrapCause(cause error, isQueued bool) error {
 	var specificErr error
 	switch {
-	case errors.Is(cause, types.ErrTTLExpired) || errors.Is(cause, context.DeadlineExceeded):
-		specificErr = types.ErrTTLExpired
+	case errors.Is(cause, types.ErrTTLExpired):
+		specificErr = cause
+	case errors.Is(cause, context.DeadlineExceeded):
+		specificErr = fmt.Errorf("%w: %w", types.ErrTTLExpired, cause)
 	case errors.Is(cause, context.Canceled):
 		specificErr = fmt.Errorf("%w: %w", types.ErrContextCancelled, cause)
 	default:

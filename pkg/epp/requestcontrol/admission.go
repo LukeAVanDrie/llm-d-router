@@ -275,6 +275,6 @@ func translateFlowControlError(err error, poolEmpty func() bool) error {
 	case errors.Is(err, types.ErrContextCancelled):
 		return errcommon.Error{Code: errcommon.ServiceUnavailable, Msg: "client disconnected: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonContextCancelled)}}
 	default:
-		return errcommon.Error{Code: errcommon.Internal, Msg: "internal flow control error: " + msg}
+		return errcommon.Error{Code: errcommon.Internal, Msg: "internal flow control error: " + msg, Headers: map[string]string{errcommon.RequestDroppedReasonHeaderKey: string(errcommon.RequestDroppedReasonInternal)}}
 	}
 }

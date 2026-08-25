@@ -787,8 +787,9 @@ func (p *Processor) evictAll() {
 	p.processAllQueuesConcurrently("evictAll", processFn)
 }
 
-// finalizeAndRecordDrop finalizes item with err and counts the outcome actually stored. Finalization is idempotent,
-// so under a race with an external finalization the winner's outcome is the one counted.
+// finalizeAndRecordDrop finalizes item with err and counts the outcome actually stored. Finalization is idempotent
+// (sync.Once), so when the controller goroutine finalizes the same item concurrently (e.g. a TTL expiry racing the
+// processor's capacity rejection), the winner's outcome is the one counted.
 func (p *Processor) finalizeAndRecordDrop(item *FlowItem, err error) {
 	item.FinalizeWithError(err)
 	p.recordDrop(item.FinalState().Outcome)
