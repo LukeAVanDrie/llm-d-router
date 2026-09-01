@@ -22,7 +22,7 @@ candidates (no-op).
 The `prefix-cache-scorer` plugin scores endpoints by prefix cache hit ratio. It works with
 any picker, but the choice of picker creates a trade-off:
 
-- **With `max-picker`** (the default): the scorer consistently picks the single
+- **With `max-score-picker`** (the default): the scorer consistently picks the single
   highest-scoring endpoint, which maximizes cache hits but causes **hot-spotting** — many
   concurrent requests with similar prompts all land on the same endpoint, overloading it and
   degrading TTFT.
@@ -66,6 +66,33 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
 - If no endpoints have the TTFT source attribute (`LatencyPredictionInfo` or `InFlightLoad`),
   the TTFT load gate is skipped. If no endpoints have `PrefixCacheMatchInfo`, all prefix
   scores default to 0 and no endpoints pass the affinity threshold, so all are kept (no-op)
+
+## Composition requirements
+
+The filter narrows or widens the candidate set; the routing decision is made by the scorers
+and picker that run after it. When the TTFT load gate breaks stickiness, the filter keeps
+all endpoints, and the request moves off the sticky set only if downstream scoring prefers
+the less-loaded endpoints.
+
+Scorers running after this filter must score on load only. Each scorer's output is clamped
+to [0, 1] before weighting, so load scorers can favor a non-sticky endpoint by at most the
+sum of their weights, while a prefix-affinity scorer penalizes it by its weight times the
+prefix cache score difference. The break can therefore move a request only to endpoints
+whose prefix cache score is within loadWeightSum / prefixWeight of the sticky endpoint's.
+A prefix weight at or above the load weight sum lets a zero-match endpoint at best tie a
+fully matched sticky one; at or above loadWeightSum / affinityThreshold the gate cannot
+move any request. Combining this filter with a weighted `prefix-cache-scorer` and
+`max-score-picker` leaves the gate inert whenever the sticky endpoint holds a full match.
+
+Recommended compositions pair the filter with a single load scorer and `max-score-picker`:
+`token-load-scorer` for prefill-bound workloads, `active-request-scorer` for decode-bound
+workloads. `weighted-random-picker` spreads requests across the sticky set rather than
+concentrating them on the top-scored endpoint; the picker choice does not affect the
+load-only requirement on scorers. The
+[optimized-baseline guide](https://github.com/llm-d/llm-d/tree/main/guides/optimized-baseline)
+ships the prefill-bound composition, and the
+[Sticky Until Saturated post](https://llm-d.ai/blog/sticky-until-saturated-token-aware-routing)
+documents the strategy and its calibration.
 
 ## Config
 
