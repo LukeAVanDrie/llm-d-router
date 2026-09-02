@@ -72,7 +72,8 @@ Can be instantiated multiple times with different thresholds (e.g., 0.99 for glo
 The filter narrows the candidate set or leaves it unchanged; the routing decision is made
 by the scorers and picker that run after it. When the TTFT load gate breaks stickiness, the
 filter keeps all endpoints, and the request moves off the sticky set only if downstream
-scoring prefers the less-loaded endpoints.
+scoring prefers the less-loaded endpoints. Nothing tells the scorers that a break happened;
+they apply the same weights to whatever candidates arrive.
 
 Scorers running after this filter must not include a separately weighted prefix-affinity
 scorer. Each scorer's output is clamped to [0, 1] before weighting, so the other scorers can
@@ -85,7 +86,11 @@ at or above loadWeightSum / affinityThreshold no zero-match endpoint can beat an
 endpoint outright (at exact equality a tie, resolved at random, remains possible). The break
 still moves requests to partially warm endpoints inside the bound, so a weighted
 `prefix-cache-scorer` with `max-score-picker` attenuates the gate in proportion to the prefix
-weight, up to full inertness for cold endpoints.
+weight, up to full inertness for cold endpoints. Breaks are counted by
+`llm_d_epp_prefix_cache_affinity_filter_decisions_total` with `outcome="load_override"`. A
+break that changed no routing decision shows as that counter climbing while the sticky
+endpoint's queue depth and TTFT hold; there is no counter for a break that left the request
+on the same endpoint.
 
 Excluding a weighted prefix scorer does not remove affinity from the post-break decision.
 The recommended load scorers count uncached tokens (the endpoint's uncached tokens in flight
