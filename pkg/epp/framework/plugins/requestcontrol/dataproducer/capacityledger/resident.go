@@ -133,7 +133,7 @@ func (l *lease) update(g geometry, fn func()) {
 	}
 	fn()
 	next := footprint(l.state, g)
-	l.ep.acct.apply(next.sub(l.contrib))
+	l.ep.acct.apply(next.sub(l.contrib), vec{})
 	l.contrib = next
 }
 
@@ -145,7 +145,7 @@ func (l *lease) release() {
 		return
 	}
 	l.released = true
-	l.ep.acct.apply(vec{}.sub(l.contrib))
+	l.ep.acct.apply(vec{}.sub(l.contrib), vec{})
 	l.contrib = vec{}
 	stop := l.stopBackstop
 	l.mu.Unlock()

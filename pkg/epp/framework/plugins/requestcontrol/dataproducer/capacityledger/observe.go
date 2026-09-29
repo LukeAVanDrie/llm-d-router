@@ -39,6 +39,7 @@ func (l *Ledger) sample() {
 	l.sampleMu.Lock()
 	defer l.sampleMu.Unlock()
 
+	l.reapReservations()
 	now := l.clock.Now()
 	pool := l.decodeRate.estimate(now)
 	unrated := 0

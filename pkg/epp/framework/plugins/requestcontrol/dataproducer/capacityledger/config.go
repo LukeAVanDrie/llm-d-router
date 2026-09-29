@@ -20,12 +20,15 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
 	// defaultStalenessThreshold is the default of --metrics-staleness-threshold, used when the
 	// handle reports none.
 	defaultStalenessThreshold = 2 * time.Second
+	defaultReservationTTL     = time.Second
 	// defaultSampleInterval is used when the handle reports no metrics refresh interval.
 	defaultSampleInterval = 50 * time.Millisecond
 )
@@ -49,6 +52,11 @@ type apiConfig struct {
 	// request's output, including requests that set no maximum output. Required.
 	MaxModelLen *int64 `json:"maxModelLen,omitempty"`
 
+	// ReservationTTL bounds how long the ledger keeps a reservation that flow control has neither
+	// bound to a dispatched request nor refunded. A bound reservation is released when its request
+	// ends. Defaults to 1s.
+	ReservationTTL *metav1.Duration `json:"reservationTTL,omitempty"`
+
 	// PrefixMatchInfoProducerName selects which prefix-cache producer's match to read when
 	// computing a lease's uncached prompt. Empty selects the approximate-prefix producer.
 	PrefixMatchInfoProducerName string `json:"prefixMatchInfoProducerName,omitempty"`
@@ -62,6 +70,7 @@ type config struct {
 	stalenessThreshold time.Duration
 	maxModelLen        int64
 	prefixProducerName string
+	reservationTTL     time.Duration
 }
 
 // decodeStep is the tokens one decode step schedules for one sequence, and the KV slots one
@@ -74,6 +83,13 @@ func newConfig(api apiConfig, stalenessThreshold time.Duration) (config, error) 
 	cfg := config{
 		stalenessThreshold: stalenessThreshold,
 		prefixProducerName: api.PrefixMatchInfoProducerName,
+		reservationTTL:     defaultReservationTTL,
+	}
+	if api.ReservationTTL != nil {
+		if api.ReservationTTL.Duration <= 0 {
+			return config{}, fmt.Errorf("reservationTTL must be positive, got %s", api.ReservationTTL.Duration)
+		}
+		cfg.reservationTTL = api.ReservationTTL.Duration
 	}
 	if cfg.stalenessThreshold <= 0 {
 		cfg.stalenessThreshold = defaultStalenessThreshold

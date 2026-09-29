@@ -34,6 +34,11 @@ func driftCount(t *testing.T, producer, axis string) uint64 {
 	t.Helper()
 	obs, err := driftVec.GetMetricWithLabelValues(producer, axis)
 	require.NoError(t, err)
+	return histogramSamples(t, obs)
+}
+
+func histogramSamples(t *testing.T, obs prometheus.Observer) uint64 {
+	t.Helper()
 	m := &dto.Metric{}
 	require.NoError(t, obs.(prometheus.Metric).Write(m))
 	return m.GetHistogram().GetSampleCount()

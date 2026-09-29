@@ -19,8 +19,32 @@ On each axis, `Used` is `Scraped` plus the increases the ledger has booked since
 never less than `Booked`. Releases after the scrape do not offset the increases, since the engine
 may have freed a finished request before the scrape; a booking made and released between two
 scrapes counts until the next scrape. When the ledger has no record for the current scrape, `Used`
-is the larger of `Booked` and `Scraped`. No in-tree plugin reads the
-view; it exists so its accuracy can be observed before any admission decision depends on it.
+is the larger of `Booked` and `Scraped`.
+
+## Endpoint gate
+
+The ledger can serve as flow control's endpoint gate (`flowControl.endpointGatePluginRef`). For
+each request at the head of a band, it checks every candidate endpoint for `Used + demand <=
+Capacity` on each axis, first alone and then with other requests' reservations. The step axis
+checks only that the endpoint has step budget left: vLLM gives a waiting request whatever budget
+its running requests leave and prefills the rest of the prompt in later steps, so a prompt's step
+demand is capped at the budget that remains. An endpoint with stale metrics counts as full.
+
+The gate reserves the request's demand on one endpoint where it fits: the one whose tightest axis
+has the most room left after the request. The reservation is a witness that every dispatched
+request fits somewhere at the same time; the scheduler still chooses where the request goes. The
+demand is the request's booking at dispatch: the prefix match is not known before scheduling, so
+the step demand is the whole prompt, and before tokenization the prompt is bounded by the request's
+size in bytes. At placement the reservation is converted to a lease on whichever endpoint the
+scheduler chose. It is refunded if the request does not dispatch, and released when the request's
+context ends.
+
+The gate never withholds a request, and its scheduling filter never removes an endpoint. The filter
+rechecks the scheduler's candidates at placement with the exact prompt and prefix match. Both
+record in metrics what an enforcing gate would have done. The filter must be listed before any
+other filter in each scheduling profile that places the gated requests. When the ledger is not the
+gate and no scheduling profiles are configured, the loader adds its filter to the default profile,
+where it passes every candidate through.
 
 ## Behavior
 
@@ -71,17 +95,28 @@ view; it exists so its accuracy can be observed before any admission decision de
 | `maxModelLen` | `int` | Yes | | The model's context length (vLLM `max_model_len`); bounds every request's output. |
 | `speculativeTokens` | `int` | No | `0` | vLLM `num_speculative_tokens`. |
 | `prefixMatchInfoProducerName` | `string` | No | approximate-prefix producer | Which prefix-cache producer's match to read. |
+| `reservationTTL` | `duration` | No | `1s` | How long a reservation that flow control has neither bound to a dispatched request nor refunded is kept. |
 
 The plugin is not created automatically, because its engine parameters have no defaults.
 
 **Configuration Example:**
 ```yaml
+featureGates:
+  - flowControl
 plugins:
   - type: capacity-ledger
+    name: ledger
     parameters:
       slotsPerEndpoint: 256
       stepTokenBudget: 8192
       maxModelLen: 32768
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: ledger   # first, when the ledger is the endpoint gate
+      - pluginRef: max-score-picker
+flowControl:
+  endpointGatePluginRef: ledger
 ```
 
 ## Related Documentation

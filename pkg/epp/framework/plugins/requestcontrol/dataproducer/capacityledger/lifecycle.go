@@ -111,19 +111,31 @@ func (l *Ledger) PreRequest(ctx context.Context, request *fwksched.InferenceRequ
 		return nil
 	}
 
-	prompts := promptLengths(request, int64(request.RequestSizeBytes))
-	ls := &lease{ep: e, dispatchedAt: l.clock.Now(), state: residentState{
-		prompts:        prompts,
-		uncachedPrompt: uncachedPromptTokens(target, sum(prompts), l.prefixDK),
-		n:              sequencesPerPrompt(request, max(l.cfg.slotsPerEndpoint/int64(len(prompts)), 1)),
-		maxOutput:      maxOutputTokens(request, slices.Max(prompts), l.cfg.maxModelLen),
-	}}
+	ls := &lease{ep: e, dispatchedAt: l.clock.Now(), state: l.residentFor(request, target)}
 	ls.update(l.geometry(e), func() {})
 	if prev, loaded := l.leases.Swap(request, ls); loaded {
 		prev.(*lease).release()
 	}
 	ls.setBackstop(context.AfterFunc(ctx, func() { l.releaseLease(request, ls) }))
+	l.convertReservation(request, e, ls)
 	return nil
+}
+
+// clampedN is the request's n, clamped so the request books at most slotsPerEndpoint sequences
+// across its prompts.
+func (l *Ledger) clampedN(request *fwksched.InferenceRequest, prompts []int64) int64 {
+	return sequencesPerPrompt(request, max(l.cfg.slotsPerEndpoint/int64(len(prompts)), 1))
+}
+
+// residentFor is the state of request, not yet started, on target.
+func (l *Ledger) residentFor(request *fwksched.InferenceRequest, target fwksched.Endpoint) residentState {
+	prompts := promptLengths(request, int64(request.RequestSizeBytes))
+	return residentState{
+		prompts:        prompts,
+		uncachedPrompt: uncachedPromptTokens(target, sum(prompts), l.prefixDK),
+		n:              l.clampedN(request, prompts),
+		maxOutput:      maxOutputTokens(request, slices.Max(prompts), l.cfg.maxModelLen),
+	}
 }
 
 // releaseLease releases ls if it is still the request's lease.

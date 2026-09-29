@@ -24,11 +24,13 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"k8s.io/utils/clock"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -51,6 +53,8 @@ var (
 	_ requestcontrol.ResponseBodyProcessor = &Ledger{}
 	_ fwkdl.EndpointExtractor              = (*Ledger)(nil)
 	_ fwkdl.Registrant                     = &Ledger{}
+	_ fwkfc.EndpointGate                   = &Ledger{}
+	_ fwksched.Filter                      = &Ledger{}
 )
 
 // Ledger is the capacity ledger plugin. It adapts the framework's extension points to the
@@ -67,10 +71,13 @@ type Ledger struct {
 	// mu guards endpoint membership.
 	mu        sync.Mutex
 	endpoints map[string]*endpoint
-	// leases maps *fwksched.InferenceRequest to *lease. Requests are keyed by pointer: the same
-	// request object reaches every extension point, and the request ID comes from a header a
-	// client can set.
-	leases sync.Map
+	// leases maps *fwksched.InferenceRequest to *lease, and reservations to *reservation. Requests
+	// are keyed by pointer: the same request object reaches every extension point, and the request
+	// ID comes from a header a client can set.
+	leases       sync.Map
+	reservations sync.Map
+	// gated is set once flow control has consulted the ledger as its endpoint gate.
+	gated atomic.Bool
 	// decodeRate is the decode rate across every endpoint, used where an endpoint has none.
 	decodeRate rate
 
@@ -166,21 +173,26 @@ func (l *Ledger) RegisterDependencies(r fwkdl.Registrar) error {
 	})
 }
 
-// geometry is the endpoint's current geometry. Block size is 0 until the endpoint is scraped.
-func (l *Ledger) geometry(e *endpoint) geometry {
+// geometry is the endpoint's current geometry.
+func (l *Ledger) geometry(e *endpoint) geometry { return l.geometryFor(e.datalayer().GetMetrics()) }
+
+// geometryFor is the geometry of an endpoint with metrics m. Block size is 0 until the endpoint is
+// scraped.
+func (l *Ledger) geometryFor(m *fwkdl.Metrics) geometry {
 	g := geometry{stepBudget: l.cfg.stepTokenBudget, decodeStep: l.cfg.decodeStep()}
-	if m := e.datalayer().GetMetrics(); m != nil {
+	if m != nil {
 		g.blockSize = int64(m.CacheBlockSize)
 	}
 	return g
 }
 
-// snapshot is a consistent read of an endpoint's state.
+// snapshot is a consistent read of an endpoint's state. used excludes reservations.
 type snapshot struct {
 	acct     accountState
 	scraped  vec
 	capacity vec
 	used     vec
+	geo      geometry
 	metrics  *fwkdl.Metrics
 	elig     attrcapacity.Eligibility
 }
@@ -188,6 +200,7 @@ type snapshot struct {
 func (l *Ledger) snapshot(e *endpoint) snapshot {
 	ep := e.datalayer()
 	s := snapshot{acct: e.acct.snapshot(), metrics: ep.GetMetrics()}
+	s.geo = l.geometryFor(s.metrics)
 	s.elig = eligibility(ep.GetMetadata(), s.metrics, l.engines.get(e.id.String()), l.cfg, l.clock.Now())
 	s.capacity[axisStep] = l.cfg.stepTokenBudget
 	s.capacity[axisSlots] = l.cfg.slotsPerEndpoint
@@ -220,7 +233,7 @@ func (l *Ledger) markScrape(ep fwkdl.Endpoint) {
 	}
 }
 
-// view builds the endpoint's published capacity view.
+// view builds the endpoint's published capacity view. Reservations are not published.
 func (l *Ledger) view(e *endpoint) *attrcapacity.EndpointCapacity {
 	s := l.snapshot(e)
 	axisView := func(a axis) attrcapacity.Axis {

@@ -65,14 +65,26 @@ func (v vec) max(o vec) vec {
 	return v
 }
 
-// account is an endpoint's booked state: the sum of the contributions its leases have recorded.
-// added is the running total of the increases, which the state rule reads at each scrape: a
-// release after the scrape, of a request the engine had already freed before it, must not cancel a
-// booking the scrape never saw. apply and markScrape are its only writers and snapshot its only
-// reader.
+// exceeds returns the first axis on which v is greater than c.
+func (v vec) exceeds(c vec) (axis, bool) {
+	for a := range numAxes {
+		if v[a] > c[a] {
+			return a, true
+		}
+	}
+	return 0, false
+}
+
+// account is an endpoint's state: booked is the sum of the contributions its leases have recorded,
+// reserved the sum of the reservations that name it. added is the running total of the increases
+// to booked, which the state rule reads at each scrape: a release after the scrape, of a request the
+// engine had already freed before it, must not cancel a booking the scrape never saw. apply and
+// markScrape are its only writers and snapshot its only reader. generation counts changes to
+// booked, the part of the account the view publishes.
 type account struct {
 	mu            sync.Mutex
 	booked        vec
+	reserved      vec
 	added         vec
 	generation    uint64
 	addedAtScrape vec
@@ -82,6 +94,7 @@ type account struct {
 // accountState is a consistent read of an account.
 type accountState struct {
 	booked        vec
+	reserved      vec
 	added         vec
 	generation    uint64
 	addedAtScrape vec
@@ -89,15 +102,18 @@ type accountState struct {
 	scrapeTime time.Time
 }
 
-// apply adds delta to the booked state.
-func (a *account) apply(delta vec) {
-	if delta == (vec{}) {
+// apply adds the deltas to the booked and reserved states.
+func (a *account) apply(dBooked, dReserved vec) {
+	if dBooked == (vec{}) && dReserved == (vec{}) {
 		return
 	}
 	a.mu.Lock()
-	a.booked = a.booked.add(delta)
-	a.added = a.added.add(delta.max(vec{}))
-	a.generation++
+	a.booked = a.booked.add(dBooked)
+	a.added = a.added.add(dBooked.max(vec{}))
+	a.reserved = a.reserved.add(dReserved)
+	if dBooked != (vec{}) {
+		a.generation++
+	}
 	a.mu.Unlock()
 }
 
@@ -115,7 +131,7 @@ func (a *account) markScrape(updateTime time.Time) {
 func (a *account) snapshot() accountState {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return accountState{booked: a.booked, added: a.added, generation: a.generation,
+	return accountState{booked: a.booked, reserved: a.reserved, added: a.added, generation: a.generation,
 		addedAtScrape: a.addedAtScrape, scrapeTime: a.scrapeTime}
 }
 

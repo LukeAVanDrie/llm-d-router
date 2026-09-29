@@ -34,29 +34,42 @@ func TestVec(t *testing.T) {
 
 func TestAccount(t *testing.T) {
 	var a account
-	a.apply(vec{})
-	require.Zero(t, a.snapshot().generation, "a zero delta changes nothing")
+	a.apply(vec{}, vec{})
+	require.Zero(t, a.snapshot().generation, "zero deltas change nothing")
 
-	a.apply(vec{3, 100, 1})
-	a.apply(vec{2, -100, 1})
+	a.apply(vec{3, 100, 1}, vec{})
+	a.apply(vec{2, -100, 1}, vec{4, 50, 1})
 	s := a.snapshot()
 	require.Equal(t, vec{5, 0, 2}, s.booked)
-	require.Equal(t, uint64(2), s.generation)
+	require.Equal(t, vec{4, 50, 1}, s.reserved)
+
+	a.apply(vec{}, vec{-4, -50, -1})
+	s = a.snapshot()
+	require.Equal(t, vec{}, s.reserved)
+	require.Equal(t, uint64(2), s.generation, "the generation counts booked changes, which the view publishes")
+}
+
+func TestVecExceeds(t *testing.T) {
+	_, over := vec{1, 2, 3}.exceeds(vec{1, 2, 3})
+	require.False(t, over)
+	a, over := vec{1, 3, 4}.exceeds(vec{1, 2, 3})
+	require.True(t, over)
+	require.Equal(t, axisStep, a, "the first axis over capacity")
 }
 
 func TestUsedState(t *testing.T) {
 	var a account
-	a.apply(vec{7, 50, 3})
+	a.apply(vec{7, 50, 3}, vec{})
 	scrape := testStart
 	require.Equal(t, vec{10, 50, 3}, usedState(a.snapshot(), vec{10, 0, 2}, scrape),
 		"with no bookings recorded at the scrape, each axis takes the larger of booked and scraped")
 
 	a.markScrape(scrape)
-	a.apply(vec{4, 20, 1})
+	a.apply(vec{4, 20, 1}, vec{})
 	require.Equal(t, vec{14, 70, 4}, usedState(a.snapshot(), vec{10, 0, 2}, scrape),
 		"scraped plus the bookings since the scrape, and never less than booked")
 
-	a.apply(vec{-11, -70, -4})
+	a.apply(vec{-11, -70, -4}, vec{})
 	require.Equal(t, vec{14, 20, 3}, usedState(a.snapshot(), vec{10, 0, 2}, scrape),
 		"a release after the scrape, possibly of a request the engine freed before it, does not cancel the booking the scrape never saw")
 

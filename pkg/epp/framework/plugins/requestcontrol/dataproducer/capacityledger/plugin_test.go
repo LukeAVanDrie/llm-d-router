@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -52,6 +53,8 @@ func TestNewConfig(t *testing.T) {
 		{name: "speculative non-negative", api: with(func(a *apiConfig) { a.SpeculativeTokens = ptr(int64(-1)) }), wantErr: "speculativeTokens"},
 		{name: "maxModelLen required", api: with(func(a *apiConfig) { a.MaxModelLen = nil }), wantErr: "maxModelLen is required"},
 		{name: "maxModelLen positive", api: with(func(a *apiConfig) { a.MaxModelLen = ptr(int64(0)) }), wantErr: "maxModelLen must be positive"},
+		{name: "reservationTTL positive", api: with(func(a *apiConfig) { a.ReservationTTL = &metav1.Duration{} }),
+			wantErr: "reservationTTL must be positive"},
 		{name: "staleness defaults to the flag's default", api: valid(), wantStaleness: defaultStalenessThreshold},
 		{name: "staleness from the handle", api: valid(), staleness: 3 * time.Second, wantStaleness: 3 * time.Second},
 	}
@@ -159,7 +162,7 @@ func TestView(t *testing.T) {
 	ep := newTestEndpoint("a", 0.1, testStart)
 	ep.UpdateMetrics(testMetrics(0.1, 3, 0, testStart))
 	e := addEndpoint(t, l, ep)
-	e.acct.apply(vec{7, 100, 1})
+	e.acct.apply(vec{7, 100, 1}, vec{})
 
 	raw, ok := ep.GetAttributes().Get(l.dk)
 	require.True(t, ok, "the view is installed on the endpoint")

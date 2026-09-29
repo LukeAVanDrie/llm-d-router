@@ -557,6 +557,23 @@ histograms assume this router is the endpoint's only sender. All are ALPHA.
 | `llm_d_epp_capacity_ledger_bypass_excess` | Histogram | `producer_name` | The engine's running plus waiting count minus the ledger's booked slots, per endpoint at each new scrape. Persistent positive values indicate traffic that did not pass this router. |
 | `llm_d_epp_capacity_ledger_unrated_leases` | Gauge | `producer_name` | Leases that have streamed no chunk while no decode rate is measured, so the ledger books none of their output; the engine's report covers it from the next scrape. |
 
+The following describe the ledger as flow control's endpoint gate
+(`flowControl.endpointGatePluginRef`); they stay at zero while it is not the gate. The gate never
+withholds a request; these metrics measure what a gate that did would have done.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_capacity_ledger_reservations` | Gauge | `producer_name` | Reservations the gate holds: gated requests not yet placed, refunded or reaped. |
+| `llm_d_epp_capacity_ledger_gate_checks_total` | Counter | `producer_name`, `result` | One per candidate endpoint the ledger tracks, per gated request. `result` is `fits`, `stale` (metrics older than `--metrics-staleness-threshold`, which reads as full), another eligibility reason, the axis the request does not fit (`memory`, `step`, `slots`), or `reserved-<axis>` when it fits but for other requests' reservations. |
+| `llm_d_epp_capacity_ledger_gate_fitting_endpoints` | Histogram | `producer_name` | Candidate endpoints a gated request fits. |
+| `llm_d_epp_capacity_ledger_would_hold_total` | Counter | `producer_name`, `cause` | Gated requests that fit no candidate. `cause` is `reserved` (some candidate fits but for other requests' reservations), `capacity` (some candidate is over capacity), or `stale` (every accountable candidate is stale). |
+| `llm_d_epp_capacity_ledger_unaccounted_total` | Counter | `producer_name` | Gated requests none of whose candidates the ledger can account for (all ineligible for a reason other than staleness). |
+| `llm_d_epp_capacity_ledger_placement_races_total` | Counter | `producer_name`, `cause` | Placements a check at placement would refuse: `recheck` (no candidate fit with the exact prompt), `unfit-placement` (placed on an endpoint that did not fit while another did), `unfiltered` (the ledger's filter did not run for the request). Counted once per request. |
+| `llm_d_epp_capacity_ledger_placement_latency_seconds` | Histogram | `producer_name` | Time from reservation to placement. |
+| `llm_d_epp_capacity_ledger_reservation_to_lease_ratio` | Histogram | `producer_name`, `axis` | A placed request's lease over its reservation at placement, on `memory` and `step`; below 1 means the reservation, sized from the request's bytes before tokenization and before the prefix match, overstated. |
+| `llm_d_epp_capacity_ledger_reservations_reaped_total` | Counter | `producer_name` | Reservations released by `reservationTTL` that were never bound to a request. Flow control binds or refunds every reservation, so a nonzero value indicates a caller that did neither. |
+| `llm_d_epp_capacity_ledger_unreserved_placements_total` | Counter | `producer_name` | Placements without a reservation after the ledger has served as the gate. |
+
 ### KV-cache index
 
 These metrics belong to the precise-prefix-cache pipeline. Set
