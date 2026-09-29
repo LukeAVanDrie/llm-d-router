@@ -51,6 +51,10 @@ type Handle interface {
 	// --refresh-metrics-interval, after the minimum-interval clamp. Data sources
 	// that set their own interval may poll less often than this. Zero when unset.
 	RefreshMetricsInterval() time.Duration
+
+	// MetricsStalenessThreshold returns the age configured by --metrics-staleness-threshold beyond
+	// which an endpoint's metrics are stale. Zero when unset.
+	MetricsStalenessThreshold() time.Duration
 }
 
 // HandlePlugins defines a set of APIs to work with instantiated plugins
@@ -75,10 +79,11 @@ type PodListFunc func() []types.NamespacedName
 type eppHandle struct {
 	ctx context.Context
 	HandlePlugins
-	podList                PodListFunc
-	metricsRecorder        MetricsRecorder
-	crossReplicaSyncer     Plugin
-	refreshMetricsInterval time.Duration
+	podList                   PodListFunc
+	metricsRecorder           MetricsRecorder
+	crossReplicaSyncer        Plugin
+	refreshMetricsInterval    time.Duration
+	metricsStalenessThreshold time.Duration
 }
 
 // Context returns a context the plugins can use, if they need one
@@ -143,6 +148,11 @@ func (h *eppHandle) RefreshMetricsInterval() time.Duration {
 	return h.refreshMetricsInterval
 }
 
+// MetricsStalenessThreshold returns the metrics staleness threshold.
+func (h *eppHandle) MetricsStalenessThreshold() time.Duration {
+	return h.metricsStalenessThreshold
+}
+
 // HandleOption configures an eppHandle constructed via NewEppHandle.
 type HandleOption func(*eppHandle)
 
@@ -161,6 +171,14 @@ func WithMetricsRecorder(recorder MetricsRecorder) HandleOption {
 func WithRefreshMetricsInterval(interval time.Duration) HandleOption {
 	return func(h *eppHandle) {
 		h.refreshMetricsInterval = interval
+	}
+}
+
+// WithMetricsStalenessThreshold sets the metrics staleness threshold advertised to plugins via
+// Handle.MetricsStalenessThreshold.
+func WithMetricsStalenessThreshold(threshold time.Duration) HandleOption {
+	return func(h *eppHandle) {
+		h.metricsStalenessThreshold = threshold
 	}
 }
 

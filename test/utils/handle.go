@@ -60,6 +60,10 @@ func (h *testHandle) RefreshMetricsInterval() time.Duration {
 	return 0
 }
 
+func (h *testHandle) MetricsStalenessThreshold() time.Duration {
+	return 0
+}
+
 type testHandlePlugins struct {
 	plugins map[string]plugin.Plugin
 }

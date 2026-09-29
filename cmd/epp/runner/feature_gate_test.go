@@ -143,7 +143,7 @@ featureGates:
 			}
 
 			ds := datastore.NewDatastore(ctx, r.setupMetricsCollection(opts))
-			eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
+			eppConfig, err := r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval, opts.MetricsStalenessThreshold)
 			require.NoError(t, err)
 
 			endpointCandidates := contracts.EndpointCandidates(

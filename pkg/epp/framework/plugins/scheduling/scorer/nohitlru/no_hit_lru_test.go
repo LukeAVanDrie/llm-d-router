@@ -93,6 +93,10 @@ func (h *fakeHandle) RefreshMetricsInterval() time.Duration {
 	return 0
 }
 
+func (h *fakeHandle) MetricsStalenessThreshold() time.Duration {
+	return 0
+}
+
 type stubPlugin struct {
 	name plugin.TypedName
 }

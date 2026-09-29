@@ -539,6 +539,24 @@ configured. The producer updates the per-endpoint gauges when requests are admit
 *   **Description:** Tokens currently in flight on each endpoint — uncached prompt tokens, optionally plus estimated output tokens when the producer's `addEstimatedOutputTokens` is set.
 *   **Usage:** Per-replica token pressure, a finer load signal than request count when request sizes vary widely.
 
+### Capacity ledger
+
+These metrics belong to `capacity-ledger`. They are registered only when the plugin is configured.
+`producer_name` is the plugin instance name, and `axis` is `memory` (KV cache blocks), `step`
+(tokens committed to the next step) or `slots` (sequences). The gauges update at the metrics
+refresh interval; the histograms record once per endpoint each time the endpoint's metrics are
+scraped. Per-endpoint series are deleted when the endpoint is deleted. The drift and bypass
+histograms assume this router is the endpoint's only sender. All are ALPHA.
+
+| Full metric name | Type | Labels | Notes |
+|---|---|---|---|
+| `llm_d_epp_capacity_ledger_booked` | Gauge | `endpoint_name`, `namespace`, `producer_name`, `axis` | The ledger's booked use: the sum of its placed requests' charges. |
+| `llm_d_epp_capacity_ledger_capacity` | Gauge | `endpoint_name`, `namespace`, `producer_name`, `axis` | The capacity on each axis, in the units of `capacity_ledger_booked`. |
+| `llm_d_epp_capacity_ledger_endpoint_eligibility` | Gauge | `endpoint_name`, `namespace`, `producer_name`, `eligibility` | 1 for the endpoint's current eligibility; exactly one series per endpoint. `eligibility` is `eligible`, `stale`, `no-block-count`, `multi-engine`, `hybrid-layout`, `speculative-unconfigured`, `engine-type`, or `disaggregated`. |
+| `llm_d_epp_capacity_ledger_drift_ratio` | Histogram | `producer_name`, `axis` | Booked minus scraped, over capacity, per endpoint at each new scrape; `axis` is `memory` or `slots`. Positive values mean the ledger books more than the engine reports; memory drifts positive when running requests share a prefix, which the ledger books once per request and the engine holds once. |
+| `llm_d_epp_capacity_ledger_bypass_excess` | Histogram | `producer_name` | The engine's running plus waiting count minus the ledger's booked slots, per endpoint at each new scrape. Persistent positive values indicate traffic that did not pass this router. |
+| `llm_d_epp_capacity_ledger_unrated_leases` | Gauge | `producer_name` | Leases that have streamed no chunk while no decode rate is measured, so the ledger books none of their output; the engine's report covers it from the next scrape. |
+
 ### KV-cache index
 
 These metrics belong to the precise-prefix-cache pipeline. Set

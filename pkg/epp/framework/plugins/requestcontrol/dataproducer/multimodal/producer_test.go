@@ -342,6 +342,10 @@ func (h *testHandle) RefreshMetricsInterval() time.Duration {
 	return 0
 }
 
+func (h *testHandle) MetricsStalenessThreshold() time.Duration {
+	return 0
+}
+
 func (h *testHandle) PodList() []k8stypes.NamespacedName {
 	if h.podList == nil {
 		return nil
