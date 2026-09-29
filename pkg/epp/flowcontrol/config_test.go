@@ -37,7 +37,7 @@ func TestNewConfig(t *testing.T) {
 		reg := &registry.Config{MaxBytes: 1024}
 		ulp := usagelimits.DefaultPolicy()
 
-		cfg := NewConfig(ctrl, reg, ulp)
+		cfg := NewConfig(ctrl, reg, ulp, nil)
 
 		assert.NotNil(t, cfg, "NewConfig should return a non-nil Config")
 		assert.Same(t, ctrl, cfg.Controller, "Controller should be the same pointer passed in")
@@ -48,7 +48,7 @@ func TestNewConfig(t *testing.T) {
 	t.Run("nil values are handled gracefully", func(t *testing.T) {
 		t.Parallel()
 
-		cfg := NewConfig(nil, nil, nil)
+		cfg := NewConfig(nil, nil, nil, nil)
 
 		assert.NotNil(t, cfg, "NewConfig should return a non-nil Config even when all arguments are nil")
 		assert.Nil(t, cfg.Controller, "Controller should be nil when nil was passed")

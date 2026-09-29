@@ -57,6 +57,7 @@ type processorFactory func(
 	enqueueChannelBufferSize int,
 	logger logr.Logger,
 	reclamation *internal.ReclamationController,
+	gate flowcontrol.EndpointGate,
 ) processor
 
 var _ processor = &internal.Processor{}
@@ -107,6 +108,9 @@ type Deps struct {
 	// Satisfied by *eviction.RequestEvictor. The FlowController registers the reclamation
 	// controller's Confirm as the evictor's eviction-terminated listener.
 	InFlightEvictor internal.InFlightEvictor
+
+	// EndpointGate, when non-nil, is consulted before each dispatch.
+	EndpointGate flowcontrol.EndpointGate
 }
 
 // NewFlowController creates and starts a new FlowController instance.
@@ -151,6 +155,7 @@ func NewFlowController(
 			enqueueChannelBufferSize int,
 			logger logr.Logger,
 			reclamation *internal.ReclamationController,
+			gate flowcontrol.EndpointGate,
 		) processor {
 			return internal.NewProcessor(
 				ctx,
@@ -166,6 +171,7 @@ func NewFlowController(
 				enqueueChannelBufferSize,
 				logger,
 				reclamation,
+				gate,
 			)
 		}
 	} else {
@@ -209,6 +215,7 @@ func NewFlowController(
 		fc.config.EnqueueChannelBufferSize,
 		fc.logger,
 		reclamation,
+		deps.EndpointGate,
 	)
 
 	fc.logger.V(logutil.DEFAULT).Info("Starting the Processor.")
@@ -289,7 +296,13 @@ func (fc *FlowController) EnqueueAndWait(
 		// Distribution was successful; ownership of the item has been transferred to a processor.
 		// Now, we block here in awaitFinalization until the request is finalized by either the processor (e.g., dispatched,
 		// rejected) or the controller itself (e.g., caller's context cancelled/TTL expired).
-		return fc.awaitFinalization(reqCtx, item)
+		err = fc.awaitFinalization(reqCtx, item)
+		// A dispatched item's reservation is bound to the caller's context, which lives as long as the request;
+		// reqCtx ends when this function returns.
+		if fs := item.FinalState(); fs != nil && fs.Reservation != nil {
+			fs.Reservation.Dispatched(ctx)
+		}
+		return err
 	})
 
 	// Every finalization path wraps a family sentinel. An error without one comes from the lease machinery

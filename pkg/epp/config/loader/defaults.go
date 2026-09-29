@@ -23,8 +23,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
+	fwkrc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
@@ -124,6 +127,7 @@ func applyStaticDefaults(cfg *configapiv1.EndpointPickerConfig) {
 // system graph is complete.
 func applySystemDefaults(cfg *configapiv1.EndpointPickerConfig, handle fwkplugin.Handle) error {
 	allPlugins := handle.GetAllPluginsWithNames()
+	defaultProfileSynthesized := len(cfg.SchedulingProfiles) == 0
 	if err := ensureSchedulingLayer(cfg, handle, allPlugins); err != nil {
 		return fmt.Errorf("failed to apply scheduling system defaults: %w", err)
 	}
@@ -138,6 +142,10 @@ func applySystemDefaults(cfg *configapiv1.EndpointPickerConfig, handle fwkplugin
 	}
 	if err := ensureDataLayer(cfg, handle, allPlugins); err != nil {
 		return fmt.Errorf("failed to apply data layer defaults: %w", err)
+	}
+	// The endpoint gate is validated against the completed configuration.
+	if err := validateEndpointGate(cfg, allPlugins, defaultProfileSynthesized); err != nil {
+		return fmt.Errorf("failed to validate endpoint gate: %w", err)
 	}
 	return nil
 }
@@ -304,6 +312,74 @@ func ensureSaturationDetector(
 		if _, isFilter := sd.(fwksched.Filter); isFilter {
 			injectFilterIntoProfiles(cfg.SchedulingProfiles, sdConfig.PluginRef)
 		}
+	}
+	return nil
+}
+
+// validateEndpointGate checks the flow-control endpoint gate reference when the flowControl feature
+// gate is on. The referenced plugin must be an endpoint gate, a scheduling filter and a PreRequest
+// plugin, and every profile that lists it must list it first, so its filter sees every candidate
+// the gate checked. In a default profile the loader synthesized, the gate is moved first, since no
+// operator order exists to preserve.
+func validateEndpointGate(cfg *configapiv1.EndpointPickerConfig, allPlugins map[string]fwkplugin.Plugin,
+	defaultProfileSynthesized bool) error {
+	if cfg.FlowControl == nil || cfg.FlowControl.EndpointGatePluginRef == "" {
+		return nil
+	}
+	featureGates, err := loadFeatureConfig(cfg.FeatureGates)
+	if err != nil || !featureGates[flowcontrol.FeatureGate] {
+		// A feature-gate parse error is reported where the loader parses the gates.
+		return nil
+	}
+	ref := cfg.FlowControl.EndpointGatePluginRef
+	p, ok := allPlugins[ref]
+	if !ok {
+		return fmt.Errorf("endpoint gate plugin %q is not defined in plugins", ref)
+	}
+	if _, ok := p.(fwkfc.EndpointGate); !ok {
+		return fmt.Errorf("plugin %q is not an endpoint gate", ref)
+	}
+	if _, ok := p.(fwksched.Filter); !ok {
+		return fmt.Errorf("endpoint gate plugin %q must also be a scheduling filter", ref)
+	}
+	if _, ok := p.(fwkrc.PreRequest); !ok {
+		return fmt.Errorf("endpoint gate plugin %q must also be a PreRequest plugin", ref)
+	}
+	// Another instance of the gate's type would keep its own state, which a consumer could read
+	// instead of the state the gate checks.
+	for name, other := range allPlugins {
+		if name != ref && other.TypedName().Type == p.TypedName().Type {
+			return fmt.Errorf("endpoint gate plugin %q must be the only plugin of type %q; %q is another",
+				ref, p.TypedName().Type, name)
+		}
+	}
+	if defaultProfileSynthesized {
+		profile := &cfg.SchedulingProfiles[0]
+		rest := make([]configapiv1.SchedulingPlugin, 0, len(profile.Plugins))
+		for _, sp := range profile.Plugins {
+			if sp.PluginRef != ref {
+				rest = append(rest, sp)
+			}
+		}
+		profile.Plugins = append([]configapiv1.SchedulingPlugin{{PluginRef: ref}}, rest...)
+		return nil
+	}
+	listed := false
+	for _, profile := range cfg.SchedulingProfiles {
+		for i, sp := range profile.Plugins {
+			if sp.PluginRef != ref {
+				continue
+			}
+			if i != 0 {
+				return fmt.Errorf("endpoint gate plugin %q must be the first plugin in scheduling profile %q",
+					ref, profile.Name)
+			}
+			listed = true
+		}
+	}
+	if !listed {
+		return fmt.Errorf("endpoint gate plugin %q must be listed first in the scheduling profiles that place its requests",
+			ref)
 	}
 	return nil
 }

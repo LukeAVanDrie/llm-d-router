@@ -59,7 +59,15 @@ func buildFlowControlConfig(
 		return nil, fmt.Errorf("failed to resolve usage limit policy: %w", err)
 	}
 
-	return flowcontrol.NewConfig(ctrlCfg, registryConfig, usageLimitPolicy), nil
+	var gate fwkfc.EndpointGate
+	if apiConfig != nil && apiConfig.EndpointGatePluginRef != "" {
+		gate, err = resolvePlugin[fwkfc.EndpointGate](handle, apiConfig.EndpointGatePluginRef)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve endpoint gate: %w", err)
+		}
+	}
+
+	return flowcontrol.NewConfig(ctrlCfg, registryConfig, usageLimitPolicy, gate), nil
 }
 
 func buildPriorityBandPolicyDefaults(handle fwkplugin.Handle) (registry.PriorityBandPolicyDefaults, error) {

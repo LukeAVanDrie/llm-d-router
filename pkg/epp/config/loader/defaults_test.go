@@ -18,6 +18,7 @@ package loader
 
 import (
 	"context"
+	"maps"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -25,6 +26,7 @@ import (
 
 	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
@@ -251,4 +253,87 @@ func TestEnsureSaturationDetector_InjectsFilter(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, cfg.SchedulingProfiles[0].Plugins, 2, "already present, no duplicate")
 	})
+}
+
+// mockGate implements EndpointGate; mockGateFilter adds the Filter and PreRequest roles a
+// configured gate needs.
+type mockGate struct{ fwkfcmocks.MockEndpointGate }
+
+type mockGateFilter struct{ mockGate }
+
+func (m *mockGateFilter) Filter(_ context.Context, _ *fwksched.InferenceRequest, eps []fwksched.Endpoint) []fwksched.Endpoint {
+	return eps
+}
+
+func (m *mockGateFilter) PreRequest(context.Context, *fwksched.InferenceRequest, *fwksched.SchedulingResult) error {
+	return nil
+}
+
+func TestValidateEndpointGate(t *testing.T) {
+	gate := &mockGateFilter{mockGate{fwkfcmocks.MockEndpointGate{TypedNameV: fwkplugin.TypedName{Type: "g", Name: "gate"}}}}
+	plugins := map[string]fwkplugin.Plugin{
+		"gate":     gate,
+		"bare":     &mockGate{fwkfcmocks.MockEndpointGate{TypedNameV: fwkplugin.TypedName{Type: "b", Name: "bare"}}},
+		"not-gate": &mockPlugin{t: fwkplugin.TypedName{Type: "s", Name: "not-gate"}},
+	}
+	profile := func(name string, refs ...string) configapiv1.SchedulingProfile {
+		p := configapiv1.SchedulingProfile{Name: name}
+		for _, r := range refs {
+			p.Plugins = append(p.Plugins, configapiv1.SchedulingPlugin{PluginRef: r})
+		}
+		return p
+	}
+	tests := []struct {
+		name        string
+		ref         string
+		profiles    []configapiv1.SchedulingProfile
+		synthesized bool
+		gateOff     bool
+		// extra is added to the defined plugins.
+		extra     map[string]fwkplugin.Plugin
+		wantErr   string
+		wantFirst string
+	}{
+		{name: "no reference", profiles: []configapiv1.SchedulingProfile{profile("a", "scorer")}},
+		{name: "flowControl feature gate off: not validated", ref: "missing", gateOff: true},
+		{name: "listed first", ref: "gate", profiles: []configapiv1.SchedulingProfile{
+			profile("a", "gate", "scorer"), profile("prefill", "scorer")}, wantFirst: "gate"},
+		{name: "not first", ref: "gate", profiles: []configapiv1.SchedulingProfile{profile("a", "scorer", "gate")},
+			wantErr: `must be the first plugin in scheduling profile "a"`},
+		{name: "not listed", ref: "gate", profiles: []configapiv1.SchedulingProfile{profile("a", "scorer")},
+			wantErr: "must be listed first"},
+		{name: "synthesized default profile is reordered", ref: "gate", synthesized: true,
+			profiles: []configapiv1.SchedulingProfile{profile("default", "scorer", "gate")}, wantFirst: "gate"},
+		{name: "undefined", ref: "missing", wantErr: "is not defined"},
+		{name: "not a gate", ref: "not-gate", wantErr: "is not an endpoint gate"},
+		{name: "not a filter", ref: "bare", wantErr: "must also be a scheduling filter"},
+		{name: "second instance of the gate's type", ref: "gate",
+			profiles: []configapiv1.SchedulingProfile{profile("a", "gate")},
+			extra:    map[string]fwkplugin.Plugin{"gate2": &mockPlugin{t: fwkplugin.TypedName{Type: "g", Name: "gate2"}}},
+			wantErr:  `must be the only plugin of type "g"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &configapiv1.EndpointPickerConfig{
+				FeatureGates:       configapiv1.FeatureGates{"flowControl"},
+				SchedulingProfiles: tc.profiles,
+				FlowControl:        &configapiv1.FlowControlConfig{EndpointGatePluginRef: tc.ref},
+			}
+			if tc.gateOff {
+				cfg.FeatureGates = nil
+			}
+			all := maps.Clone(plugins)
+			maps.Copy(all, tc.extra)
+			err := validateEndpointGate(cfg, all, tc.synthesized)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			if tc.wantFirst != "" {
+				require.Equal(t, tc.wantFirst, cfg.SchedulingProfiles[0].Plugins[0].PluginRef)
+			}
+		})
+	}
+	require.True(t, flowControlSettingsConfigured(&configapiv1.FlowControlConfig{EndpointGatePluginRef: "gate"}))
 }

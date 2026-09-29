@@ -288,6 +288,7 @@ func (f *mockProcessorFactory) new(
 	_ int,
 	_ logr.Logger,
 	_ *internal.ReclamationController,
+	_ flowcontrol.EndpointGate,
 ) processor {
 	if f.processor != nil {
 		return f.processor

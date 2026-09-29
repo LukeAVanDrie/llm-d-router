@@ -149,6 +149,7 @@ func newTestHarness(t *testing.T, expiryCleanupInterval time.Duration) *testHarn
 		expiryCleanupInterval,
 		100,
 		h.logger,
+		nil,
 		nil)
 	require.NotNil(t, h.processor, "NewProcessor should not return nil")
 
@@ -1387,7 +1388,7 @@ func TestProcessor(t *testing.T) {
 						h := newTestHarness(t, testCleanupTick)
 						tc.setupMocks(h)
 						item := h.newTestItem("req-dispatch-fail", testFlow, testTTL)
-						err := h.processor.dispatchItem(item)
+						err := h.processor.dispatchItem(item, nil)
 						require.Error(t, err, "dispatchItem should return an error")
 						assert.ErrorIs(t, err, tc.expectedErr, "The underlying registry error should be preserved")
 					})
@@ -1410,7 +1411,7 @@ func TestProcessor(t *testing.T) {
 				}
 
 				// --- ACT ---
-				err := h.processor.dispatchItem(item)
+				err := h.processor.dispatchItem(item, nil)
 
 				// --- ASSERT ---
 				require.NoError(t, err, "dispatchItem should return no error for an already finalized item")

@@ -127,6 +127,45 @@ type SaturationDetector interface {
 	Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64
 }
 
+// EndpointGate is consulted, per request, before the request at the head of a band dispatches. It
+// sees the request's own candidate endpoints and may reserve capacity on them for the request. It
+// never chooses the endpoint that serves the request; the scheduler does.
+//
+// The plugin must also be a scheduling filter, listed first in every scheduling profile that lists
+// it, and a request-control PreRequest plugin: at placement it converts the reservation, keyed by
+// the *scheduling.InferenceRequest that FlowControlRequest.InferenceRequest returns, which is the
+// request PreRequest receives.
+type EndpointGate interface {
+	plugin.Plugin
+
+	// Gate is called on flow control's dispatch goroutine for the selected head after the band's
+	// saturation gate passes. Calls are serialized, and a slow call delays dispatch for every band,
+	// so Gate must not block.
+	Gate(ctx context.Context, req FlowControlRequest, candidates []datalayer.Endpoint) GateDecision
+}
+
+// GateDecision is an EndpointGate's answer for one request.
+type GateDecision struct {
+	// Reservation, when non-nil, is capacity held for the request between dispatch and placement.
+	// The FlowController calls exactly one of its methods: Dispatched if the request dispatches,
+	// Refund whenever it does not.
+	Reservation Reservation
+}
+
+// Reservation is capacity an EndpointGate holds for a request between its dispatch and its
+// placement on an endpoint.
+type Reservation interface {
+	// Dispatched binds the reservation to the request's lifetime: it is released when requestCtx
+	// ends unless placement has converted it first. requestCtx may already be done; it must end
+	// when the request ends.
+	//
+	// Dispatched and Refund run on the caller's goroutine, concurrently with Gate calls for other
+	// requests and with the request's own placement.
+	Dispatched(requestCtx context.Context)
+	// Refund releases the reservation of a request that did not dispatch.
+	Refund()
+}
+
 // Pipeline stages named by WithSaturationStage.
 const (
 	SaturationStagePrefill = "prefill"

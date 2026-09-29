@@ -20,6 +20,7 @@ package mocks
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
@@ -260,3 +261,94 @@ func (m *MockSaturationDetector) Saturation(ctx context.Context, endpoints []dat
 func (m *MockSaturationDetector) LastCheckTime() time.Time { return time.Time{} }
 
 var _ flowcontrol.SaturationDetector = &MockSaturationDetector{}
+
+// MockReservation records the calls the FlowController makes on a reservation.
+type MockReservation struct {
+	mu            sync.Mutex
+	dispatchedCtx context.Context
+	dispatches    int
+	refunds       int
+}
+
+func (m *MockReservation) Dispatched(ctx context.Context) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dispatchedCtx = ctx
+	m.dispatches++
+}
+
+func (m *MockReservation) Refund() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.refunds++
+}
+
+// Counts returns the number of Dispatched and Refund calls.
+func (m *MockReservation) Counts() (dispatches, refunds int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.dispatches, m.refunds
+}
+
+// DispatchedCtx returns the context passed to the last Dispatched call, or nil.
+func (m *MockReservation) DispatchedCtx() context.Context {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.dispatchedCtx
+}
+
+var _ flowcontrol.Reservation = &MockReservation{}
+
+// MockEndpointGate records the requests and candidates it is asked about. By default it returns a
+// new MockReservation for every request; GateFunc, when set, decides instead.
+type MockEndpointGate struct {
+	TypedNameV plugin.TypedName
+	GateFunc   func(req flowcontrol.FlowControlRequest, candidates []datalayer.Endpoint) flowcontrol.GateDecision
+
+	mu           sync.Mutex
+	asked        []string
+	candidates   [][]datalayer.Endpoint
+	reservations []*MockReservation
+}
+
+func (m *MockEndpointGate) TypedName() plugin.TypedName { return m.TypedNameV }
+
+func (m *MockEndpointGate) Gate(_ context.Context, req flowcontrol.FlowControlRequest,
+	candidates []datalayer.Endpoint) flowcontrol.GateDecision {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.asked = append(m.asked, req.ID())
+	m.candidates = append(m.candidates, candidates)
+	if m.GateFunc != nil {
+		return m.GateFunc(req, candidates)
+	}
+	res := &MockReservation{}
+	m.reservations = append(m.reservations, res)
+	return flowcontrol.GateDecision{Reservation: res}
+}
+
+// Last returns the most recent default reservation, or nil.
+func (m *MockEndpointGate) Last() *MockReservation {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.reservations) == 0 {
+		return nil
+	}
+	return m.reservations[len(m.reservations)-1]
+}
+
+// AskedIDs returns the IDs of the requests the gate was asked about.
+func (m *MockEndpointGate) AskedIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.asked...)
+}
+
+// CandidatesSeen returns the candidates of each call, in order.
+func (m *MockEndpointGate) CandidatesSeen() [][]datalayer.Endpoint {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([][]datalayer.Endpoint(nil), m.candidates...)
+}
+
+var _ flowcontrol.EndpointGate = &MockEndpointGate{}
