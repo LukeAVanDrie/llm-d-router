@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 )
 
 func registrySessionCount(registry *SessionStateRegistry) int {
@@ -56,6 +57,8 @@ func TestRegistryGetState(t *testing.T) {
 	assert.Zero(t, state.CompletedRequests)
 	assert.Zero(t, state.TotalInputTokens)
 	assert.Zero(t, state.TotalOutputTokens)
+	assert.Zero(t, state.ContextTokens)
+	assert.Empty(t, state.LastEndpoint)
 
 	start := time.Now().Add(-2 * time.Minute)
 	setRegistrySessionTimes(t, registry, "session-a", start, start)
@@ -67,15 +70,43 @@ func TestRegistryGetState(t *testing.T) {
 	assert.Equal(t, start, state.LastSeenAt)
 }
 
+func TestRegistryPeekStateIsReadOnly(t *testing.T) {
+	t.Parallel()
+
+	registry := &SessionStateRegistry{}
+	unseen := registry.PeekState("unseen")
+	assert.Equal(t, SessionState{}, unseen)
+	assert.Zero(t, registrySessionCount(registry))
+
+	registry.GetState("session-a")
+	start := time.Now().Add(-3 * time.Minute)
+	lastSeen := time.Now().Add(-1 * time.Minute)
+	setRegistrySessionTimes(t, registry, "session-a", start, lastSeen)
+
+	beforePeek := time.Now()
+	peeked := registry.PeekState("session-a")
+	afterPeek := time.Now()
+	assert.GreaterOrEqual(t, peeked.Duration, beforePeek.Sub(start))
+	assert.LessOrEqual(t, peeked.Duration, afterPeek.Sub(start))
+	assert.Equal(t, lastSeen, peeked.LastSeenAt)
+
+	// Verify LastSeenAt in the registry was not mutated by PeekState.
+	peekedAgain := registry.PeekState("session-a")
+	assert.Equal(t, lastSeen, peekedAgain.LastSeenAt)
+}
+
 func TestRegistryRecordsDispatchAndResponse(t *testing.T) {
 	t.Parallel()
 
 	registry := &SessionStateRegistry{}
-	registry.RecordDispatch("session-a")
+	ep1 := k8stypes.NamespacedName{Namespace: "default", Name: "pod-1"}
+	ep2 := k8stypes.NamespacedName{Namespace: "default", Name: "pod-2"}
+	registry.RecordDispatch("session-a", ep1)
 	state := registry.GetState("session-a")
 	assert.Equal(t, int64(1), state.TurnsTaken)
 	assert.Equal(t, int64(1), state.InFlightRequests)
 	assert.Zero(t, state.CompletedRequests)
+	assert.Equal(t, ep1, state.LastEndpoint)
 
 	registry.RecordResponse("session-a", true, 12, 34)
 	state = registry.GetState("session-a")
@@ -84,19 +115,49 @@ func TestRegistryRecordsDispatchAndResponse(t *testing.T) {
 	assert.Equal(t, int64(1), state.CompletedRequests)
 	assert.Equal(t, int64(12), state.TotalInputTokens)
 	assert.Equal(t, int64(34), state.TotalOutputTokens)
+	assert.Equal(t, int64(46), state.ContextTokens)
+	assert.Equal(t, ep1, state.LastEndpoint)
+
+	// Second turn: TotalInputTokens and TotalOutputTokens accumulate, while
+	// ContextTokens reflects only the latest completed turn's Prompt + Completion.
+	registry.RecordDispatch("session-a", ep2)
+	registry.RecordResponse("session-a", true, 50, 20)
+	state = registry.GetState("session-a")
+	assert.Equal(t, int64(2), state.TurnsTaken)
+	assert.Equal(t, int64(2), state.CompletedRequests)
+	assert.Equal(t, int64(62), state.TotalInputTokens)
+	assert.Equal(t, int64(54), state.TotalOutputTokens)
+	assert.Equal(t, int64(70), state.ContextTokens)
+	assert.Equal(t, ep2, state.LastEndpoint)
+
+	// Third turn with omitted token usage (0, 0) preserves the prior non-zero ContextTokens.
+	registry.RecordDispatch("session-a", k8stypes.NamespacedName{})
+	registry.RecordResponse("session-a", true, 0, 0)
+	state = registry.GetState("session-a")
+	assert.Equal(t, int64(3), state.TurnsTaken)
+	assert.Equal(t, int64(3), state.CompletedRequests)
+	assert.Equal(t, int64(62), state.TotalInputTokens)
+	assert.Equal(t, int64(54), state.TotalOutputTokens)
+	assert.Equal(t, int64(70), state.ContextTokens)
+	assert.Equal(t, ep2, state.LastEndpoint)
+
+	cloned, ok := state.Clone().(SessionState)
+	require.True(t, ok)
+	assert.Equal(t, state, cloned)
 }
 
 func TestRegistryRecordsAbnormalResponse(t *testing.T) {
 	t.Parallel()
 
 	registry := &SessionStateRegistry{}
-	registry.RecordDispatch("session-a")
+	registry.RecordDispatch("session-a", k8stypes.NamespacedName{})
 	registry.RecordResponse("session-a", false, 12, 34)
 	state := registry.GetState("session-a")
 	assert.Zero(t, state.InFlightRequests)
 	assert.Zero(t, state.CompletedRequests)
 	assert.Zero(t, state.TotalInputTokens)
 	assert.Zero(t, state.TotalOutputTokens)
+	assert.Zero(t, state.ContextTokens)
 
 	registry.RecordResponse("session-a", true, 1, 2)
 	state = registry.GetState("session-a")
@@ -104,13 +165,14 @@ func TestRegistryRecordsAbnormalResponse(t *testing.T) {
 	assert.Zero(t, state.CompletedRequests)
 	assert.Zero(t, state.TotalInputTokens)
 	assert.Zero(t, state.TotalOutputTokens)
+	assert.Zero(t, state.ContextTokens)
 }
 
 func TestRegistrySessionsAreIsolated(t *testing.T) {
 	t.Parallel()
 
 	registry := &SessionStateRegistry{}
-	registry.RecordDispatch("session-a")
+	registry.RecordDispatch("session-a", k8stypes.NamespacedName{})
 	other := registry.GetState("session-b")
 	assert.Zero(t, other.TurnsTaken)
 	assert.Zero(t, other.InFlightRequests)
@@ -125,7 +187,7 @@ func TestRegistryEvictsIdleSessions(t *testing.T) {
 	t.Parallel()
 
 	registry := &SessionStateRegistry{}
-	registry.RecordDispatch("session-a")
+	registry.RecordDispatch("session-a", k8stypes.NamespacedName{})
 	ttl := time.Hour
 	start := time.Now().Add(-2 * ttl)
 	setRegistrySessionTimes(t, registry, "session-a", start, start)
@@ -164,7 +226,7 @@ func TestRegistryConcurrentUpdates(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			registry.RecordDispatch("session-a")
+			registry.RecordDispatch("session-a", k8stypes.NamespacedName{})
 			registry.RecordResponse("session-a", true, 2, 3)
 		}()
 	}
@@ -176,4 +238,5 @@ func TestRegistryConcurrentUpdates(t *testing.T) {
 	assert.Equal(t, int64(requests), state.CompletedRequests)
 	assert.Equal(t, int64(2*requests), state.TotalInputTokens)
 	assert.Equal(t, int64(3*requests), state.TotalOutputTokens)
+	assert.Equal(t, int64(5), state.ContextTokens)
 }

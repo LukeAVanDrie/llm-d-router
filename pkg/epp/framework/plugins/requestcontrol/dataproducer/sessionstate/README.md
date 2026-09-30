@@ -2,11 +2,13 @@
 
 The `session-state-producer` tracks history for identities published by the
 `agent-identity` request-header plugin and publishes per-request session state
-for scheduling plugins through the request attribute store.
+for flow-control and scheduling plugins through the request attribute store.
 
-The producer uses only the `agent-identity` attribute. `SessionIDDataKey` is a
-separate attribute produced by `session-id-producer` from one configured header
-or cookie for general session-affinity use.
+The producer resolves session identity from the `agent-identity` attribute,
+falling back to a non-default `FairnessID` on the request when `agent-identity`
+is absent. `SessionIDDataKey` is a separate attribute produced by
+`session-id-producer` from one configured header or cookie for general
+session-affinity use.
 
 ## Configuration
 
@@ -45,15 +47,23 @@ value:
 - `TotalInputTokens`: prompt tokens reported by naturally completed responses.
 - `TotalOutputTokens`: completion tokens reported by naturally completed
   responses.
+- `ContextTokens`: prompt and completion tokens reported by the most recent
+  naturally completed response with non-zero usage.
+- `LastEndpoint`: primary target endpoint selected for the most recent
+  dispatched request.
 
-The current request is marked as seen during data production. Its turn is
-counted in `PreRequest` only after scheduling selects at least one target, so
-the next request observes the increment. Multiple scheduling profiles still
-count as one turn. The request is also added to `InFlightRequests` at that
-point and removed when its response lifecycle ends. Client disconnects,
-evictions, and internal errors do not contribute to `CompletedRequests` or the
-token totals because their usage may be incomplete. A naturally completed
-response without usage data contributes zero tokens.
+In `RequestHeader`, the producer attaches a dynamic attribute that resolves the
+current session state without allocating a session record or updating
+`LastSeenAt`, so flow-control plugins observe live state while a request waits
+for admission. Once admitted, `Produce` replaces the attribute with a static
+snapshot and marks the session as seen at the current time. Its turn and
+`LastEndpoint` are recorded in `PreRequest` after scheduling selects a target,
+so the next request observes the increment. Multiple scheduling profiles count
+as one turn. The request is also added to `InFlightRequests` at that point and
+removed when its response lifecycle ends. Client disconnects, evictions, and
+internal errors do not contribute to `CompletedRequests` or the token totals
+because their usage may be incomplete. A naturally completed response without
+usage data contributes zero tokens.
 
 State is local to one EPP replica. Idle session state is removed according to
 the configured eviction TTL and sweep interval. Sessions with in-flight

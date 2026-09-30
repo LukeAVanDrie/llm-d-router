@@ -19,6 +19,7 @@ package scheduling
 import (
 	"sync"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
 
@@ -48,17 +49,31 @@ func (r *InferenceRequest) PutAttribute(key fwkplugin.DataKey, value any) {
 // GetAttribute returns the value stored at key, or nil and false if absent.
 // Prefer ReadRequestAttribute for type-safe access.
 func (r *InferenceRequest) GetAttribute(key fwkplugin.DataKey) (any, bool) {
-	if r.attributes == nil {
+	if r == nil || r.attributes == nil {
 		return nil, false
 	}
-	return r.attributes.Load(key)
+	val, ok := r.attributes.Load(key)
+	if !ok {
+		return nil, false
+	}
+	if dyn, isDyn := val.(*fwkdl.DynamicAttribute); isDyn {
+		if dyn == nil || dyn.Get == nil {
+			return nil, false
+		}
+		realVal := dyn.Get()
+		if realVal == nil {
+			return nil, false
+		}
+		return realVal.Clone(), true
+	}
+	return val, true
 }
 
 // AttributeKeys returns the keys currently present in the request's attribute store.
 // The order is unspecified.
 func (r *InferenceRequest) AttributeKeys() []fwkplugin.DataKey {
 	keys := make([]fwkplugin.DataKey, 0)
-	if r.attributes == nil {
+	if r == nil || r.attributes == nil {
 		return keys
 	}
 	// PutAttribute is the only writer, so every key is a DataKey.

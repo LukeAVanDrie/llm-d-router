@@ -23,8 +23,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
+
+type testCloneableInt int
+
+func (t testCloneableInt) Clone() fwkdl.Cloneable { return t }
 
 func testKey(name string) fwkplugin.DataKey { return fwkplugin.NewDataKey(name, "test-producer") }
 
@@ -38,6 +43,48 @@ func TestRequestAttributes_PutThenGet(t *testing.T) {
 
 	_, ok = r.GetAttribute(testKey("missing"))
 	assert.False(t, ok)
+}
+
+func TestRequestAttributes_DynamicAttribute(t *testing.T) {
+	r := &InferenceRequest{}
+	current := testCloneableInt(10)
+	r.PutAttribute(testKey("dyn"), &fwkdl.DynamicAttribute{
+		Get: func() fwkdl.Cloneable {
+			return current
+		},
+	})
+
+	v, ok := r.GetAttribute(testKey("dyn"))
+	assert.True(t, ok)
+	assert.Equal(t, testCloneableInt(10), v)
+
+	current = 25
+	typed, ok := ReadRequestAttribute[testCloneableInt](r, testKey("dyn"))
+	assert.True(t, ok)
+	assert.Equal(t, testCloneableInt(25), typed)
+
+	r.PutAttribute(testKey("nil-dyn"), &fwkdl.DynamicAttribute{
+		Get: func() fwkdl.Cloneable {
+			return nil
+		},
+	})
+	v, ok = r.GetAttribute(testKey("nil-dyn"))
+	assert.False(t, ok)
+	assert.Nil(t, v)
+
+	typed, ok = ReadRequestAttribute[testCloneableInt](r, testKey("nil-dyn"))
+	assert.False(t, ok)
+	assert.Equal(t, testCloneableInt(0), typed)
+
+	r.PutAttribute(testKey("nil-func-dyn"), &fwkdl.DynamicAttribute{})
+	v, ok = r.GetAttribute(testKey("nil-func-dyn"))
+	assert.False(t, ok)
+	assert.Nil(t, v)
+
+	r.PutAttribute(testKey("nil-ptr-dyn"), (*fwkdl.DynamicAttribute)(nil))
+	v, ok = r.GetAttribute(testKey("nil-ptr-dyn"))
+	assert.False(t, ok)
+	assert.Nil(t, v)
 }
 
 func TestRequestAttributes_KeysAfterPuts(t *testing.T) {
@@ -73,10 +120,19 @@ func TestReadRequestAttribute(t *testing.T) {
 }
 
 func TestRequestAttributes_ZeroValueRequestIsUsable(t *testing.T) {
+	var nilReq *InferenceRequest
+	v, ok := nilReq.GetAttribute(testKey("k"))
+	assert.False(t, ok)
+	assert.Nil(t, v)
+	typed, ok := ReadRequestAttribute[string](nilReq, testKey("k"))
+	assert.False(t, ok)
+	assert.Empty(t, typed)
+	assert.Empty(t, nilReq.AttributeKeys())
+
 	var r InferenceRequest
 
 	r.PutAttribute(testKey("k"), "v")
-	v, ok := r.GetAttribute(testKey("k"))
+	v, ok = r.GetAttribute(testKey("k"))
 	assert.True(t, ok)
 	assert.Equal(t, "v", v)
 }

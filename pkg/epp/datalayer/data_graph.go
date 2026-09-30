@@ -181,6 +181,11 @@ const (
 )
 
 func pluginToLayerExecutionOrder(plugin plugin.Plugin) int {
+	// Request header processors execute before flow control, request control, and scheduling.
+	if _, ok := plugin.(fwkrc.RequestHeaderProcessor); ok {
+		return DefaultLayer
+	}
+
 	// Flow control plugins
 	if _, ok := plugin.(fwkfc.FairnessPolicy); ok {
 		return FlowControlLayer

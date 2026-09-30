@@ -19,6 +19,9 @@ package sessionstate
 import (
 	"time"
 
+	k8stypes "k8s.io/apimachinery/pkg/types"
+
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
@@ -40,6 +43,13 @@ type SessionState struct {
 	CompletedRequests int64
 	TotalInputTokens  int64
 	TotalOutputTokens int64
+	ContextTokens     int64
+	LastEndpoint      k8stypes.NamespacedName
+}
+
+// Clone implements fwkdl.Cloneable.
+func (s SessionState) Clone() fwkdl.Cloneable {
+	return s
 }
 
 // ReadSessionState returns the SessionState published by the default producer

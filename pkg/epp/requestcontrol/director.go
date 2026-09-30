@@ -230,6 +230,7 @@ func (d *Director) HandleRequest(ctx context.Context, reqCtx *handlers.RequestCo
 		Objectives:       requestObjectives,
 		RequestSizeBytes: reqCtx.RequestSize,
 	}
+	reqCtx.SchedulingRequest.InitializeAttributeStore()
 
 	logger = logger.WithValues("objectiveKey", reqCtx.ObjectiveKey, "incomingModelName", reqCtx.IncomingModelName, "targetModelName", reqCtx.TargetModelName, "priority", infObjective.Spec.Priority)
 	ctx = log.IntoContext(ctx, logger)

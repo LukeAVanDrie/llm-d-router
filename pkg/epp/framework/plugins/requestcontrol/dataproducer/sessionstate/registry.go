@@ -19,6 +19,8 @@ package sessionstate
 import (
 	"sync"
 	"time"
+
+	k8stypes "k8s.io/apimachinery/pkg/types"
 )
 
 type sessionRecord struct {
@@ -47,8 +49,24 @@ func (r *SessionStateRegistry) GetState(identity string) SessionState {
 	return state
 }
 
+// PeekState returns the current state for identity with Duration computed at
+// the current time, without creating a record or mutating LastSeenAt.
+func (r *SessionStateRegistry) PeekState(identity string) SessionState {
+	now := time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	record, exists := r.sessions[identity]
+	if !exists {
+		return SessionState{}
+	}
+	state := record.state
+	state.Duration = now.Sub(record.firstSeenAt)
+	return state
+}
+
 // RecordDispatch records one request dispatched for the session.
-func (r *SessionStateRegistry) RecordDispatch(identity string) {
+func (r *SessionStateRegistry) RecordDispatch(identity string, endpoint k8stypes.NamespacedName) {
 	now := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -56,6 +74,9 @@ func (r *SessionStateRegistry) RecordDispatch(identity string) {
 	record := r.getOrCreate(identity, now)
 	record.state.TurnsTaken++
 	record.state.InFlightRequests++
+	if endpoint != (k8stypes.NamespacedName{}) {
+		record.state.LastEndpoint = endpoint
+	}
 }
 
 // RecordResponse records the end of a dispatched request's response lifecycle.
@@ -75,6 +96,9 @@ func (r *SessionStateRegistry) RecordResponse(identity string, naturallyComplete
 	record.state.CompletedRequests++
 	record.state.TotalInputTokens += inputTokens
 	record.state.TotalOutputTokens += outputTokens
+	if total := inputTokens + outputTokens; total > 0 {
+		record.state.ContextTokens = total
+	}
 }
 
 // EvictIdle removes sessions that have been idle longer than ttl. Sessions

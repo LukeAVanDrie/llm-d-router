@@ -168,10 +168,22 @@ func (m *MockSchedulingPlugin) Consumes() fwkplugin.DataDependencies {
 	return fwkplugin.DataDependencies{Required: m.consumes}
 }
 
+type mockRequestHeaderAndDataProducer struct {
+	mockDataProducerP
+}
+
+func (m *mockRequestHeaderAndDataProducer) RequestHeader(_ context.Context, _ *fwksched.InferenceRequest) error {
+	return nil
+}
+
 func TestValidatePluginExecutionOrder(t *testing.T) {
 	dkA := fwkplugin.NewDataKey("keyA", "mock")
 	// Request control plugin that produces data.
 	pluginA := &mockDataProducerP{name: "A", produces: map[fwkplugin.DataKey]any{dkA: nil}}
+	// Multi-hook plugin implementing both RequestHeaderProcessor and DataProducer.
+	headerAndDataProducer := &mockRequestHeaderAndDataProducer{
+		mockDataProducerP: mockDataProducerP{name: "HeaderAndData", produces: map[fwkplugin.DataKey]any{dkA: nil}},
+	}
 	// Flow control plugin.
 	consumerFairnessPolicyPlugin := MockConsumerFairnessPolicy{consumes: map[fwkplugin.DataKey]any{dkA: nil}}
 	// Scheduling plugin.
@@ -194,6 +206,11 @@ func TestValidatePluginExecutionOrder(t *testing.T) {
 			name:        "FC depends on a request control plugin (invalid layer execution order)",
 			plugins:     []fwkplugin.Plugin{pluginA, &consumerFairnessPolicyPlugin},
 			expectedErr: "invalid plugin layer execution order",
+		},
+		{
+			name:        "FC and Scheduling plugins depend on a RequestHeaderProcessor + DataProducer plugin",
+			plugins:     []fwkplugin.Plugin{headerAndDataProducer, &consumerFairnessPolicyPlugin, &consumerSchedulingPlugin},
+			expectedErr: "",
 		},
 		{
 			name:        "Scheduling plugin depends on a request control plugin",
