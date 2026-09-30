@@ -496,6 +496,12 @@ func TestBuildFlowControlConfig(t *testing.T) {
 	const structPolicyName = "struct-policy"
 	handle.AddPlugin(structPolicyName, &constantPointEightPolicy{})
 
+	const gateName = "mock-gate"
+	mockGate := &fwkfcmocks.MockEndpointGate{
+		TypedNameV: fwkplugin.TypedName{Type: gateName, Name: gateName},
+	}
+	handle.AddPlugin(gateName, mockGate)
+
 	testCases := []struct {
 		name      string
 		apiConfig *configapiv1.FlowControlConfig
@@ -582,6 +588,15 @@ func TestBuildFlowControlConfig(t *testing.T) {
 					assert.Equal(t, []float64{0.8}, computeLimits(t, cfg.UsageLimitPolicy, tc.saturation, []int{tc.priority}),
 						"struct-based policy should return 0.8 at %s", tc.name)
 				}
+			},
+		},
+		{
+			name: "Success - EndpointGatePluginRef is resolved",
+			apiConfig: &configapiv1.FlowControlConfig{
+				EndpointGatePluginRef: gateName,
+			},
+			assertion: func(t *testing.T, cfg *flowcontrol.Config) {
+				assert.Same(t, mockGate, cfg.EndpointGate, "EndpointGate should be resolved from the handle")
 			},
 		},
 	}

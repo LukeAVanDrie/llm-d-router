@@ -34,6 +34,8 @@ type Config struct {
 	Controller       *controller.Config
 	Registry         *registry.Config
 	UsageLimitPolicy flowcontrol.UsageLimitPolicy
+	// EndpointGate is nil when no endpoint gate is configured.
+	EndpointGate flowcontrol.EndpointGate
 }
 
 func (c *Config) String() string {
@@ -49,10 +51,12 @@ func (c *Config) String() string {
 
 // NewConfig constructs a Config from pre-resolved components.
 // All plugin resolution is performed by the config loader before calling this constructor.
-func NewConfig(ctrl *controller.Config, reg *registry.Config, ulp flowcontrol.UsageLimitPolicy) *Config {
+func NewConfig(ctrl *controller.Config, reg *registry.Config, ulp flowcontrol.UsageLimitPolicy,
+	gate flowcontrol.EndpointGate) *Config {
 	return &Config{
 		Controller:       ctrl,
 		Registry:         reg,
 		UsageLimitPolicy: ulp,
+		EndpointGate:     gate,
 	}
 }

@@ -503,6 +503,14 @@ type FlowControlConfig struct {
 	// saturation detector. See docs/flow-control-eviction.md.
 	// Defaults to false.
 	EnableEviction bool `json:"enableEviction,omitempty"`
+
+	// +optional
+	// EndpointGatePluginRef names a plugin that flow control consults, per request, before the head
+	// of a band dispatches. When the plugin also implements scheduling.Filter, it is prepended to
+	// each scheduling profile that does not already list it, and any profile that lists it must
+	// place it before all other filters. Must reference a named plugin instance defined in the
+	// top-level Plugins section. Alpha.
+	EndpointGatePluginRef string `json:"endpointGatePluginRef,omitempty"`
 }
 
 func (fcc *FlowControlConfig) String() string {
@@ -553,6 +561,10 @@ func (fcc *FlowControlConfig) String() string {
 
 	if fcc.EnableEviction {
 		parts = append(parts, "EnableEviction: true")
+	}
+
+	if fcc.EndpointGatePluginRef != "" {
+		parts = append(parts, "EndpointGateRef: "+fcc.EndpointGatePluginRef)
 	}
 
 	return "{" + strings.Join(parts, ", ") + "}"

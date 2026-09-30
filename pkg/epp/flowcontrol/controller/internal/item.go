@@ -36,6 +36,8 @@ import (
 type FinalState struct {
 	Outcome types.QueueOutcome
 	Err     error
+	// Reservation is the endpoint gate's reservation for a dispatched item; nil otherwise.
+	Reservation flowcontrol.Reservation
 }
 
 // FlowItem is the internal representation of a request managed by the Flow Controller.
@@ -139,7 +141,7 @@ func (fi *FlowItem) Finalize(cause error) {
 		// Atomically load the handle to determine if the item was admitted to a queue.
 		// This synchronization is critical for correctly classifying the outcome across goroutines.
 		isQueued := fi.Handle() != nil
-		fi.finalizeInternal(wrapCause(cause, isQueued))
+		fi.finalizeInternal(wrapCause(cause, isQueued), nil)
 	})
 }
 
@@ -151,13 +153,25 @@ func (fi *FlowItem) Finalize(cause error) {
 // It is idempotent.
 func (fi *FlowItem) FinalizeWithError(err error) {
 	fi.onceFinalize.Do(func() {
-		fi.finalizeInternal(err)
+		fi.finalizeInternal(err, nil)
 	})
+}
+
+// FinalizeDispatched finalizes the item as dispatched, with the endpoint gate's reservation in its
+// final state. It reports whether this call finalized the item; when it did not, the item was
+// already finalized and the caller still owns the reservation.
+func (fi *FlowItem) FinalizeDispatched(res flowcontrol.Reservation) bool {
+	won := false
+	fi.onceFinalize.Do(func() {
+		fi.finalizeInternal(nil, res)
+		won = true
+	})
+	return won
 }
 
 // finalizeInternal is the core finalization logic. It must be called within the sync.Once.Do block.
 // It derives the outcome from the error, captures the state, stores it atomically, and signals the Done channel.
-func (fi *FlowItem) finalizeInternal(err error) {
+func (fi *FlowItem) finalizeInternal(err error, res flowcontrol.Reservation) {
 	outcome, ok := types.OutcomeFromError(err)
 	if !ok {
 		fi.logger.Error(err, "Invariant violation: finalization error wraps neither ErrRejected nor ErrEvicted",
@@ -165,8 +179,9 @@ func (fi *FlowItem) finalizeInternal(err error) {
 	}
 
 	finalState := &FinalState{
-		Outcome: outcome,
-		Err:     err,
+		Outcome:     outcome,
+		Err:         err,
+		Reservation: res,
 	}
 
 	// Atomically store the pointer. This is the critical memory barrier that publishes the state safely.

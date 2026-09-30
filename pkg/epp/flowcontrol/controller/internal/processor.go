@@ -84,6 +84,15 @@ type Processor struct {
 	// See docs/flow-control-eviction.md.
 	reclamation *ReclamationController
 
+	// gate, when non-nil, is consulted before each dispatch and may reserve capacity for the head.
+	gate flowcontrol.EndpointGate
+
+	// held pins the item at each priority level that was most recently held by the endpoint gate
+	// (GateDecision{Admit: false}), so subsequent dispatch cycles re-examine that item without
+	// advancing the band's fairness policy cursor until it dispatches or leaves the head of its
+	// queue. Only accessed from the Run goroutine.
+	held map[int]flowcontrol.QueueItemAccessor
+
 	// lifecycleCtx controls the processor's lifetime. Monitored by Submit* methods for safe shutdown.
 	lifecycleCtx context.Context
 
@@ -137,8 +146,11 @@ func NewProcessor(
 	enqueueChannelBufferSize int,
 	logger logr.Logger,
 	reclamation *ReclamationController,
+	gate flowcontrol.EndpointGate,
 ) *Processor {
 	p := &Processor{
+		gate:                 gate,
+		held:                 make(map[int]flowcontrol.QueueItemAccessor),
 		registry:             registry,
 		registryBackground:   registryBackground,
 		poolName:             poolName,
@@ -533,9 +545,20 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 			continue
 		}
 
-		// --- Dispatch ---
+		// --- Endpoint Gate & Dispatch ---
 		req := item.OriginalRequest()
-		if err := p.dispatchItem(item); err != nil {
+		decision := p.gateHead(ctx, item)
+		if !decision.Admit {
+			if decision.Reservation != nil {
+				decision.Reservation.Refund()
+			}
+			p.held[priority] = item
+			p.logger.V(logutil.DEBUG).Info("Endpoint gate held head item; enforcing HoL blocking.",
+				"priority", priority, "flowKey", req.FlowKey(), "requestID", req.ID())
+			return false
+		}
+		delete(p.held, priority)
+		if err := p.dispatchItem(item, decision.Reservation); err != nil {
 			p.logger.Error(err, "Failed to dispatch item, skipping priority band for this cycle",
 				"flowKey", req.FlowKey(), "requestID", req.ID())
 			continue // Continue to the next band to maximize work conservation.
@@ -594,10 +617,20 @@ func partitionEndpoints(endpoints []fwkdl.Endpoint) (prefill, decode, interleave
 }
 
 // selectItem applies the configured fairness and ordering policies to select a single item.
+// If the band has a held item from an earlier EndpointGate hold that is still at the head of its
+// queue, selectItem returns it directly without calling FairnessPolicy.Pick, so a hold does not
+// advance stateful fairness cursors (such as round-robin).
 func (p *Processor) selectItem(
 	ctx context.Context,
 	flowGroup flowcontrol.PriorityBandAccessor,
 ) (flowcontrol.QueueItemAccessor, error) {
+	if held := p.held[flowGroup.Priority()]; held != nil {
+		if mq, err := p.registry.ManagedQueue(held.OriginalRequest().FlowKey()); err == nil &&
+			mq != nil && mq.FlowQueueAccessor().Peek() == held {
+			return held, nil
+		}
+		delete(p.held, flowGroup.Priority())
+	}
 	fairnessP, err := p.registry.FairnessPolicy(flowGroup.Priority())
 	if err != nil {
 		return nil, fmt.Errorf("could not get FairnessPolicy: %w", err)
@@ -615,12 +648,39 @@ func (p *Processor) selectItem(
 	return queue.Peek(), nil
 }
 
+// gateHead consults the endpoint gate for the selected item against the request's own candidates and
+// returns its decision. It skips the gate (admitting without a reservation) when none is configured,
+// when the request has no candidates (the caller's no-endpoints handling answers it), and when the
+// caller has already finalized the item.
+func (p *Processor) gateHead(ctx context.Context, item flowcontrol.QueueItemAccessor) flowcontrol.GateDecision {
+	if p.gate == nil {
+		return flowcontrol.GateDecision{Admit: true}
+	}
+	if fi, ok := item.(*FlowItem); ok && fi.FinalState() != nil {
+		return flowcontrol.GateDecision{Admit: true}
+	}
+	req := item.OriginalRequest()
+	candidates := p.endpointCandidates.Locate(ctx, req.GetMetadata())
+	if len(candidates) == 0 {
+		return flowcontrol.GateDecision{Admit: true}
+	}
+	return p.gate.Gate(ctx, req, candidates)
+}
+
 // dispatchItem handles the final steps of dispatching an item: removing it from the queue and finalizing its outcome.
-func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
+// A non-nil reservation travels with the item when this call finalizes it, and is refunded otherwise: when the cleanup
+// sweep removed the item first, or the controller finalized it first.
+func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor, res flowcontrol.Reservation) error {
+	refund := func() {
+		if res != nil {
+			res.Refund()
+		}
+	}
 	req := itemAcc.OriginalRequest()
 	key := req.FlowKey()
 	managedQ, err := p.registry.ManagedQueue(key)
 	if err != nil {
+		refund()
 		return fmt.Errorf("failed to get ManagedQueue for flow %s: %w", key, err)
 	}
 
@@ -630,16 +690,21 @@ func (p *Processor) dispatchItem(itemAcc flowcontrol.QueueItemAccessor) error {
 		// We log it at a low level for visibility but return nil so the dispatch cycle proceeds.
 		p.logger.V(logutil.DEBUG).Info("Failed to remove item during dispatch (likely already finalized and swept).",
 			"flowKey", key, "requestID", req.ID(), "err", err)
+		refund()
 		return nil
 	}
 
 	removedItem, ok := removedItemAcc.(*FlowItem)
 	if !ok {
 		// Nothing to finalize on an unknown type; surface the error so the cycle moves to the next band.
+		refund()
 		return fmt.Errorf("internal error: item %q for flow %s has unexpected type %T", req.ID(), key, removedItemAcc)
 	}
+	if !removedItem.FinalizeDispatched(res) {
+		refund()
+		return nil
+	}
 	p.logger.V(logutil.TRACE).Info("Item dispatched.", "flowKey", req.FlowKey(), "requestID", req.ID())
-	removedItem.FinalizeWithError(nil)
 	return nil
 }
 

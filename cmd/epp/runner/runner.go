@@ -1021,6 +1021,7 @@ func (r *Runner) initAdmissionControl(
 		SaturationDetector: eppConfig.SaturationDetector,
 		EndpointCandidates: endpointCandidates,
 		UsageLimitPolicy:   eppConfig.FlowControlConfig.UsageLimitPolicy,
+		EndpointGate:       eppConfig.FlowControlConfig.EndpointGate,
 	}
 
 	var requestEvictor *fceviction.RequestEvictor

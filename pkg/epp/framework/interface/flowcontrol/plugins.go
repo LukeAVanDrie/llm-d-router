@@ -127,6 +127,44 @@ type SaturationDetector interface {
 	Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64
 }
 
+// EndpointGate is consulted, per request, before the request at the head of a band dispatches. It
+// sees the request's own candidate endpoints and may reserve capacity on them for the request. It
+// never chooses the endpoint that serves the request; the scheduler does.
+type EndpointGate interface {
+	plugin.Plugin
+
+	// Gate is called on flow control's dispatch goroutine for the selected head after the band's
+	// saturation gate passes. Calls are serialized, and a slow call delays dispatch for every band,
+	// so Gate must not block.
+	Gate(ctx context.Context, req FlowControlRequest, candidates []datalayer.Endpoint) GateDecision
+}
+
+// GateDecision is an EndpointGate's answer for one request.
+type GateDecision struct {
+	// Admit reports whether the request may dispatch on this cycle. When false, the
+	// FlowController leaves the request at the head of its band, refunds any Reservation,
+	// and stops the dispatch cycle (head-of-line blocking).
+	Admit bool
+	// Reservation is optional; see Reservation for its lifecycle.
+	Reservation Reservation
+}
+
+// Reservation is capacity an EndpointGate holds for a request between its dispatch and its
+// placement on an endpoint. The FlowController calls Dispatched if the request dispatches, or
+// Refund if it does not.
+type Reservation interface {
+	// Dispatched binds the reservation to the request's lifetime: it is released when requestCtx
+	// ends unless placement has converted it first. requestCtx may already be done; it must end
+	// when the request ends.
+	//
+	// Dispatched runs on the caller's goroutine, concurrently with Gate and Refund calls for
+	// other requests and with the request's own placement.
+	Dispatched(requestCtx context.Context)
+	// Refund releases the reservation of a request that did not dispatch. It runs on the
+	// processor's dispatch goroutine.
+	Refund()
+}
+
 // Pipeline stages named by WithSaturationStage.
 const (
 	SaturationStagePrefill = "prefill"

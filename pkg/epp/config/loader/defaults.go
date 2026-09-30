@@ -23,7 +23,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	configapiv1 "github.com/llm-d/llm-d-router/apix/config/v1"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol/registry"
+	fwkfc "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	extractormetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
@@ -139,6 +141,10 @@ func applySystemDefaults(cfg *configapiv1.EndpointPickerConfig, handle fwkplugin
 	if err := ensureDataLayer(cfg, handle, allPlugins); err != nil {
 		return fmt.Errorf("failed to apply data layer defaults: %w", err)
 	}
+	// The endpoint gate is validated against the completed configuration.
+	if err := validateEndpointGate(cfg, allPlugins); err != nil {
+		return fmt.Errorf("failed to validate endpoint gate: %w", err)
+	}
 	return nil
 }
 
@@ -153,7 +159,12 @@ func ensureSchedulingLayer(
 	if len(cfg.SchedulingProfiles) == 0 {
 		defaultProfile := configapiv1.SchedulingProfile{Name: "default"}
 		// Auto-populate the default profile with all Filter, Scorer, and Picker plugins found.
+		// EndpointGate plugins are excluded here; validateEndpointGate prepends a referenced
+		// gate that also implements Filter when flowControl is enabled.
 		for name, p := range allPlugins {
+			if _, isGate := p.(fwkfc.EndpointGate); isGate {
+				continue
+			}
 			switch p.(type) {
 			case fwksched.Filter, fwksched.Scorer, fwksched.Picker:
 				defaultProfile.Plugins = append(defaultProfile.Plugins, configapiv1.SchedulingPlugin{PluginRef: name})
@@ -272,7 +283,8 @@ func ensureParsers(
 }
 
 // ensureSaturationDetector guarantees that saturation detector is configured.
-// If the saturation detector is not set, the utilization detector is configured by default.
+// If the saturation detector is not set, an endpoint gate that also implements SaturationDetector
+// is reused when flowControl is enabled; otherwise the utilization detector is configured by default.
 func ensureSaturationDetector(
 	cfg *configapiv1.EndpointPickerConfig,
 	handle fwkplugin.Handle,
@@ -283,12 +295,19 @@ func ensureSaturationDetector(
 	}
 	sdConfig := cfg.FlowControl.SaturationDetector
 	if sdConfig == nil {
-		sdConfig = &configapiv1.SaturationDetectorConfig{
-			PluginRef: utilization.UtilizationDetectorType,
-		}
+		sdConfig = &configapiv1.SaturationDetectorConfig{}
 		cfg.FlowControl.SaturationDetector = sdConfig
 	}
+	featureGates, err := loadFeatureConfig(cfg.FeatureGates)
+	gateActive := err == nil && featureGates[flowcontrol.FeatureGate] && cfg.FlowControl.EndpointGatePluginRef != ""
 	if sdConfig.PluginRef == "" {
+		if gateActive {
+			gateRef := cfg.FlowControl.EndpointGatePluginRef
+			if _, ok := allPlugins[gateRef].(fwkfc.SaturationDetector); ok {
+				sdConfig.PluginRef = gateRef
+				return nil
+			}
+		}
 		sdConfig.PluginRef = utilization.UtilizationDetectorType
 	}
 
@@ -300,9 +319,64 @@ func ensureSaturationDetector(
 		}
 	}
 
-	if sd, ok := allPlugins[sdConfig.PluginRef]; ok {
-		if _, isFilter := sd.(fwksched.Filter); isFilter {
-			injectFilterIntoProfiles(cfg.SchedulingProfiles, sdConfig.PluginRef)
+	// When an endpoint gate is active, it owns per-endpoint admission filtering; do not
+	// also inject the saturation detector's filter into scheduling profiles.
+	if !gateActive {
+		if sd, ok := allPlugins[sdConfig.PluginRef]; ok {
+			if _, isFilter := sd.(fwksched.Filter); isFilter {
+				injectFilterIntoProfiles(cfg.SchedulingProfiles, sdConfig.PluginRef)
+			}
+		}
+	}
+	return nil
+}
+
+// validateEndpointGate checks the flow-control endpoint gate reference when the flowControl feature
+// gate is on. When the endpoint gate also implements scheduling.Filter, it is prepended to each
+// scheduling profile that does not already list it, and any profile that lists it must place it
+// before all other filters so it sees every candidate the gate checked.
+func validateEndpointGate(cfg *configapiv1.EndpointPickerConfig, allPlugins map[string]fwkplugin.Plugin) error {
+	if cfg.FlowControl == nil || cfg.FlowControl.EndpointGatePluginRef == "" {
+		return nil
+	}
+	featureGates, err := loadFeatureConfig(cfg.FeatureGates)
+	if err != nil || !featureGates[flowcontrol.FeatureGate] {
+		// A feature-gate parse error is reported where the loader parses the gates.
+		return nil
+	}
+	ref := cfg.FlowControl.EndpointGatePluginRef
+	p, ok := allPlugins[ref]
+	if !ok {
+		return fmt.Errorf("endpoint gate plugin %q is not defined in plugins", ref)
+	}
+	if _, ok := p.(fwkfc.EndpointGate); !ok {
+		return fmt.Errorf("plugin %q is not an endpoint gate", ref)
+	}
+	if _, isFilter := p.(fwksched.Filter); !isFilter {
+		return nil
+	}
+	for i := range cfg.SchedulingProfiles {
+		profile := &cfg.SchedulingProfiles[i]
+		listed := false
+		seenFilter := false
+		for _, sp := range profile.Plugins {
+			if sp.PluginRef == ref {
+				if seenFilter {
+					return fmt.Errorf("endpoint gate plugin %q must be the first filter in scheduling profile %q",
+						ref, profile.Name)
+				}
+				listed = true
+				seenFilter = true
+				continue
+			}
+			if pp, ok := allPlugins[sp.PluginRef]; ok {
+				if _, isFilter := pp.(fwksched.Filter); isFilter {
+					seenFilter = true
+				}
+			}
+		}
+		if !listed {
+			profile.Plugins = append([]configapiv1.SchedulingPlugin{{PluginRef: ref}}, profile.Plugins...)
 		}
 	}
 	return nil
