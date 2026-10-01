@@ -1,0 +1,26 @@
+{
+ "bimodal-K0.5-E4": {
+  "capacity": 0.04106587370953639,
+  "capacity_gap": 0.02131321785797513,
+  "capacity_requests": 8000,
+  "slo_requests": 5854,
+  "tpot_slo": 1.798862153987937,
+  "ttft_slo": 394.1308981743639
+ },
+ "bimodal-K1-E4": {
+  "capacity": 0.060770546496188474,
+  "capacity_gap": 0.028994646248289735,
+  "capacity_requests": 8000,
+  "slo_requests": 5734,
+  "tpot_slo": 2.0510626569978663,
+  "ttft_slo": 26.190872939402833
+ },
+ "longout-K1-E4": {
+  "capacity": 0.24037839926801696,
+  "capacity_gap": 0.015808071066824136,
+  "capacity_requests": 8000,
+  "slo_requests": 5755,
+  "tpot_slo": 1.665800139548127,
+  "ttft_slo": 4.171346411794912
+ }
+}

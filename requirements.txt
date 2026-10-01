@@ -1,0 +1,3 @@
+# Exact versions used to produce tests/parity_reference.jsonl (Python 3.14.5). NumPy does not
+# guarantee identical random streams across releases, so parity is checked against this pin.
+numpy==2.5.1
