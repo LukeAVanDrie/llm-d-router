@@ -302,23 +302,10 @@ func (d *endpointSaturationDetector) Saturation(_ context.Context, endpoints []d
 }
 
 // TestEndpointSubsetGatesDispatch verifies that a request restricted to a saturated endpoint subset waits in an
-// unsaturated pool while unrestricted requests dispatch, and dispatches once its subset drains.
+// unsaturated pool while a later unrestricted request in the same band dispatches past it under global-strict
+// fairness, and that the restricted request dispatches once its subset drains.
 func TestEndpointSubsetGatesDispatch(t *testing.T) {
 	t.Parallel()
-
-	handle := testutils.NewTestHandle(t.Context())
-	oPolicy, err := fcfs.FCFSOrderingPolicyFactory("fcfs", nil, handle)
-	require.NoError(t, err)
-	fPolicy, err := globalstrict.GlobalStrictFairnessPolicyFactory("gs", nil, handle)
-	require.NoError(t, err)
-	defaults := registry.PriorityBandPolicyDefaults{
-		OrderingPolicy: oPolicy.(flowcontrol.OrderingPolicy),
-		FairnessPolicy: fPolicy.(flowcontrol.FairnessPolicy),
-	}
-	highBand, err := registry.NewPriorityBandConfig(10, defaults, registry.WithBandMaxBytes(10_000_000_000))
-	require.NoError(t, err)
-	lowBand, err := registry.NewPriorityBandConfig(0, defaults, registry.WithBandMaxBytes(10_000_000_000))
-	require.NoError(t, err)
 
 	idle := datalayer.NewEndpoint(nil, nil)
 	busy := datalayer.NewEndpoint(nil, nil)
@@ -330,7 +317,6 @@ func TestEndpointSubsetGatesDispatch(t *testing.T) {
 	const subsetKey = "test-subset"
 	h := newHarness(t, harnessOpts{
 		detector: detector,
-		bands:    []*registry.PriorityBandConfig{highBand, lowBand},
 		endpointCandidates: &contractmocks.MockEndpointCandidates{
 			LocateFunc: func(_ context.Context, md map[string]any) []datalayer.Endpoint {
 				if subset, ok := md[subsetKey].([]datalayer.Endpoint); ok {
@@ -350,9 +336,11 @@ func TestEndpointSubsetGatesDispatch(t *testing.T) {
 	}
 
 	enqueue(&testRequest{
-		id: "pinned", key: flowcontrol.FlowKey{ID: "pinned-flow", Priority: 10}, byteSize: 100, ttl: 5 * time.Minute,
+		id: "pinned", key: flowcontrol.FlowKey{ID: "pinned-flow", Priority: 0}, byteSize: 100, ttl: 5 * time.Minute,
 		metadata: map[string]any{subsetKey: []datalayer.Endpoint{busy}},
 	})
+	// Let the pinned request become the band's oldest head, which global-strict picks first.
+	time.Sleep(50 * time.Millisecond)
 	enqueue(&testRequest{
 		id: "unrestricted", key: flowcontrol.FlowKey{ID: "open-flow", Priority: 0}, byteSize: 100, ttl: 5 * time.Minute,
 	})

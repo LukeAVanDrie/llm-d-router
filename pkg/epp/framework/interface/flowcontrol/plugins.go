@@ -188,7 +188,7 @@ func IsSaturationProbe(ctx context.Context) bool {
 // ceiling for a given priority, requests at that priority are gated (not dispatched). The dispatch loop
 // visits bands from highest to lowest priority and stops at the first gated band; lower bands are not
 // considered on that call. A selected request whose own candidate endpoints are at or above its band's
-// ceiling stays queued without gating its band, and the loop moves on to the next band.
+// ceiling stays queued without gating its band: its flow is excluded and the band is picked again.
 //
 // The framework calls ComputeLimit exactly once per dispatch cycle. This is a contract term, not an
 // implementation detail: dispatch-spreading policies use the call itself as their time base (one tick

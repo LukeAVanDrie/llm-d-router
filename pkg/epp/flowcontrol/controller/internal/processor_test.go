@@ -1450,6 +1450,42 @@ func TestProcessor(t *testing.T) {
 				assert.Equal(t, types.QueueOutcomeDispatched, low.FinalState().Outcome)
 			})
 
+			t.Run("should dispatch another flow in the same band past a held head", func(t *testing.T) {
+				t.Parallel()
+				h, _ := setup(t, cold, cold2, hot)
+				qHeld := h.addQueue(testFlow)
+				held := h.newSubsetItem("held", testFlow, hot)
+				require.NoError(t, qHeld.Add(held))
+				keyOpen := flowcontrol.FlowKey{ID: "flow-open", Priority: testFlow.Priority}
+				qOpen := h.addQueue(keyOpen)
+				open := h.newTestItem("open", keyOpen, testTTL)
+				require.NoError(t, qOpen.Add(open))
+
+				assert.True(t, h.processor.dispatchCycle(context.Background()))
+				assert.Nil(t, held.FinalState(), "held head must stay queued")
+				require.NotNil(t, open.FinalState())
+				assert.Equal(t, types.QueueOutcomeDispatched, open.FinalState().Outcome)
+			})
+
+			t.Run("should move to the next band when every head in a band is held", func(t *testing.T) {
+				t.Parallel()
+				h, _ := setup(t, cold, cold2, hot)
+				keyB := flowcontrol.FlowKey{ID: "flow-b", Priority: testFlow.Priority}
+				qA, qB := h.addQueue(testFlow), h.addQueue(keyB)
+				heldA, heldB := h.newSubsetItem("held-a", testFlow, hot), h.newSubsetItem("held-b", keyB, hot)
+				require.NoError(t, qA.Add(heldA))
+				require.NoError(t, qB.Add(heldB))
+				keyLow := flowcontrol.FlowKey{ID: "flow-low", Priority: 5}
+				qLow := h.addQueue(keyLow)
+				low := h.newTestItem("low", keyLow, testTTL)
+				require.NoError(t, qLow.Add(low))
+
+				assert.True(t, h.processor.dispatchCycle(context.Background()))
+				assert.Nil(t, heldA.FinalState())
+				assert.Nil(t, heldB.FinalState())
+				require.NotNil(t, low.FinalState())
+			})
+
 			t.Run("should dispatch a head whose subset has headroom", func(t *testing.T) {
 				t.Parallel()
 				h, _ := setup(t, cold, cold2, hot)

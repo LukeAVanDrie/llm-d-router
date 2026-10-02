@@ -448,9 +448,10 @@ func (p *Processor) recordCapacityUtilization() {
 //   - The pool gate compares pool saturation before selection. When it closes, the cycle stops: dispatching
 //     lower-priority work would consume the headroom the ceiling reserves for higher bands.
 //   - The candidate gate compares the saturation of the selected item's own candidate endpoints (its endpoint
-//     subset) after selection. When it closes, the item stays queued and the cycle moves to the next band, so a
-//     saturated subset does not stall dispatch to the rest of the pool. A subset only narrows where an item may go;
-//     it never lets an item past a closed pool gate.
+//     subset) after selection. When it closes, the item stays queued, its flow is hidden from the fairness
+//     policy, and the band is picked again; when every queued flow in the band is held, the cycle moves to the
+//     next band. Items behind a held item in the same flow wait with it. A subset only narrows where an item may
+//     go; it never lets an item past a closed pool gate.
 //
 // The cycle also skips bands where selection fails.
 func (p *Processor) dispatchCycle(ctx context.Context) bool {
@@ -511,7 +512,7 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 			continue
 		}
 
-		item, err := p.selectItem(ctx, originalBand)
+		item, err := p.selectViableItem(ctx, originalBand, pool, usageLimit)
 		if err != nil {
 			p.logger.Error(err, "Failed to select item, skipping priority band for this cycle",
 				"priority", priority)
@@ -521,15 +522,8 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 			continue
 		}
 
-		req := item.OriginalRequest()
-		if candidateSat, held := p.candidateGate(ctx, req, pool, usageLimit); held {
-			p.logger.V(logutil.DEBUG).Info("Selected item's candidate endpoints are saturated; holding it.",
-				"flowKey", req.FlowKey(), "requestID", req.ID(), "candidateSaturation", candidateSat,
-				"usageLimit", usageLimit)
-			continue
-		}
-
 		// --- Dispatch ---
+		req := item.OriginalRequest()
 		if err := p.dispatchItem(item); err != nil {
 			p.logger.Error(err, "Failed to dispatch item, skipping priority band for this cycle",
 				"flowKey", req.FlowKey(), "requestID", req.ID())
@@ -602,6 +596,78 @@ func (p *Processor) stageSaturation(ctx context.Context, endpoints []fwkdl.Endpo
 		sample.effective = p.saturationDetector.Saturation(ctx, endpoints)
 	}
 	return sample
+}
+
+// selectViableItem selects the band's next item whose candidate endpoints pass the candidate gate. A held item's
+// flow is hidden from the fairness policy and the band is picked again, so a held head waits without blocking
+// other flows in its band. It returns nil when every flow with queued items is held.
+func (p *Processor) selectViableItem(
+	ctx context.Context,
+	band flowcontrol.PriorityBandAccessor,
+	pool []fwkdl.Endpoint,
+	usageLimit float64,
+) (flowcontrol.QueueItemAccessor, error) {
+	view := band
+	var held map[string]struct{}
+	for {
+		item, err := p.selectItem(ctx, view)
+		if err != nil || item == nil {
+			return nil, err
+		}
+		req := item.OriginalRequest()
+		id := req.FlowKey().ID
+		if _, seen := held[id]; seen {
+			// The policy returned a hidden flow; stop rather than loop.
+			return nil, nil //nolint:nilnil
+		}
+		candidateSat, isHeld := p.candidateGate(ctx, req, pool, usageLimit)
+		if !isHeld {
+			return item, nil
+		}
+		p.logger.V(logutil.DEBUG).Info("Selected item's candidate endpoints are saturated; holding it.",
+			"flowKey", req.FlowKey(), "requestID", req.ID(), "candidateSaturation", candidateSat,
+			"usageLimit", usageLimit)
+		if held == nil {
+			held = make(map[string]struct{})
+			view = &heldFlowsBand{PriorityBandAccessor: band, held: held}
+		}
+		held[id] = struct{}{}
+	}
+}
+
+// heldFlowsBand hides flows whose head is held by the candidate gate from a fairness policy.
+type heldFlowsBand struct {
+	flowcontrol.PriorityBandAccessor
+	held map[string]struct{}
+}
+
+func (b *heldFlowsBand) FlowKeys() []flowcontrol.FlowKey {
+	all := b.PriorityBandAccessor.FlowKeys()
+	keys := make([]flowcontrol.FlowKey, 0, len(all))
+	for _, k := range all {
+		if _, held := b.held[k.ID]; !held {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+func (b *heldFlowsBand) Queue(id string) flowcontrol.FlowQueueAccessor {
+	if _, held := b.held[id]; held {
+		return nil
+	}
+	return b.PriorityBandAccessor.Queue(id)
+}
+
+func (b *heldFlowsBand) IterateQueues(callback func(flow flowcontrol.FlowQueueAccessor) bool) {
+	b.PriorityBandAccessor.IterateQueues(func(flow flowcontrol.FlowQueueAccessor) bool {
+		if flow != nil {
+			if _, held := b.held[flow.FlowKey().ID]; held {
+				return true
+			}
+		}
+		return callback(flow)
+	})
 }
 
 // candidateGate reports whether the selected request must wait because its own candidate endpoints are at or
