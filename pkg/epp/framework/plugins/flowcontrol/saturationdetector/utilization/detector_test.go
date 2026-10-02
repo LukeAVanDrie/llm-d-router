@@ -30,6 +30,7 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
@@ -616,6 +617,29 @@ func TestDetector_StaleEndpointObservability(t *testing.T) {
 	require.Equal(t, 2.0, staleGaugeValue(t, detectorName), "staleness should be re-observed after the empty list")
 	detector.Saturation(context.Background(), []fwkdl.Endpoint{makePodMetric("fresh", 1, 0.1, time.Now())})
 	require.Equal(t, 0.0, staleGaugeValue(t, detectorName), "gauge should return to zero when staleness clears")
+}
+
+func TestDetector_StaleEndpointObservabilityProbe(t *testing.T) {
+	t.Parallel()
+
+	eppmetrics.Register()
+	detectorName := "stale-observability-probe-test"
+	detector := NewDetector(detectorName, Config{
+		QueueDepthThreshold:       5,
+		KVCacheUtilThreshold:      0.90,
+		MetricsStalenessThreshold: time.Hour,
+	}, logr.Discard())
+
+	detector.Saturation(context.Background(), []fwkdl.Endpoint{
+		makePodMetric("stale", 1, 0.1, time.Now().Add(-2*time.Hour)),
+	})
+	require.Equal(t, 1.0, staleGaugeValue(t, detectorName))
+
+	probeCtx := flowcontrol.WithSaturationProbe(context.Background())
+	detector.Saturation(probeCtx, []fwkdl.Endpoint{makePodMetric("fresh", 1, 0.1, time.Now())})
+	detector.Saturation(probeCtx, []fwkdl.Endpoint{})
+	require.Equal(t, 1.0, staleGaugeValue(t, detectorName),
+		"a probe of one request's candidates must leave the pool's stale endpoint gauge alone")
 }
 
 func TestDetector_StaleEndpointObservabilityIgnore(t *testing.T) {

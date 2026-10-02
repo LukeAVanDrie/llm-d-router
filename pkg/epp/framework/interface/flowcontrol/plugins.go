@@ -124,6 +124,11 @@ type SaturationDetector interface {
 	// The FlowController consumes this signal to make dispatch decisions:
 	//   - If Saturation() >= 1.0: Stop dispatching and apply backpressure (buffer requests).
 	//   - If Saturation() < 1.0: Continue dispatching traffic to the pool.
+	//
+	// The FlowController may call Saturation more than once per dispatch cycle: once over the pool,
+	// and again over the candidate endpoints of a request whose candidates differ from the pool
+	// (marked by WithSaturationProbe). Implementations MUST have no side effects other than
+	// telemetry, and SHOULD skip pool-scoped telemetry when IsSaturationProbe reports true.
 	Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64
 }
 
@@ -148,6 +153,20 @@ func SaturationStageFromContext(ctx context.Context) string {
 	return stage
 }
 
+type saturationProbeKey struct{}
+
+// WithSaturationProbe returns a context marking a SaturationDetector.Saturation call as evaluating
+// one request's candidate endpoints rather than the pool.
+func WithSaturationProbe(ctx context.Context) context.Context {
+	return context.WithValue(ctx, saturationProbeKey{}, true)
+}
+
+// IsSaturationProbe reports whether ctx was marked by WithSaturationProbe.
+func IsSaturationProbe(ctx context.Context) bool {
+	probe, _ := ctx.Value(saturationProbeKey{}).(bool)
+	return probe
+}
+
 // UsageLimitPolicy computes the usage limit of a priority band dynamically.
 //
 // The goal of this policy is to enable adaptive capacity management by gating lower-priority traffic
@@ -168,7 +187,8 @@ func SaturationStageFromContext(ctx context.Context) string {
 // priority band, the computed ceiling is compared against current saturation. If saturation exceeds the
 // ceiling for a given priority, requests at that priority are gated (not dispatched). The dispatch loop
 // visits bands from highest to lowest priority and stops at the first gated band; lower bands are not
-// considered on that call.
+// considered on that call. A selected request whose own candidate endpoints are at or above its band's
+// ceiling stays queued without gating its band, and the loop moves on to the next band.
 //
 // The framework calls ComputeLimit exactly once per dispatch cycle. This is a contract term, not an
 // implementation detail: dispatch-spreading policies use the call itself as their time base (one tick

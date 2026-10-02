@@ -274,6 +274,36 @@ func TestDispatchCycle_HoLBlock_TriggersReclamation(t *testing.T) {
 	assert.Equal(t, []int{1}, evictor.totalEvictCalls(), "HoL blocking with eligible demand should revoke")
 }
 
+func TestDispatchCycle_CandidateHold_NoReclamation(t *testing.T) {
+	t.Parallel()
+	h := newTestHarness(t, testCleanupTick)
+	evictor := &fakeInFlightEvictor{inFlight: 6, evictable: 3, victimPriority: -1, hasVictim: true}
+	withReclamation(h, evictor, testReclamationConfig)
+
+	pool := []fwkdl.Endpoint{fwkdl.NewEndpoint(nil, nil), fwkdl.NewEndpoint(nil, nil)}
+	hot := pool[1]
+	h.endpointCandidates.LocateFunc = func(_ context.Context, md map[string]any) []fwkdl.Endpoint {
+		if subset, ok := md[subsetKey].([]fwkdl.Endpoint); ok {
+			return subset
+		}
+		return pool
+	}
+	h.saturationDetector.SaturationFunc = func(_ context.Context, endpoints []fwkdl.Endpoint) float64 {
+		if len(endpoints) == 1 && endpoints[0] == hot {
+			return 1.2
+		}
+		return 0.5
+	}
+
+	q := h.addQueue(testFlow)
+	item := h.newSubsetItem("req-held", testFlow, hot)
+	require.NoError(t, q.Add(item))
+
+	assert.False(t, h.processor.dispatchCycle(h.ctx))
+	assert.Nil(t, item.FinalState())
+	assert.Empty(t, evictor.totalEvictCalls(), "victims are pool-wide, so a candidate hold must not revoke")
+}
+
 func TestDispatchCycle_NoQueuedDemand_NoReclamation(t *testing.T) {
 	t.Parallel()
 	h := newTestHarness(t, testCleanupTick)

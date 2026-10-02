@@ -283,6 +283,105 @@ func TestDispatchOrderingSLODeadline(t *testing.T) {
 
 // TestPriorityBackpressure verifies that high-priority requests dispatch before
 // low-priority requests under saturation.
+// endpointSaturationDetector averages per-endpoint saturations that tests adjust while the controller runs.
+type endpointSaturationDetector struct {
+	flowcontrol.SaturationDetector
+	sat sync.Map // datalayer.Endpoint -> float64
+}
+
+func (d *endpointSaturationDetector) Saturation(_ context.Context, endpoints []datalayer.Endpoint) float64 {
+	if len(endpoints) == 0 {
+		return 1.0
+	}
+	var sum float64
+	for _, ep := range endpoints {
+		v, _ := d.sat.Load(ep)
+		sum += v.(float64)
+	}
+	return sum / float64(len(endpoints))
+}
+
+// TestEndpointSubsetGatesDispatch verifies that a request restricted to a saturated endpoint subset waits in an
+// unsaturated pool while unrestricted requests dispatch, and dispatches once its subset drains.
+func TestEndpointSubsetGatesDispatch(t *testing.T) {
+	t.Parallel()
+
+	handle := testutils.NewTestHandle(t.Context())
+	oPolicy, err := fcfs.FCFSOrderingPolicyFactory("fcfs", nil, handle)
+	require.NoError(t, err)
+	fPolicy, err := globalstrict.GlobalStrictFairnessPolicyFactory("gs", nil, handle)
+	require.NoError(t, err)
+	defaults := registry.PriorityBandPolicyDefaults{
+		OrderingPolicy: oPolicy.(flowcontrol.OrderingPolicy),
+		FairnessPolicy: fPolicy.(flowcontrol.FairnessPolicy),
+	}
+	highBand, err := registry.NewPriorityBandConfig(10, defaults, registry.WithBandMaxBytes(10_000_000_000))
+	require.NoError(t, err)
+	lowBand, err := registry.NewPriorityBandConfig(0, defaults, registry.WithBandMaxBytes(10_000_000_000))
+	require.NoError(t, err)
+
+	idle := datalayer.NewEndpoint(nil, nil)
+	busy := datalayer.NewEndpoint(nil, nil)
+	pool := []datalayer.Endpoint{idle, busy}
+	detector := &endpointSaturationDetector{}
+	detector.sat.Store(idle, 0.1)
+	detector.sat.Store(busy, 1.5) // Pool average 0.8: the pool gate is open.
+
+	const subsetKey = "test-subset"
+	h := newHarness(t, harnessOpts{
+		detector: detector,
+		bands:    []*registry.PriorityBandConfig{highBand, lowBand},
+		endpointCandidates: &contractmocks.MockEndpointCandidates{
+			LocateFunc: func(_ context.Context, md map[string]any) []datalayer.Endpoint {
+				if subset, ok := md[subsetKey].([]datalayer.Endpoint); ok {
+					return subset
+				}
+				return pool
+			},
+		},
+	})
+
+	results := make(chan dispatchResult, 2)
+	enqueue := func(req *testRequest) {
+		go func() {
+			outcome, err := h.fc.EnqueueAndWait(h.ctx, req)
+			results <- dispatchResult{id: req.id, outcome: outcome, err: err}
+		}()
+	}
+
+	enqueue(&testRequest{
+		id: "pinned", key: flowcontrol.FlowKey{ID: "pinned-flow", Priority: 10}, byteSize: 100, ttl: 5 * time.Minute,
+		metadata: map[string]any{subsetKey: []datalayer.Endpoint{busy}},
+	})
+	enqueue(&testRequest{
+		id: "unrestricted", key: flowcontrol.FlowKey{ID: "open-flow", Priority: 0}, byteSize: 100, ttl: 5 * time.Minute,
+	})
+
+	select {
+	case r := <-results:
+		require.Equal(t, "unrestricted", r.id, "the pinned request must wait while its subset is saturated")
+		require.Equal(t, fcTypes.QueueOutcomeDispatched, r.outcome)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the unrestricted request did not dispatch past the held subset")
+	}
+
+	select {
+	case r := <-results:
+		t.Fatalf("pinned request finalized while its subset was saturated: outcome=%v err=%v", r.outcome, r.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	detector.sat.Store(busy, 0.2)
+	select {
+	case r := <-results:
+		require.Equal(t, "pinned", r.id)
+		require.NoError(t, r.err)
+		require.Equal(t, fcTypes.QueueOutcomeDispatched, r.outcome)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pinned request did not dispatch after its subset drained")
+	}
+}
+
 func TestPriorityBackpressure(t *testing.T) {
 	t.Parallel()
 

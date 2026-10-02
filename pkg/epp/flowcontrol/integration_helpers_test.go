@@ -57,13 +57,14 @@ type testRequest struct {
 	ttl       time.Duration
 	infReq    *fwksched.InferenceRequest
 	timestamp time.Time
+	metadata  map[string]any
 }
 
 func (r *testRequest) FlowKey() flowcontrol.FlowKey       { return r.key }
 func (r *testRequest) ByteSize() uint64                   { return r.byteSize }
 func (r *testRequest) InitialEffectiveTTL() time.Duration { return r.ttl }
 func (r *testRequest) ID() string                         { return r.id }
-func (r *testRequest) GetMetadata() map[string]any        { return nil }
+func (r *testRequest) GetMetadata() map[string]any        { return r.metadata }
 func (r *testRequest) InferencePoolName() string          { return "test-pool" }
 func (r *testRequest) ModelName() string                  { return "test-model" }
 func (r *testRequest) TargetModelName() string            { return "test-target" }

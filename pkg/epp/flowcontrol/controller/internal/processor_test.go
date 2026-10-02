@@ -203,6 +203,29 @@ func (h *testHarness) newTestItem(id string, key flowcontrol.FlowKey, ttl time.D
 	return NewItem(req, ttl, h.clock.Now(), logr.Discard())
 }
 
+// subsetKey is a test-only request metadata key whose value is the request's candidate endpoints. The
+// processor passes metadata to EndpointCandidates opaquely, so tests need not use the subset header.
+const subsetKey = "test-subset"
+
+// newSubsetItem creates a FlowItem whose request resolves to the given candidate endpoints.
+func (h *testHarness) newSubsetItem(id string, key flowcontrol.FlowKey, candidates ...fwkdl.Endpoint) *FlowItem {
+	h.t.Helper()
+	req := fwkfcmocks.NewMockFlowControlRequest(100, id, key, func(r *fwkfcmocks.MockFlowControlRequest) {
+		r.MetadataV[subsetKey] = candidates
+	})
+	return NewItem(req, testTTL, h.clock.Now(), logr.Discard())
+}
+
+// fixedCeilings is a UsageLimitPolicy that writes fixed per-band ceilings, highest priority first.
+type fixedCeilings struct {
+	flowcontrol.UsageLimitPolicy
+	ceilings []float64
+}
+
+func (f *fixedCeilings) ComputeLimit(_ context.Context, _ float64, _ []int, ceilings []float64) {
+	copy(ceilings, f.ceilings)
+}
+
 // addQueue centrally registers a new mock queue for a given flow, ensuring all harness components are aware of it.
 func (h *testHarness) addQueue(key flowcontrol.FlowKey) *mocks.MockManagedQueue {
 	h.t.Helper()
@@ -1357,6 +1380,201 @@ func TestProcessor(t *testing.T) {
 
 				dispatched := h.processor.dispatchCycle(context.Background())
 				assert.True(t, dispatched, "monolithic deployment should dispatch normally")
+			})
+		})
+
+		t.Run("subset-aware head gating", func(t *testing.T) {
+			t.Parallel()
+
+			// Endpoint saturations; the detector averages them, like the utilization detector.
+			cold := fwkdl.NewEndpoint(nil, nil)
+			cold2 := fwkdl.NewEndpoint(nil, nil)
+			warm := fwkdl.NewEndpoint(nil, nil)
+			hot := fwkdl.NewEndpoint(nil, nil)
+			outside := fwkdl.NewEndpoint(nil, nil)
+			satOf := map[fwkdl.Endpoint]float64{cold: 0.2, cold2: 0.2, warm: 0.7, hot: 1.2, outside: 2.0}
+
+			// setup wires an average detector over the given pool. Requests carrying subsetKey resolve
+			// to that endpoint list; all others resolve to the pool.
+			setup := func(t *testing.T, pool ...fwkdl.Endpoint) (*testHarness, *atomic.Int32) {
+				t.Helper()
+				h := newTestHarness(t, testCleanupTick)
+				h.endpointCandidates.LocateFunc = func(_ context.Context, md map[string]any) []fwkdl.Endpoint {
+					if subset, ok := md[subsetKey].([]fwkdl.Endpoint); ok {
+						return subset
+					}
+					return pool
+				}
+				var probes atomic.Int32
+				h.saturationDetector.SaturationFunc = func(ctx context.Context, endpoints []fwkdl.Endpoint) float64 {
+					if flowcontrol.IsSaturationProbe(ctx) {
+						probes.Add(1)
+					}
+					if len(endpoints) == 0 {
+						return 1.0
+					}
+					var sum float64
+					for _, ep := range endpoints {
+						sum += satOf[ep]
+					}
+					return sum / float64(len(endpoints))
+				}
+				return h, &probes
+			}
+
+			t.Run("should hold a head whose subset is saturated in an unsaturated pool", func(t *testing.T) {
+				t.Parallel()
+				h, _ := setup(t, cold, cold2, hot)
+				q := h.addQueue(testFlow)
+				item := h.newSubsetItem("item", testFlow, hot)
+				require.NoError(t, q.Add(item))
+
+				assert.False(t, h.processor.dispatchCycle(context.Background()))
+				assert.Nil(t, item.FinalState(), "held head must stay queued")
+			})
+
+			t.Run("should dispatch a lower band while a higher band head is held by its subset", func(t *testing.T) {
+				t.Parallel()
+				h, _ := setup(t, cold, cold2, hot)
+				qHigh := h.addQueue(testFlow)
+				high := h.newSubsetItem("high", testFlow, hot)
+				require.NoError(t, qHigh.Add(high))
+				keyLow := flowcontrol.FlowKey{ID: "flow-low", Priority: 5}
+				qLow := h.addQueue(keyLow)
+				low := h.newTestItem("low", keyLow, testTTL)
+				require.NoError(t, qLow.Add(low))
+
+				assert.True(t, h.processor.dispatchCycle(context.Background()))
+				assert.Nil(t, high.FinalState(), "held head must stay queued")
+				require.NotNil(t, low.FinalState())
+				assert.Equal(t, types.QueueOutcomeDispatched, low.FinalState().Outcome)
+			})
+
+			t.Run("should dispatch a head whose subset has headroom", func(t *testing.T) {
+				t.Parallel()
+				h, _ := setup(t, cold, cold2, hot)
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newSubsetItem("item", testFlow, cold)))
+
+				assert.True(t, h.processor.dispatchCycle(context.Background()))
+			})
+
+			t.Run("should dispatch a head with an empty subset without probing", func(t *testing.T) {
+				t.Parallel()
+				h, probes := setup(t, cold, cold2)
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newSubsetItem("item", testFlow)))
+
+				assert.True(t, h.processor.dispatchCycle(context.Background()),
+					"the director answers an empty subset with 503")
+				assert.Zero(t, probes.Load())
+			})
+
+			t.Run("should not probe a head whose candidates are the pool", func(t *testing.T) {
+				t.Parallel()
+				h, probes := setup(t, cold, cold2)
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newTestItem("item", testFlow, testTTL)))
+
+				assert.True(t, h.processor.dispatchCycle(context.Background()))
+				assert.Zero(t, probes.Load())
+			})
+
+			t.Run("should probe a subset that matches the pool size but not its members", func(t *testing.T) {
+				t.Parallel()
+				h, probes := setup(t, cold, cold2)
+				q := h.addQueue(testFlow)
+				item := h.newSubsetItem("item", testFlow, cold, outside)
+				require.NoError(t, q.Add(item))
+
+				assert.False(t, h.processor.dispatchCycle(context.Background()))
+				assert.Nil(t, item.FinalState())
+				assert.Equal(t, int32(1), probes.Load())
+			})
+
+			t.Run("should evaluate the subset by stage under the probe marker", func(t *testing.T) {
+				t.Parallel()
+				prefill := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+					Labels: map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
+				}, nil)
+				decode := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+					Labels: map[string]string{bylabel.RoleLabel: bylabel.RoleDecode},
+				}, nil)
+				idle := fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{
+					Labels: map[string]string{bylabel.RoleLabel: bylabel.RolePrefill},
+				}, nil)
+				h := newTestHarness(t, testCleanupTick)
+				h.endpointCandidates.LocateFunc = func(_ context.Context, md map[string]any) []fwkdl.Endpoint {
+					if subset, ok := md[subsetKey].([]fwkdl.Endpoint); ok {
+						return subset
+					}
+					return []fwkdl.Endpoint{prefill, decode, idle}
+				}
+				type call struct {
+					stage string
+					probe bool
+				}
+				var calls []call
+				h.saturationDetector.SaturationFunc = func(ctx context.Context, endpoints []fwkdl.Endpoint) float64 {
+					calls = append(calls, call{flowcontrol.SaturationStageFromContext(ctx), flowcontrol.IsSaturationProbe(ctx)})
+					// Only the subset's prefill stage, which lacks the idle endpoint, is saturated.
+					if len(endpoints) == 1 && endpoints[0] == prefill {
+						return 1.0
+					}
+					return 0.1
+				}
+				q := h.addQueue(testFlow)
+				item := h.newSubsetItem("item", testFlow, prefill, decode)
+				require.NoError(t, q.Add(item))
+
+				assert.False(t, h.processor.dispatchCycle(context.Background()))
+				assert.Nil(t, item.FinalState())
+				assert.Equal(t, []call{
+					{flowcontrol.SaturationStagePrefill, false},
+					{flowcontrol.SaturationStageDecode, false},
+					{flowcontrol.SaturationStagePrefill, true},
+					{flowcontrol.SaturationStageDecode, true},
+				}, calls)
+			})
+
+			t.Run("should compare the subset against its own band's ceiling", func(t *testing.T) {
+				t.Parallel()
+				keyLow := flowcontrol.FlowKey{ID: "flow-low", Priority: 5}
+
+				h, _ := setup(t, cold, cold2, warm)
+				h.processor.usageLimitPolicy = &fixedCeilings{ceilings: []float64{1.0, 0.5}}
+				h.addQueue(testFlow)
+				qLow := h.addQueue(keyLow)
+				low := h.newSubsetItem("low", keyLow, warm)
+				require.NoError(t, qLow.Add(low))
+				assert.False(t, h.processor.dispatchCycle(context.Background()))
+				assert.Nil(t, low.FinalState(), "0.7 is above the low band's 0.5 ceiling")
+
+				h, _ = setup(t, cold, cold2, warm)
+				h.processor.usageLimitPolicy = &fixedCeilings{ceilings: []float64{1.0, 0.5}}
+				qHigh := h.addQueue(testFlow)
+				h.addQueue(keyLow)
+				require.NoError(t, qHigh.Add(h.newSubsetItem("high", testFlow, warm)))
+				assert.True(t, h.processor.dispatchCycle(context.Background()), "0.7 is below the high band's 1.0 ceiling")
+			})
+
+			t.Run("should not resolve candidates when the pool gate is closed", func(t *testing.T) {
+				t.Parallel()
+				h, _ := setup(t, hot)
+				var subsetLookups atomic.Int32
+				locate := h.endpointCandidates.LocateFunc
+				h.endpointCandidates.LocateFunc = func(ctx context.Context, md map[string]any) []fwkdl.Endpoint {
+					if md != nil {
+						subsetLookups.Add(1)
+					}
+					return locate(ctx, md)
+				}
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newSubsetItem("item", testFlow, cold)))
+
+				assert.False(t, h.processor.dispatchCycle(context.Background()),
+					"a subset never widens admission past the pool gate")
+				assert.Zero(t, subsetLookups.Load())
 			})
 		})
 

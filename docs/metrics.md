@@ -338,7 +338,7 @@ These metrics are owned by the EPP Flow Control layer.
 | `llm_d_epp_flow_control_queue_bytes` | Gauge | `fairness_id`, `priority`, `inference_pool`, `model_name`, `target_model_name` | Bytes currently held in the queue. |
 | `llm_d_epp_flow_control_pool_saturation` | Gauge | `inference_pool`, `stage` | Saturation signal used to gate dispatch. |
 | `llm_d_epp_flow_control_stale_endpoints` | Gauge | `detector` | Candidate endpoints with missing or stale metrics. |
-| `llm_d_epp_flow_control_detector_saturation` | Gauge | `detector`, `stage` | Saturation reported by each child of a `max-saturation-detector`, from its most recent evaluation. `stage` is `prefill`, `decode`, or empty when the pool has no endpoints. |
+| `llm_d_epp_flow_control_detector_saturation` | Gauge | `detector`, `stage` | Saturation reported by each child of a `max-saturation-detector`, from its most recent pool evaluation. `stage` is `prefill`, `decode`, or empty when the pool has no endpoints. |
 | `llm_d_epp_flow_control_capacity_utilization_requests` | Gauge | `priority`, `inference_pool` | Per-priority-band request capacity use. |
 | `llm_d_epp_flow_control_capacity_utilization_bytes` | Gauge | `priority`, `inference_pool` | Per-priority-band byte capacity use. |
 | `llm_d_epp_flow_control_global_capacity_utilization_requests` | Gauge | `inference_pool` | Global request capacity use. |
@@ -405,7 +405,9 @@ These metrics are owned by the EPP Flow Control layer.
 *   **Usage:** When the effective saturation reaches the usage limit threshold, the dispatch cycle
     skips dispatching and requests remain queued. A reading pinned at exactly 1.0 can be
     fail-closed stale-metrics or an empty pool rather than genuine overload (which typically reads
-    above 1.0); check `llm_d_epp_flow_control_stale_endpoints` to disambiguate.
+    above 1.0); check `llm_d_epp_flow_control_stale_endpoints` to disambiguate. A request restricted
+    to an endpoint subset (`x-gateway-destination-endpoint-subset`) is also held while its subset's
+    saturation reaches the threshold; that per-request evaluation is not exported.
 
 #### `llm_d_epp_flow_control_stale_endpoints`
 
@@ -415,7 +417,7 @@ These metrics are owned by the EPP Flow Control layer.
     staleness threshold, as of the most recent saturation evaluation. Recorded by the utilization
     saturation detector; emitted under the `llm_d_epp` prefix only (no deprecated
     `inference_extension_*` twin). This gauge carries no `stage` label and is written on every
-    detector call, so it reflects the most recently evaluated stage. A reading of 0 does not rule
+    pool evaluation, so it reflects the most recently evaluated stage. A reading of 0 does not rule
     out stale metrics in another stage; per-stage stale accounting is tracked in
     [#2475](https://github.com/llm-d/llm-d-router/issues/2475).
 *   **Usage:** A nonzero value during a dispatch stall indicates a model server metrics collection

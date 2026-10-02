@@ -23,12 +23,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
 )
 
 // notADetector is a plugin that does not implement flowcontrol.SaturationDetector.
@@ -208,6 +210,40 @@ func TestSaturation_StageWithoutChildrenInScope(t *testing.T) {
 	assert.InDelta(t, 0.0, d.Saturation(prefillCtx, nil), 1e-9, "a stage with no child in scope must not gate")
 	decodeCtx := flowcontrol.WithSaturationStage(context.Background(), flowcontrol.SaturationStageDecode)
 	assert.InDelta(t, 1.2, d.Saturation(decodeCtx, nil), 1e-9)
+}
+
+func TestSaturation_ProbeSkipsDetectorGauge(t *testing.T) {
+	metrics.Register()
+	child := &stageRecorder{name: "probe-gauge-test-child", saturation: 0.4}
+	handle := newHandle(t)
+	handle.AddPlugin(child.name, child)
+
+	p, err := MaxSaturationDetectorFactory("combined",
+		fwkplugin.StrictDecoder([]byte(`{"detectors":["probe-gauge-test-child"]}`)), handle)
+	require.NoError(t, err)
+	d := p.(flowcontrol.SaturationDetector)
+
+	decodeCtx := flowcontrol.WithSaturationStage(context.Background(), flowcontrol.SaturationStageDecode)
+	d.Saturation(decodeCtx, nil)
+	child.saturation = 1.3
+	assert.InDelta(t, 1.3, d.Saturation(flowcontrol.WithSaturationProbe(decodeCtx), nil), 1e-9)
+
+	families, err := ctrlmetrics.Registry.Gather()
+	require.NoError(t, err)
+	var got []float64
+	for _, mf := range families {
+		if mf.GetName() != "llm_d_epp_flow_control_detector_saturation" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "detector" && lp.GetValue() == child.name {
+					got = append(got, m.GetGauge().GetValue())
+				}
+			}
+		}
+	}
+	assert.Equal(t, []float64{0.4}, got, "a probe must not overwrite the pool evaluation's series")
 }
 
 func TestFactory_NilHandle(t *testing.T) {

@@ -185,12 +185,16 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 // term is left as measured. Endpoints without the attribute contribute zero
 // credit and fall back to the scraped queue depth. See the package README for
 // the assumptions the compensation rests on.
-func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint) float64 {
+func (d *Detector) Saturation(ctx context.Context, candidates []datalayer.Endpoint) float64 {
+	// The stale gauge and log describe the pool; a probe of one request's candidates leaves them alone.
+	poolScoped := !flowcontrol.IsSaturationProbe(ctx)
 	if len(candidates) == 0 {
 		// No candidates means no stale endpoints. Keeping the gauge current here prevents a stale
 		// reading from a previous evaluation misattributing an empty-pool stall to a metrics
 		// collection failure.
-		metrics.RecordFlowControlStaleEndpoints(d.typedName.Name, 0)
+		if poolScoped {
+			metrics.RecordFlowControlStaleEndpoints(d.typedName.Name, 0)
+		}
 		return 1.0
 	}
 
@@ -219,9 +223,11 @@ func (d *Detector) Saturation(_ context.Context, candidates []datalayer.Endpoint
 		totalScore += max(qRatio, kvRatio)
 	}
 
-	metrics.RecordFlowControlStaleEndpoints(d.typedName.Name, staleCount)
-	if staleCount > 0 {
-		d.maybeLogStaleEndpoints(staleCount, len(candidates))
+	if poolScoped {
+		metrics.RecordFlowControlStaleEndpoints(d.typedName.Name, staleCount)
+		if staleCount > 0 {
+			d.maybeLogStaleEndpoints(staleCount, len(candidates))
+		}
 	}
 
 	// Under ignore, stale endpoints are out of the average; if every candidate is stale the pool

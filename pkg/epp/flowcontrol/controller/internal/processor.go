@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -439,14 +440,19 @@ func (p *Processor) recordCapacityUtilization() {
 // dispatchCycle attempts to dispatch a single item by iterating through priority bands from highest to lowest.
 // It applies the configured policies for each band to select an item and then attempts to dispatch it.
 // It returns true if an item was successfully dispatched, and false otherwise.
-// It enforces Head-of-Line (HoL) blocking if the selected item is saturated.
 //
-// # Work Conservation and Head-of-Line (HoL) Blocking
+// # Saturation Gates and Head-of-Line (HoL) Blocking
 //
-// The cycle attempts to be work-conserving by skipping bands where selection fails.
-// However, if a selected item is saturated (cannot be scheduled), the cycle stops immediately. This enforces HoL
-// blocking to respect the policy's decision and prevent priority inversion, where dispatching lower-priority work might
-// exacerbate the saturation affecting the high-priority item.
+// Two gates apply, each against the band's ceiling:
+//
+//   - The pool gate compares pool saturation before selection. When it closes, the cycle stops: dispatching
+//     lower-priority work would consume the headroom the ceiling reserves for higher bands.
+//   - The candidate gate compares the saturation of the selected item's own candidate endpoints (its endpoint
+//     subset) after selection. When it closes, the item stays queued and the cycle moves to the next band, so a
+//     saturated subset does not stall dispatch to the rest of the pool. A subset only narrows where an item may go;
+//     it never lets an item past a closed pool gate.
+//
+// The cycle also skips bands where selection fails.
 func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	dispatchCycleStart := time.Now()
 	defer func() {
@@ -460,38 +466,20 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 		p.regime.Store(&regimeSample{empty: empty, since: p.clock.Now()})
 	}
 
-	prefill, decode, interleaved := partitionEndpoints(pool)
-
-	// Interleaved pods serve both stages, so they contribute capacity to both pools,
-	// mirroring how the scheduling filters route requests.
-	prefill = append(prefill, interleaved...)
-	decode = append(decode, interleaved...)
-
-	saturation := -1.0
-	for _, part := range []struct {
-		name      string
-		endpoints []fwkdl.Endpoint
-	}{
-		{flowcontrol.SaturationStagePrefill, prefill},
-		{flowcontrol.SaturationStageDecode, decode},
-	} {
-		if len(part.endpoints) == 0 {
-			metrics.DeleteFlowControlPoolSaturation(p.poolName, part.name)
-			metrics.DeleteFlowControlDetectorSaturationStage(part.name)
-			continue
-		}
-		stageSat := p.saturationDetector.Saturation(flowcontrol.WithSaturationStage(ctx, part.name), part.endpoints)
-		metrics.RecordFlowControlPoolSaturation(p.poolName, part.name, stageSat)
-		if stageSat > saturation {
-			saturation = stageSat
+	sample := p.stageSaturation(ctx, pool)
+	for _, st := range sample.stages {
+		if st.evaluated {
+			metrics.RecordFlowControlPoolSaturation(p.poolName, st.name, st.saturation)
+		} else {
+			metrics.DeleteFlowControlPoolSaturation(p.poolName, st.name)
+			metrics.DeleteFlowControlDetectorSaturationStage(st.name)
 		}
 	}
-	if saturation < 0 {
-		saturation = p.saturationDetector.Saturation(ctx, pool)
-	} else {
+	if !sample.unpartitioned {
 		// Drop series recorded by an earlier unpartitioned evaluation (e.g. an empty pool at startup).
 		metrics.DeleteFlowControlDetectorSaturationStage("")
 	}
+	saturation := sample.effective
 
 	metrics.RecordFlowControlPoolSaturation(p.poolName, "effective", saturation)
 
@@ -533,8 +521,15 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 			continue
 		}
 
-		// --- Dispatch ---
 		req := item.OriginalRequest()
+		if candidateSat, held := p.candidateGate(ctx, req, pool, usageLimit); held {
+			p.logger.V(logutil.DEBUG).Info("Selected item's candidate endpoints are saturated; holding it.",
+				"flowKey", req.FlowKey(), "requestID", req.ID(), "candidateSaturation", candidateSat,
+				"usageLimit", usageLimit)
+			continue
+		}
+
+		// --- Dispatch ---
 		if err := p.dispatchItem(item); err != nil {
 			p.logger.Error(err, "Failed to dispatch item, skipping priority band for this cycle",
 				"flowKey", req.FlowKey(), "requestID", req.ID())
@@ -557,6 +552,73 @@ func (p *Processor) ceilingsBuffer(n int) []float64 {
 		buf[i] = 1.0
 	}
 	return buf
+}
+
+// stageResult is one stage's share of a saturationSample.
+type stageResult struct {
+	name       string
+	evaluated  bool // false when the stage has no endpoints
+	saturation float64
+}
+
+// saturationSample is the outcome of stageSaturation.
+type saturationSample struct {
+	stages        [2]stageResult
+	unpartitioned bool // no stage had endpoints, so effective came from one unstaged evaluation
+	effective     float64
+}
+
+// stageSaturation evaluates the detector per pipeline stage and returns the maximum as the effective
+// saturation. It records no metrics, so it serves both the pool and a request's candidate endpoints.
+func (p *Processor) stageSaturation(ctx context.Context, endpoints []fwkdl.Endpoint) saturationSample {
+	prefill, decode, interleaved := partitionEndpoints(endpoints)
+
+	// Interleaved pods serve both stages, so they contribute capacity to both pools,
+	// mirroring how the scheduling filters route requests.
+	prefill = append(prefill, interleaved...)
+	decode = append(decode, interleaved...)
+
+	sample := saturationSample{effective: -1.0}
+	for i, part := range []struct {
+		name      string
+		endpoints []fwkdl.Endpoint
+	}{
+		{flowcontrol.SaturationStagePrefill, prefill},
+		{flowcontrol.SaturationStageDecode, decode},
+	} {
+		sample.stages[i].name = part.name
+		if len(part.endpoints) == 0 {
+			continue
+		}
+		stageSat := p.saturationDetector.Saturation(flowcontrol.WithSaturationStage(ctx, part.name), part.endpoints)
+		sample.stages[i].evaluated = true
+		sample.stages[i].saturation = stageSat
+		if stageSat > sample.effective {
+			sample.effective = stageSat
+		}
+	}
+	if sample.effective < 0 {
+		sample.unpartitioned = true
+		sample.effective = p.saturationDetector.Saturation(ctx, endpoints)
+	}
+	return sample
+}
+
+// candidateGate reports whether the selected request must wait because its own candidate endpoints are at or
+// above usageLimit. Candidates identical to the pool were already judged by the pool gate. An empty candidate set
+// passes, because the director answers it with 503.
+func (p *Processor) candidateGate(
+	ctx context.Context,
+	req flowcontrol.FlowControlRequest,
+	pool []fwkdl.Endpoint,
+	usageLimit float64,
+) (float64, bool) {
+	candidates := p.endpointCandidates.Locate(ctx, req.GetMetadata())
+	if len(candidates) == 0 || slices.Equal(candidates, pool) {
+		return 0, false
+	}
+	sat := p.stageSaturation(flowcontrol.WithSaturationProbe(ctx), candidates).effective
+	return sat, sat >= usageLimit
 }
 
 // partitionEndpoints classifies endpoints into prefill, decode, and interleaved buckets

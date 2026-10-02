@@ -178,11 +178,13 @@ func (d *detector) TypedName() fwkplugin.TypedName {
 // Saturation returns the maximum saturation reported by the child detectors for the given
 // candidate endpoints, so the pool gates as saturated when any single signal is exhausted.
 // Each child's value is also exported through the per-detector saturation gauge, labeled by
-// the stage named in ctx, letting operators tell which signal is driving the combined value.
+// the stage named in ctx, letting operators tell which signal is driving the combined value;
+// probes of one request's candidates (flowcontrol.IsSaturationProbe) are not exported.
 // Children scoped to other stages are skipped; a stage with no child in scope reports 0 and
 // does not gate dispatch.
 func (d *detector) Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64 {
 	stage := flowcontrol.SaturationStageFromContext(ctx)
+	probe := flowcontrol.IsSaturationProbe(ctx)
 	var maxSat float64
 	evaluated := false
 	for i, child := range d.children {
@@ -190,7 +192,9 @@ func (d *detector) Saturation(ctx context.Context, endpoints []datalayer.Endpoin
 			continue
 		}
 		sat := child.Saturation(ctx, endpoints)
-		metrics.RecordFlowControlDetectorSaturation(d.childLabels[i], stage, sat)
+		if !probe {
+			metrics.RecordFlowControlDetectorSaturation(d.childLabels[i], stage, sat)
+		}
 		if !evaluated || sat > maxSat {
 			maxSat = sat
 		}
