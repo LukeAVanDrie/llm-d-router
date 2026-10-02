@@ -1467,6 +1467,41 @@ func TestProcessor(t *testing.T) {
 				assert.Equal(t, types.QueueOutcomeDispatched, open.FinalState().Outcome)
 			})
 
+			t.Run("should pick a band at most twice however many heads are held", func(t *testing.T) {
+				t.Parallel()
+				h, probes := setup(t, cold, cold2, hot)
+				subset := []fwkdl.Endpoint{hot}
+				for i := range 50 {
+					key := flowcontrol.FlowKey{ID: fmt.Sprintf("held-%02d", i), Priority: testFlow.Priority}
+					q := h.addQueue(key)
+					// subset... passes the shared slice, as the candidate cache does for one subset.
+					require.NoError(t, q.Add(h.newSubsetItem(key.ID, key, subset...)))
+				}
+				keyOpen := flowcontrol.FlowKey{ID: "zz-open", Priority: testFlow.Priority}
+				qOpen := h.addQueue(keyOpen)
+				open := h.newTestItem("open", keyOpen, testTTL)
+				require.NoError(t, qOpen.Add(open))
+
+				var picks atomic.Int32
+				h.fairnessPolicyPick = func(ctx context.Context, band flowcontrol.PriorityBandAccessor) (flowcontrol.FlowQueueAccessor, error) {
+					picks.Add(1)
+					var selected flowcontrol.FlowQueueAccessor
+					band.IterateQueues(func(fqa flowcontrol.FlowQueueAccessor) bool {
+						if fqa.Len() > 0 {
+							selected = fqa
+							return false
+						}
+						return true
+					})
+					return selected, nil
+				}
+
+				assert.True(t, h.processor.dispatchCycle(context.Background()))
+				require.NotNil(t, open.FinalState())
+				assert.LessOrEqual(t, picks.Load(), int32(2))
+				assert.Equal(t, int32(1), probes.Load(), "heads sharing a subset share one evaluation")
+			})
+
 			t.Run("should move to the next band when every head in a band is held", func(t *testing.T) {
 				t.Parallel()
 				h, _ := setup(t, cold, cold2, hot)

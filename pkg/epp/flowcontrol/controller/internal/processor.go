@@ -598,41 +598,48 @@ func (p *Processor) stageSaturation(ctx context.Context, endpoints []fwkdl.Endpo
 	return sample
 }
 
-// selectViableItem selects the band's next item whose candidate endpoints pass the candidate gate. A held item's
-// flow is hidden from the fairness policy and the band is picked again, so a held head waits without blocking
-// other flows in its band. It returns nil when every flow with queued items is held.
+// selectViableItem selects the band's next item whose candidate endpoints pass the candidate gate, so a held head
+// waits without blocking other flows in its band. It returns nil when every flow with queued items is held.
+//
+// When the first pick is held, every flow's head is classified in one pass and the band is picked once more with
+// the held flows hidden. Re-picking once per held flow would cost a pass over the band per hold.
 func (p *Processor) selectViableItem(
 	ctx context.Context,
 	band flowcontrol.PriorityBandAccessor,
 	pool []fwkdl.Endpoint,
 	usageLimit float64,
 ) (flowcontrol.QueueItemAccessor, error) {
-	view := band
-	var held map[string]struct{}
-	for {
-		item, err := p.selectItem(ctx, view)
-		if err != nil || item == nil {
-			return nil, err
-		}
-		req := item.OriginalRequest()
-		id := req.FlowKey().ID
-		if _, seen := held[id]; seen {
-			// The policy returned a hidden flow; stop rather than loop.
-			return nil, nil //nolint:nilnil
-		}
-		candidateSat, isHeld := p.candidateGate(ctx, req, pool, usageLimit)
-		if !isHeld {
-			return item, nil
-		}
-		p.logger.V(logutil.DEBUG).Info("Selected item's candidate endpoints are saturated; holding it.",
-			"flowKey", req.FlowKey(), "requestID", req.ID(), "candidateSaturation", candidateSat,
-			"usageLimit", usageLimit)
-		if held == nil {
-			held = make(map[string]struct{})
-			view = &heldFlowsBand{PriorityBandAccessor: band, held: held}
-		}
-		held[id] = struct{}{}
+	item, err := p.selectItem(ctx, band)
+	if err != nil || item == nil {
+		return nil, err
 	}
+	gate := candidateGate{p: p, ctx: ctx, pool: pool, usageLimit: usageLimit}
+	if !gate.holds(item) {
+		return item, nil
+	}
+
+	held := map[string]struct{}{item.OriginalRequest().FlowKey().ID: {}}
+	band.IterateQueues(func(flow flowcontrol.FlowQueueAccessor) bool {
+		if flow == nil {
+			return true
+		}
+		if head := flow.Peek(); head != nil && gate.holds(head) {
+			held[flow.FlowKey().ID] = struct{}{}
+		}
+		return true
+	})
+	p.logger.V(logutil.DEBUG).Info("Holding items whose candidate endpoints are saturated.",
+		"priority", band.Priority(), "heldFlows", len(held), "usageLimit", usageLimit)
+
+	item, err = p.selectItem(ctx, &heldFlowsBand{PriorityBandAccessor: band, held: held})
+	if err != nil || item == nil {
+		return nil, err
+	}
+	// The policy may ignore the view, or a head may have changed since the pass.
+	if _, hidden := held[item.OriginalRequest().FlowKey().ID]; hidden || gate.holds(item) {
+		return nil, nil //nolint:nilnil
+	}
+	return item, nil
 }
 
 // heldFlowsBand hides flows whose head is held by the candidate gate from a fairness policy.
@@ -670,21 +677,44 @@ func (b *heldFlowsBand) IterateQueues(callback func(flow flowcontrol.FlowQueueAc
 	})
 }
 
-// candidateGate reports whether the selected request must wait because its own candidate endpoints are at or
-// above usageLimit. Candidates identical to the pool were already judged by the pool gate. An empty candidate set
-// passes, because the director answers it with 503.
-func (p *Processor) candidateGate(
-	ctx context.Context,
-	req flowcontrol.FlowControlRequest,
-	pool []fwkdl.Endpoint,
-	usageLimit float64,
-) (float64, bool) {
-	candidates := p.endpointCandidates.Locate(ctx, req.GetMetadata())
-	if len(candidates) == 0 || slices.Equal(candidates, pool) {
-		return 0, false
+// candidateGate decides whether an item must wait because its own candidate endpoints are at or above one band's
+// ceiling. It lives for one band in one dispatch cycle.
+type candidateGate struct {
+	p          *Processor
+	ctx        context.Context
+	pool       []fwkdl.Endpoint
+	usageLimit float64
+	// verdicts memoizes by candidate slice. EndpointCandidates returns one shared slice per subset, so heads with
+	// the same subset share one evaluation.
+	verdicts map[candidateSet]bool
+}
+
+// candidateSet identifies a candidate slice by its backing array and length.
+type candidateSet struct {
+	first *fwkdl.Endpoint
+	n     int
+}
+
+// holds reports whether item must wait. Candidates identical to the pool were already judged by the pool gate. An
+// empty candidate set passes, because the director answers it with 503.
+func (g *candidateGate) holds(item flowcontrol.QueueItemAccessor) bool {
+	candidates := g.p.endpointCandidates.Locate(g.ctx, item.OriginalRequest().GetMetadata())
+	if len(candidates) == 0 {
+		return false
 	}
-	sat := p.stageSaturation(flowcontrol.WithSaturationProbe(ctx), candidates).effective
-	return sat, sat >= usageLimit
+	key := candidateSet{first: &candidates[0], n: len(candidates)}
+	if held, ok := g.verdicts[key]; ok {
+		return held
+	}
+	held := false
+	if !slices.Equal(candidates, g.pool) {
+		held = g.p.stageSaturation(flowcontrol.WithSaturationProbe(g.ctx), candidates).effective >= g.usageLimit
+	}
+	if g.verdicts == nil {
+		g.verdicts = make(map[candidateSet]bool)
+	}
+	g.verdicts[key] = held
+	return held
 }
 
 // partitionEndpoints classifies endpoints into prefill, decode, and interleaved buckets
