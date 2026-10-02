@@ -451,7 +451,8 @@ func (p *Processor) recordCapacityUtilization() {
 //     subset) after selection. When it closes, the item stays queued, its flow is hidden from the fairness
 //     policy, and the band is picked again; when every queued flow in the band is held, the cycle moves to the
 //     next band. Items behind a held item in the same flow wait with it. A subset only narrows where an item may
-//     go; it never lets an item past a closed pool gate.
+//     go; it never lets an item past a closed pool gate. Lower bands keep dispatching, and the scheduler may place
+//     their requests on a held item's endpoints; a hold does not trigger reclamation.
 //
 // The cycle also skips bands where selection fails.
 func (p *Processor) dispatchCycle(ctx context.Context) bool {
@@ -487,6 +488,7 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 	// Record capacity utilization ratios (the demand-side twin of saturation) from the same periodic sample.
 	p.recordCapacityUtilization()
 
+	probes := &candidateProbes{p: p, pool: pool}
 	priorities := p.registry.AllOrderedPriorityLevels()
 	ceilings := p.ceilingsBuffer(len(priorities))
 	p.usageLimitPolicy.ComputeLimit(ctx, saturation, priorities, ceilings)
@@ -512,7 +514,7 @@ func (p *Processor) dispatchCycle(ctx context.Context) bool {
 			continue
 		}
 
-		item, err := p.selectViableItem(ctx, originalBand, pool, usageLimit)
+		item, err := p.selectViableItem(ctx, originalBand, probes, usageLimit)
 		if err != nil {
 			p.logger.Error(err, "Failed to select item, skipping priority band for this cycle",
 				"priority", priority)
@@ -599,22 +601,22 @@ func (p *Processor) stageSaturation(ctx context.Context, endpoints []fwkdl.Endpo
 }
 
 // selectViableItem selects the band's next item whose candidate endpoints pass the candidate gate, so a held head
-// waits without blocking other flows in its band. It returns nil when every flow with queued items is held.
+// waits without blocking other flows in its band. It returns nil when every flow with queued items is held, and for
+// one cycle when the fairness policy ignores the hidden flows or a head changes during selection.
 //
 // When the first pick is held, every flow's head is classified in one pass and the band is picked once more with
 // the held flows hidden. Re-picking once per held flow would cost a pass over the band per hold.
 func (p *Processor) selectViableItem(
 	ctx context.Context,
 	band flowcontrol.PriorityBandAccessor,
-	pool []fwkdl.Endpoint,
+	probes *candidateProbes,
 	usageLimit float64,
 ) (flowcontrol.QueueItemAccessor, error) {
 	item, err := p.selectItem(ctx, band)
 	if err != nil || item == nil {
 		return nil, err
 	}
-	gate := candidateGate{p: p, ctx: ctx, pool: pool, usageLimit: usageLimit}
-	if !gate.holds(item) {
+	if !probes.holds(ctx, item, usageLimit) {
 		return item, nil
 	}
 
@@ -623,7 +625,7 @@ func (p *Processor) selectViableItem(
 		if flow == nil {
 			return true
 		}
-		if head := flow.Peek(); head != nil && gate.holds(head) {
+		if head := flow.Peek(); head != nil && probes.holds(ctx, head, usageLimit) {
 			held[flow.FlowKey().ID] = struct{}{}
 		}
 		return true
@@ -635,28 +637,17 @@ func (p *Processor) selectViableItem(
 	if err != nil || item == nil {
 		return nil, err
 	}
-	// The policy may ignore the view, or a head may have changed since the pass.
-	if _, hidden := held[item.OriginalRequest().FlowKey().ID]; hidden || gate.holds(item) {
+	if _, hidden := held[item.OriginalRequest().FlowKey().ID]; hidden || probes.holds(ctx, item, usageLimit) {
 		return nil, nil //nolint:nilnil
 	}
 	return item, nil
 }
 
-// heldFlowsBand hides flows whose head is held by the candidate gate from a fairness policy.
+// heldFlowsBand hides flows whose head is held by the candidate gate from a fairness policy. FlowKeys still lists
+// held flows so that cursor-based policies such as round-robin keep their position; Queue returns nil for them.
 type heldFlowsBand struct {
 	flowcontrol.PriorityBandAccessor
 	held map[string]struct{}
-}
-
-func (b *heldFlowsBand) FlowKeys() []flowcontrol.FlowKey {
-	all := b.PriorityBandAccessor.FlowKeys()
-	keys := make([]flowcontrol.FlowKey, 0, len(all))
-	for _, k := range all {
-		if _, held := b.held[k.ID]; !held {
-			keys = append(keys, k)
-		}
-	}
-	return keys
 }
 
 func (b *heldFlowsBand) Queue(id string) flowcontrol.FlowQueueAccessor {
@@ -677,16 +668,15 @@ func (b *heldFlowsBand) IterateQueues(callback func(flow flowcontrol.FlowQueueAc
 	})
 }
 
-// candidateGate decides whether an item must wait because its own candidate endpoints are at or above one band's
-// ceiling. It lives for one band in one dispatch cycle.
-type candidateGate struct {
-	p          *Processor
-	ctx        context.Context
-	pool       []fwkdl.Endpoint
-	usageLimit float64
-	// verdicts memoizes by candidate slice. EndpointCandidates returns one shared slice per subset, so heads with
-	// the same subset share one evaluation.
-	verdicts map[candidateSet]bool
+// candidateProbes evaluates the saturation of items' own candidate endpoints for one dispatch cycle.
+type candidateProbes struct {
+	p       *Processor
+	pool    []fwkdl.Endpoint
+	poolSet map[fwkdl.Endpoint]struct{}
+	// saturation memoizes by candidate slice, shared across bands. The cached EndpointCandidates that flow control
+	// uses returns one slice per subset, so heads with the same subset share one evaluation; an implementation that
+	// returns fresh slices only loses the memo.
+	saturation map[candidateSet]float64
 }
 
 // candidateSet identifies a candidate slice by its backing array and length.
@@ -695,26 +685,51 @@ type candidateSet struct {
 	n     int
 }
 
-// holds reports whether item must wait. Candidates identical to the pool were already judged by the pool gate. An
-// empty candidate set passes, because the director answers it with 503.
-func (g *candidateGate) holds(item flowcontrol.QueueItemAccessor) bool {
-	candidates := g.p.endpointCandidates.Locate(g.ctx, item.OriginalRequest().GetMetadata())
+// noProbe marks candidates that need no evaluation: an empty set, which the director answers with 503, or the pool
+// itself, which the pool gate already passed.
+const noProbe = -1.0
+
+// holds reports whether item must wait because its candidate endpoints are at or above usageLimit.
+func (c *candidateProbes) holds(ctx context.Context, item flowcontrol.QueueItemAccessor, usageLimit float64) bool {
+	candidates := c.p.endpointCandidates.Locate(ctx, item.OriginalRequest().GetMetadata())
 	if len(candidates) == 0 {
 		return false
 	}
 	key := candidateSet{first: &candidates[0], n: len(candidates)}
-	if held, ok := g.verdicts[key]; ok {
-		return held
+	sat, ok := c.saturation[key]
+	if !ok {
+		sat = noProbe
+		if !c.isPool(candidates) {
+			sat = c.p.stageSaturation(flowcontrol.WithSaturationProbe(ctx), candidates).effective
+		}
+		if c.saturation == nil {
+			c.saturation = make(map[candidateSet]float64)
+		}
+		c.saturation[key] = sat
 	}
-	held := false
-	if !slices.Equal(candidates, g.pool) {
-		held = g.p.stageSaturation(flowcontrol.WithSaturationProbe(g.ctx), candidates).effective >= g.usageLimit
+	return sat != noProbe && sat >= usageLimit
+}
+
+// isPool reports whether candidates hold exactly the pool's endpoints, in any order.
+func (c *candidateProbes) isPool(candidates []fwkdl.Endpoint) bool {
+	if len(candidates) != len(c.pool) {
+		return false
 	}
-	if g.verdicts == nil {
-		g.verdicts = make(map[candidateSet]bool)
+	if slices.Equal(candidates, c.pool) {
+		return true
 	}
-	g.verdicts[key] = held
-	return held
+	if c.poolSet == nil {
+		c.poolSet = make(map[fwkdl.Endpoint]struct{}, len(c.pool))
+		for _, ep := range c.pool {
+			c.poolSet[ep] = struct{}{}
+		}
+	}
+	for _, ep := range candidates {
+		if _, ok := c.poolSet[ep]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // partitionEndpoints classifies endpoints into prefill, decode, and interleaved buckets

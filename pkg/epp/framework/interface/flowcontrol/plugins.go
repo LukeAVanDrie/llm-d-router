@@ -121,14 +121,13 @@ type SaturationDetector interface {
 	//     represent the depth of overload, scaling proportionally with the excess load.
 	//   - A value < 1.0 indicates the ratio of used capacity to total available capacity.
 	//
-	// The FlowController consumes this signal to make dispatch decisions:
-	//   - If Saturation() >= 1.0: Stop dispatching and apply backpressure (buffer requests).
-	//   - If Saturation() < 1.0: Continue dispatching traffic to the pool.
+	// The FlowController compares this signal against each priority band's ceiling (1.0 unless a
+	// UsageLimitPolicy lowers it): at or above the ceiling, the band's requests stay queued.
 	//
-	// The FlowController may call Saturation more than once per dispatch cycle: once over the pool,
-	// and again over the candidate endpoints of a request whose candidates differ from the pool
-	// (marked by WithSaturationProbe). Implementations MUST have no side effects other than
-	// telemetry, and SHOULD skip pool-scoped telemetry when IsSaturationProbe reports true.
+	// The FlowController calls Saturation once per dispatch cycle over the pool, and again over the
+	// candidate endpoints of a request whose candidates differ from the pool, marked by
+	// WithSaturationProbe. State kept across calls (e.g. smoothing) MUST advance only on pool
+	// evaluations, and pool-scoped telemetry SHOULD be skipped when IsSaturationProbe reports true.
 	Saturation(ctx context.Context, endpoints []datalayer.Endpoint) float64
 }
 

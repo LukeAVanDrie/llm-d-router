@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,7 @@ import (
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
 	fwkfcmocks "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol/mocks"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/fairness/roundrobin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/flowcontrol/usagelimits"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/llm-d/llm-d-router/pkg/epp/metrics"
@@ -1502,6 +1504,53 @@ func TestProcessor(t *testing.T) {
 				assert.Equal(t, int32(1), probes.Load(), "heads sharing a subset share one evaluation")
 			})
 
+			t.Run("should keep round-robin rotating past a held flow", func(t *testing.T) {
+				t.Parallel()
+				h, _ := setup(t, cold, cold2, hot)
+				rrPlugin, err := roundrobin.RoundRobinFairnessPolicyFactory("rr", nil, nil)
+				require.NoError(t, err)
+				rr := rrPlugin.(flowcontrol.FairnessPolicy)
+				h.fairnessPolicyPick = rr.Pick
+
+				queues := map[string]*fwkfcmocks.MockFlowQueueAccessor{}
+				keys := make([]flowcontrol.FlowKey, 0, 3)
+				for _, id := range []string{"a", "b", "c"} {
+					key := flowcontrol.FlowKey{ID: id, Priority: testFlow.Priority}
+					req := fwkfcmocks.NewMockFlowControlRequest(100, id, key)
+					if id == "b" {
+						req.MetadataV[subsetKey] = []fwkdl.Endpoint{hot}
+					}
+					queues[id] = &fwkfcmocks.MockFlowQueueAccessor{
+						LenV: 1, FlowKeyV: key, PeekV: &fwkfcmocks.MockQueueItemAccessor{OriginalRequestV: req},
+					}
+					keys = append(keys, key)
+				}
+				band := &fwkfcmocks.MockPriorityBandAccessor{
+					PriorityV:    testFlow.Priority,
+					PolicyStateV: rr.NewState(context.Background()),
+					FlowKeysFunc: func() []flowcontrol.FlowKey { return slices.Clone(keys) },
+					QueueFunc:    func(id string) flowcontrol.FlowQueueAccessor { return queues[id] },
+					IterateQueuesFunc: func(cb func(flowcontrol.FlowQueueAccessor) bool) {
+						for _, k := range keys {
+							if !cb(queues[k.ID]) {
+								return
+							}
+						}
+					},
+				}
+
+				pool := []fwkdl.Endpoint{cold, cold2, hot}
+				picked := make([]string, 0, 4)
+				for range 4 {
+					probes := &candidateProbes{p: h.processor, pool: pool}
+					item, err := h.processor.selectViableItem(context.Background(), band, probes, 1.0)
+					require.NoError(t, err)
+					require.NotNil(t, item)
+					picked = append(picked, item.OriginalRequest().ID())
+				}
+				assert.Equal(t, []string{"a", "c", "a", "c"}, picked)
+			})
+
 			t.Run("should move to the next band when every head in a band is held", func(t *testing.T) {
 				t.Parallel()
 				h, _ := setup(t, cold, cold2, hot)
@@ -1549,6 +1598,30 @@ func TestProcessor(t *testing.T) {
 
 				assert.True(t, h.processor.dispatchCycle(context.Background()))
 				assert.Zero(t, probes.Load())
+			})
+
+			t.Run("should not probe candidates that are the pool in another order", func(t *testing.T) {
+				t.Parallel()
+				h, probes := setup(t, cold, cold2)
+				q := h.addQueue(testFlow)
+				require.NoError(t, q.Add(h.newSubsetItem("item", testFlow, cold2, cold)))
+
+				assert.True(t, h.processor.dispatchCycle(context.Background()))
+				assert.Zero(t, probes.Load())
+			})
+
+			t.Run("should evaluate a shared subset once across bands", func(t *testing.T) {
+				t.Parallel()
+				h, probes := setup(t, cold, cold2, hot)
+				subset := []fwkdl.Endpoint{hot}
+				qHigh := h.addQueue(testFlow)
+				require.NoError(t, qHigh.Add(h.newSubsetItem("high", testFlow, subset...)))
+				keyLow := flowcontrol.FlowKey{ID: "flow-low", Priority: 5}
+				qLow := h.addQueue(keyLow)
+				require.NoError(t, qLow.Add(h.newSubsetItem("low", keyLow, subset...)))
+
+				assert.False(t, h.processor.dispatchCycle(context.Background()))
+				assert.Equal(t, int32(1), probes.Load())
 			})
 
 			t.Run("should probe a subset that matches the pool size but not its members", func(t *testing.T) {
