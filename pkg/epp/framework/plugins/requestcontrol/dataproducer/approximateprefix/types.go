@@ -30,6 +30,7 @@ import (
 // prefix cached.
 type indexerInterface interface {
 	Get(hash blockHash) podSet
+	MatchLongestPrefix(hashes []blockHash) map[ServerID]int
 	Add(hashes []blockHash, server server)
 	RemovePod(server ServerID)
 	Pods() []ServerID
@@ -38,6 +39,12 @@ type indexerInterface interface {
 
 // podSet holds a set of pods that may have a specific prefix hash.
 type podSet map[ServerID]struct{}
+
+// Has reports whether pod is in the set.
+func (s podSet) Has(pod ServerID) bool {
+	_, ok := s[pod]
+	return ok
+}
 
 // blockHash is a hash of a block of request data. It aliases prefixhash.BlockHash
 // so this package and other prefix-aware producers share one block-hash type.

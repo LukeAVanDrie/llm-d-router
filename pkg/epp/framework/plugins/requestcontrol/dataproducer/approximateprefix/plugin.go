@@ -230,13 +230,20 @@ func (p *dataProducer) Produce(ctx context.Context, request *fwksched.InferenceR
 	blockSize := p.GetBlockSize(pods)
 	perPromptHashes := prefixhash.GetBlockHashes(ctx, request, blockSize, p.resolveMaxBlocks(blockSize))
 
-	prefixCacheServers := make(map[ServerID]int)
+	var prefixCacheServers map[ServerID]int
 	totalBlocks := 0
-	for _, hashes := range perPromptHashes {
-		for server, matchLen := range p.matchLongestPrefix(ctx, hashes) {
-			prefixCacheServers[server] += matchLen
+	if len(perPromptHashes) == 1 {
+		hashes := perPromptHashes[0]
+		prefixCacheServers = p.matchLongestPrefix(ctx, hashes)
+		totalBlocks = len(hashes)
+	} else if len(perPromptHashes) > 1 {
+		prefixCacheServers = make(map[ServerID]int)
+		for _, hashes := range perPromptHashes {
+			for server, matchLen := range p.matchLongestPrefix(ctx, hashes) {
+				prefixCacheServers[server] += matchLen
+			}
+			totalBlocks += len(hashes)
 		}
-		totalBlocks += len(hashes)
 	}
 
 	for _, pod := range pods {
@@ -315,19 +322,9 @@ func (p *dataProducer) makeserver(targetEndpoint fwksched.Endpoint) server {
 
 // matchLongestPrefix returns a map of servers and length of prefix that each server caches, prefix length is defined in blocks.
 func (p *dataProducer) matchLongestPrefix(ctx context.Context, hashes []blockHash) map[ServerID]int {
-	loggerTrace := log.FromContext(ctx).V(logutil.TRACE)
-	res := make(map[ServerID]int)
-
-	// Use a greedy strategy to search from the longest prefix.
-	for _, hash := range hashes {
-		cachedServers := p.indexerInst.Get(hash)
-		if len(cachedServers) == 0 {
-			break
-		}
-		loggerTrace.Info("Found cached servers", "cachedServers", cachedServers, "total # blocks", len(hashes))
-		for server := range cachedServers {
-			res[server]++
-		}
+	res := p.indexer().MatchLongestPrefix(hashes)
+	if loggerTrace := log.FromContext(ctx).V(logutil.TRACE); loggerTrace.Enabled() && len(res) > 0 {
+		loggerTrace.Info("Found cached servers", "cachedServers", res, "total # blocks", len(hashes))
 	}
 	return res
 }

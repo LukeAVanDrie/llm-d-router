@@ -104,6 +104,46 @@ func (i *indexer) Get(hash blockHash) podSet {
 	return res
 }
 
+// MatchLongestPrefix returns the longest contiguous prefix match length in blocks
+// for each server that caches the leading block of hashes.
+func (i *indexer) MatchLongestPrefix(hashes []blockHash) map[ServerID]int {
+	if len(hashes) == 0 {
+		return nil
+	}
+
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	firstSet := i.hashToPods[hashes[0]]
+	if len(firstSet) == 0 {
+		return nil
+	}
+
+	res := make(map[ServerID]int, len(firstSet))
+	for pod := range firstSet {
+		res[pod] = 1
+	}
+
+	for blockIdx := 1; blockIdx < len(hashes); blockIdx++ {
+		pods := i.hashToPods[hashes[blockIdx]]
+		if len(pods) == 0 {
+			break
+		}
+		matchedAny := false
+		for pod, count := range res {
+			if count == blockIdx && pods.Has(pod) {
+				res[pod] = blockIdx + 1
+				matchedAny = true
+			}
+		}
+		if !matchedAny {
+			break
+		}
+	}
+
+	return res
+}
+
 // makeEvictionFn returns a per-pod LRU eviction callback that removes the pod from hashToPods on eviction.
 func (i *indexer) makeEvictionFn(pod ServerID) func(blockHash, struct{}) {
 	return func(hash blockHash, _ struct{}) {
