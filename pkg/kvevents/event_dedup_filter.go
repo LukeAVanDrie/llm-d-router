@@ -61,23 +61,6 @@ type blockScope struct {
 	dataParallelRank int
 }
 
-// dedupKey is the per-block reference-count key within a single pod's bucket.
-type dedupKey struct {
-	deviceTier       string
-	groupIdx         int
-	dataParallelRank int
-	blockHash        uint64
-}
-
-func (s blockScope) key(blockHash uint64) dedupKey {
-	return dedupKey{
-		deviceTier:       s.deviceTier,
-		groupIdx:         s.groupIdx,
-		dataParallelRank: s.dataParallelRank,
-		blockHash:        blockHash,
-	}
-}
-
 // eventDedupFilter reference-counts BlockStored/BlockRemoved announcements so
 // that duplicate removes do not evict a block another announcement still
 // references. vLLM's OffloadingConnector legitimately emits such duplicates in
@@ -95,16 +78,17 @@ func (s blockScope) key(blockHash uint64) dedupKey {
 // safe because a suppressed or forwarded evict on an already-absent entry is a
 // no-op either way.
 //
-// Memory footprint: the per-pod map is bounded by the block hashes currently
-// outstanding on the wire. Under a correct emitter every announced store is
-// matched by a remove when the engine evicts the block (vLLM's offload tracker
-// pops on eviction and emits BlockRemoved), so the map tracks the engine's
-// offload-pool capacity and drains in steady state; an entry is also reclaimed
-// the moment its count returns to zero, and clear() drops a whole pod on
-// AllBlocksCleared. The only growth paths are lost ZMQ removes or an
-// index-internal eviction with no matching wire remove, both of which leave a
-// harmless over-estimate (see above) rather than a correctness error. This
-// mirrors the bounded-by-the-wire behavior of Dynamo's EventDedupFilter.
+// Memory footprint: each per-scope map is keyed by uint64 blockHash and bounded
+// by the block hashes outstanding on the wire. Under a correct emitter every
+// announced store is matched by a remove when the engine evicts the block
+// (vLLM's offload tracker pops on eviction and emits BlockRemoved), so the map
+// tracks the engine's offload-pool capacity and drains in steady state; an
+// entry is also reclaimed the moment its count returns to zero, and clear()
+// drops all scopes for a pod on AllBlocksCleared. The only growth paths are
+// lost ZMQ removes or an index-internal eviction with no matching wire remove,
+// both of which leave a harmless over-estimate (see above) rather than a
+// correctness error. This mirrors the bounded-by-the-wire behavior of Dynamo's
+// EventDedupFilter.
 //
 // It is safe for concurrent use: the single mutex guards the whole cross-pod
 // map. The Pool additionally shards work by pod identifier (see Pool.AddTask),
@@ -112,11 +96,11 @@ func (s blockScope) key(blockHash uint64) dedupKey {
 // is low in practice.
 type eventDedupFilter struct {
 	mu   sync.Mutex
-	refs map[string]map[dedupKey]int // podIdentifier -> per-block reference count
+	refs map[blockScope]map[uint64]int // scope -> blockHash -> reference count
 }
 
 func newEventDedupFilter() *eventDedupFilter {
-	return &eventDedupFilter{refs: make(map[string]map[dedupKey]int)}
+	return &eventDedupFilter{refs: make(map[blockScope]map[uint64]int)}
 }
 
 // trackStore records one reference for each stored block hash within scope.
@@ -129,13 +113,13 @@ func (f *eventDedupFilter) trackStore(scope blockScope, blockHashes []uint64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	bucket := f.refs[scope.podIdentifier]
+	bucket := f.refs[scope]
 	if bucket == nil {
-		bucket = make(map[dedupKey]int)
-		f.refs[scope.podIdentifier] = bucket
+		bucket = make(map[uint64]int, len(blockHashes))
+		f.refs[scope] = bucket
 	}
 	for _, h := range blockHashes {
-		bucket[scope.key(h)]++
+		bucket[h]++
 	}
 }
 
@@ -152,29 +136,48 @@ func (f *eventDedupFilter) filterRemove(scope blockScope, blockHashes []uint64) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	bucket := f.refs[scope.podIdentifier]
-	kept := make([]uint64, 0, len(blockHashes))
-	for _, h := range blockHashes {
-		if bucket == nil {
-			kept = append(kept, h) // unknown pod -> defensive pass-through
-			continue
-		}
-		k := scope.key(h)
-		count, ok := bucket[k]
-		if !ok || count <= 0 {
-			kept = append(kept, h) // never tracked -> defensive pass-through
-			continue
-		}
-		count--
-		if count == 0 {
-			delete(bucket, k)
-			kept = append(kept, h) // last reference released -> evict for real
-			continue
-		}
-		bucket[k] = count // still referenced -> suppress this remove
+	bucket := f.refs[scope]
+	if len(bucket) == 0 {
+		return blockHashes
 	}
-	if bucket != nil && len(bucket) == 0 {
-		delete(f.refs, scope.podIdentifier)
+
+	var kept []uint64
+	allKept := true
+	for i, h := range blockHashes {
+		count, ok := bucket[h]
+		if !ok || count <= 0 {
+			if !allKept {
+				if kept == nil {
+					kept = make([]uint64, 0, len(blockHashes)-1)
+				}
+				kept = append(kept, h)
+			}
+			continue
+		}
+		if count == 1 {
+			delete(bucket, h)
+			if !allKept {
+				if kept == nil {
+					kept = make([]uint64, 0, len(blockHashes)-1)
+				}
+				kept = append(kept, h)
+			}
+			continue
+		}
+		bucket[h] = count - 1
+		if allKept {
+			allKept = false
+			if i > 0 {
+				kept = make([]uint64, i, len(blockHashes)-1)
+				copy(kept, blockHashes[:i])
+			}
+		}
+	}
+	if len(bucket) == 0 {
+		delete(f.refs, scope)
+	}
+	if allKept {
+		return blockHashes
 	}
 	return kept
 }
@@ -190,5 +193,9 @@ func (f *eventDedupFilter) clear(podIdentifier string) {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.refs, podIdentifier)
+	for scope := range f.refs {
+		if scope.podIdentifier == podIdentifier {
+			delete(f.refs, scope)
+		}
+	}
 }
