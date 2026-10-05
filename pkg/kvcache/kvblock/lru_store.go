@@ -52,6 +52,39 @@ func (s *lruStore) Peek(key BlockHash) (*PodCache, bool) {
 	return s.lru.Peek(key)
 }
 
+// peekBatch looks up a prefix of keys (up to len(dst), stopping before any
+// duplicate key in the batch) without touching recency, writes each found
+// cache (or nil when absent) into dst, and returns the number of keys peeked.
+func (s *lruStore) peekBatch(keys []BlockHash, dst []*PodCache) int {
+	n := min(len(keys), len(dst))
+	if n == 0 {
+		return 0
+	}
+	for i := 1; i < n; i++ {
+		k := keys[i]
+		for j := range i {
+			if keys[j] == k {
+				n = i
+				break
+			}
+		}
+		if n == i {
+			break
+		}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for i := range n {
+		pc, found := s.lru.Peek(keys[i])
+		if found {
+			dst[i] = pc
+		} else {
+			dst[i] = nil
+		}
+	}
+	return n
+}
+
 // Promote marks keys most recently used in order, so the last key ends up
 // the most recent, under one acquisition. Absent keys are skipped.
 func (s *lruStore) Promote(keys []BlockHash) {
@@ -63,6 +96,28 @@ func (s *lruStore) Promote(keys []BlockHash) {
 	for _, key := range keys {
 		s.lru.Get(key)
 	}
+}
+
+// getOrAddBatch populates dst with the PodCache for each key in keys, creating
+// and inserting a new one with capacity podCacheSize when absent, under a
+// single lock acquisition.
+func (s *lruStore) getOrAddBatch(keys []BlockHash, dst []*PodCache, podCacheSize int) []*PodCache {
+	if cap(dst) < len(keys) {
+		dst = make([]*PodCache, len(keys))
+	} else {
+		dst = dst[:len(keys)]
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, key := range keys {
+		pc, found := s.lru.Get(key)
+		if !found || pc == nil {
+			pc = &PodCache{capacity: podCacheSize}
+			s.lru.Add(key, pc)
+		}
+		dst[i] = pc
+	}
+	return dst
 }
 
 func (s *lruStore) Add(key BlockHash, value *PodCache) {

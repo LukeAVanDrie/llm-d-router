@@ -73,37 +73,51 @@ type KeyWalker interface {
 		visit func(pos int, found bool, entries []EntryRef) bool) error
 }
 
-// WalkKeys implements KeyWalker. Each key is peeked under the LRU's shared
-// lock and its entries visited under that key's own lock; the visited prefix
-// is promoted in a deferred call, so every exit path refreshes what was read.
+const walkBatchSize = 64
+
+// WalkKeys implements KeyWalker. Keys are peeked in batches under the LRU's
+// shared lock and each key's entries visited under that key's shared lock; the
+// visited prefix is promoted in a deferred call, so every exit path refreshes
+// what was read.
 func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	visit func(pos int, found bool, entries []EntryRef) bool,
 ) error {
 	visited := 0
 	// Every exit, cancellation included, refreshes what was read.
 	defer func() { m.data.Promote(requestKeys[:visited]) }()
-	for pos, key := range requestKeys {
-		if pos&cancellationCheckMask == 0 && ctx.Err() != nil {
+
+	var batch [walkBatchSize]*PodCache
+	for base := 0; base < len(requestKeys); {
+		if base&cancellationCheckMask == 0 && ctx.Err() != nil {
 			return ctx.Err()
 		}
-		pc, found := m.data.Peek(key)
-		if !found || pc == nil {
-			if !visit(pos, false, nil) {
+		limit := min(base+walkBatchSize, len(requestKeys))
+		if nextCheck := (base | cancellationCheckMask) + 1; limit > nextCheck {
+			limit = nextCheck
+		}
+		n := m.data.peekBatch(requestKeys[base:limit], batch[:])
+		for i := range n {
+			pos := base + i
+			pc := batch[i]
+			if pc == nil {
+				if !visit(pos, false, nil) {
+					return ctx.Err()
+				}
+				continue
+			}
+			visited = pos + 1
+			if !pc.visitEntries(pos, visit) {
 				return ctx.Err()
 			}
-			continue
 		}
-		visited = pos + 1
-		if !pc.visitEntries(pos, visit) {
-			return ctx.Err()
-		}
+		base += n
 	}
 	return ctx.Err()
 }
 
 func (pc *PodCache) visitEntries(pos int, visit func(int, bool, []EntryRef) bool) bool {
-	pc.mu.Lock()
-	defer pc.mu.Unlock()
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
 	return visit(pos, true, pc.entries)
 }
 
@@ -111,7 +125,7 @@ func (pc *PodCache) visitEntries(pos int, visit func(int, bool, []EntryRef) bool
 // and never reused, up to a fixed number of distinct strings. Callers hold mu
 // across a whole batch so a batch is assigned all or nothing.
 type interner struct {
-	mu    sync.Mutex
+	mu    sync.RWMutex
 	ids   map[string]uint32
 	limit int
 }
@@ -124,15 +138,35 @@ func newInterner(limit int) *interner {
 // limit. Called with mu held.
 func (in *interner) fitsLocked(names func(yield func(string))) bool {
 	pending := 0
-	seen := map[string]struct{}{}
+	var seenBuf [8]string
+	var seenMap map[string]struct{}
 	names(func(s string) {
 		if _, ok := in.ids[s]; ok {
 			return
 		}
-		if _, dup := seen[s]; dup {
+		if seenMap != nil {
+			if _, dup := seenMap[s]; dup {
+				return
+			}
+			seenMap[s] = struct{}{}
+			pending++
 			return
 		}
-		seen[s] = struct{}{}
+		for i := range pending {
+			if seenBuf[i] == s {
+				return
+			}
+		}
+		if pending < len(seenBuf) {
+			seenBuf[pending] = s
+			pending++
+			return
+		}
+		seenMap = make(map[string]struct{}, len(seenBuf)+1)
+		for _, prev := range seenBuf {
+			seenMap[prev] = struct{}{}
+		}
+		seenMap[s] = struct{}{}
 		pending++
 	})
 	return len(in.ids)+pending <= in.limit
