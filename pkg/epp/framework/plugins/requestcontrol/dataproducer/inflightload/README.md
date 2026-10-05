@@ -2,7 +2,9 @@
 
 **Type:** `inflight-load-producer`
 
-Tracks real-time in-flight request and token counts per endpoint by hooking into the request lifecycle. Writes an `InFlightLoad` attribute onto each endpoint in the `Produce` phase, consumed by the following plugins:
+Tracks real-time in-flight request and token counts per endpoint by hooking into the request lifecycle, and publishes per-endpoint `InFlightLoad` (via `Extract`) and per-request `UncachedRequestTokens` (in `Produce`), consumed by the following plugins:
+- `token-delay-scorer`: Scores endpoints by combining in-flight token backlog, active decode requests, per-endpoint uncached prompt tokens, and KV-cache eviction congestion.
+- `token-balance-pd-decider`: Decides per-request P/D disaggregation by comparing remote prefill + KV transfer cost against local decode-endpoint prefill cost.
 - `token-load-scorer`: Scores endpoints based on in-flight tokens.
 - `active-request-scorer`: Scores endpoints based on in-flight requests.
 - `concurrency-detector`: Provides admission control based on in-flight requests/tokens.

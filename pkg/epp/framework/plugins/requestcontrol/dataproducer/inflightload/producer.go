@@ -162,7 +162,8 @@ type InFlightLoadProducer struct {
 // can race safely: whichever swaps first does the decrement, the other
 // sees 0 and is a no-op.
 type addedTokensEntry struct {
-	tokens atomic.Int64
+	prefillTokens atomic.Int64
+	tokens        atomic.Int64
 	// tokenCounter and requestCounter point at the exact tracker counter instances this request
 	// incremented in PreRequest. A release decrements these instances directly, so it always lands
 	// on the counter that received the increment. If the endpoint flaps (delete + recreate under the
@@ -197,13 +198,14 @@ func (e *addedTokensEntry) Clone() fwkplugin.StateData {
 		fairnessID:     e.fairnessID,
 		priority:       e.priority,
 	}
+	clone.prefillTokens.Store(e.prefillTokens.Load())
 	clone.tokens.Store(e.tokens.Load())
 	clone.requests.Store(e.requests.Load())
 	return clone
 }
 
 func (e *addedTokensEntry) OnEvicted(_ string, _ fwkplugin.StateKey) {
-	if t := e.tokens.Swap(0); t != 0 {
+	if t := e.prefillTokens.Swap(0) + e.tokens.Swap(0); t != 0 {
 		decrementClamped(e.tokenCounter, t)
 		inflightTokens.WithLabelValues(e.endpointName, e.namespace, e.producerName, e.fairnessID, e.priority).Sub(float64(t))
 	}
@@ -450,6 +452,7 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		}
 	}
 
+	hasRemotePrefill := hasPrefillProfileTarget(result)
 	tracked := false
 	for profileName, profileResult := range result.ProfileResults {
 		if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
@@ -465,11 +468,9 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 
 		requestCounter := p.requestTracker.inc(eid)
 
-		// Compute the uncached prompt portion this endpoint must actually compute.
-		// Prefer the prefix producer's view (real tokens) when available so the
-		// match-length and the input length are in the same units; fall back to
-		// the (estimated) input tokens otherwise.
-		tokens := p.estimateRequestTokens(endpoint, request, inputTokens)
+		// Compute the stage-specific prompt and output token contributions for this endpoint.
+		prefillTok, decodeTok := p.requestStageTokens(endpoint, request, inputTokens, profileName, hasRemotePrefill)
+		tokens := prefillTok + decodeTok
 
 		tokenCounter := p.tokenTracker.add(eid, tokens)
 
@@ -485,7 +486,8 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 			fairnessID:     fairnessID,
 			priority:       priority,
 		}
-		entry.tokens.Store(tokens)
+		entry.prefillTokens.Store(prefillTok)
+		entry.tokens.Store(decodeTok)
 		entry.requests.Store(1)
 		p.PluginState.Write(
 			request.RequestID,
@@ -505,6 +507,48 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 		p.PluginState.BindLiveness(ctx, request.RequestID)
 	}
 	return nil
+}
+
+func hasPrefillProfileTarget(result *fwksched.SchedulingResult) bool {
+	if result == nil {
+		return false
+	}
+	pr, ok := result.ProfileResults[profilePrefill]
+	return ok && pr != nil && len(pr.TargetEndpoints) > 0 && pr.TargetEndpoints[0] != nil && pr.TargetEndpoints[0].GetMetadata() != nil
+}
+
+func (p *InFlightLoadProducer) requestStageTokens(
+	endpoint fwksched.Endpoint,
+	request *fwksched.InferenceRequest,
+	inputTokens int64,
+	profileName string,
+	hasRemotePrefill bool,
+) (prefillTokens, decodeTokens int64) {
+	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK)
+
+	if endpointHasPrefillOnlyRole(endpoint) {
+		return adjustedInput, 0
+	}
+
+	if p.addEstimatedOutputTokens {
+		outTokens := p.tokenEstimator.EstimateOutputFromRequest(request)
+		if endpointHasDecodeOnlyRole(endpoint) {
+			if hasRemotePrefill {
+				return 0, outTokens
+			}
+			// Remote prefill was not used: the decode endpoint executes both local prefill and decode.
+			return adjustedInput, outTokens
+		}
+		if hasRemotePrefill {
+			return 0, adjustedInput + outTokens
+		}
+		return adjustedInput, outTokens
+	}
+
+	if hasRemotePrefill && profileName != profilePrefill {
+		return 0, 0
+	}
+	return adjustedInput, 0
 }
 
 func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64) int64 {
@@ -583,15 +627,15 @@ func (p *InFlightLoadProducer) ResponseBody(
 		return
 	}
 
-	// When output tokens are excluded, the in-flight token estimate represents only
-	// the prompt cost, which is consumed by prefill. As soon as the first chunk
-	// arrives (StartOfStream), prefill is done across all profiles, so free the
-	// token counters for every targeted endpoint regardless of profile name.
-	// The prefill profile's entry is released in full (request counter included):
-	// the first chunk means the prefill worker has finished and handed off, so
-	// the request is no longer in flight on that endpoint. Other profiles'
-	// request counters are released on EndOfStream below via PluginState.Delete.
-	if !p.addEstimatedOutputTokens && resp.StartOfStream {
+	// At StartOfStream, prefill has completed across all profiles:
+	//   - The remote prefill profile's entry is released in full (tokens + request counter),
+	//     since the prefill worker has handed off and the request is no longer in flight there.
+	//   - When addEstimatedOutputTokens is true, any local prefill token contribution on other
+	//     profiles is released while estimated output tokens and the request counter stay held
+	//     until EndOfStream.
+	//   - When addEstimatedOutputTokens is false, all tracked tokens on other profiles are
+	//     released while the request counter stays held until EndOfStream.
+	if resp.StartOfStream {
 		for profileName, profileResult := range result.ProfileResults {
 			if profileResult == nil || len(profileResult.TargetEndpoints) == 0 {
 				continue
@@ -600,22 +644,13 @@ func (p *InFlightLoadProducer) ResponseBody(
 			if endpoint == nil || endpoint.GetMetadata() == nil {
 				continue
 			}
-			if profileName == profilePrefill {
+			switch {
+			case profileName == profilePrefill:
 				p.release(endpoint, request, profileName)
-			} else {
+			case p.addEstimatedOutputTokens:
+				p.releasePrefillTokensEarly(endpoint, request, profileName)
+			default:
 				p.releaseTokensEarly(endpoint, request, profileName)
-			}
-		}
-	}
-
-	// Early prefill release (on first chunk). Frees the primary profile's
-	// prefill contribution as soon as prefill completes, while other profiles'
-	// entries remain until EndOfStream.
-	if p.addEstimatedOutputTokens && resp.StartOfStream {
-		if prefillResult, ok := result.ProfileResults[profilePrefill]; ok && len(prefillResult.TargetEndpoints) > 0 {
-			endpoint := prefillResult.TargetEndpoints[0]
-			if endpoint != nil && endpoint.GetMetadata() != nil {
-				p.release(endpoint, request, profilePrefill)
 			}
 		}
 	}
@@ -676,7 +711,30 @@ func (p *InFlightLoadProducer) releaseTokensEarly(endpoint fwksched.Endpoint, re
 
 	key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
 	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, request.RequestID, key); err == nil {
-		if t := entry.tokens.Swap(0); t != 0 {
+		if t := entry.prefillTokens.Swap(0) + entry.tokens.Swap(0); t != 0 {
+			decrementClamped(entry.tokenCounter, t)
+			inflightTokens.WithLabelValues(entry.endpointName, entry.namespace, entry.producerName, entry.fairnessID, entry.priority).Sub(float64(t))
+		}
+	}
+}
+
+// releasePrefillTokensEarly frees only the prefill (prompt) token portion of a
+// profile's entry at StartOfStream when addEstimatedOutputTokens=true and
+// prefill ran locally on the endpoint, leaving estimated output tokens and the
+// request counter held until EndOfStream.
+func (p *InFlightLoadProducer) releasePrefillTokensEarly(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, profileName string) {
+	if endpoint == nil || request == nil || request.RequestID == "" || p.PluginState == nil {
+		return
+	}
+	meta := endpoint.GetMetadata()
+	if meta == nil {
+		return
+	}
+	eid := meta.ID.String()
+
+	key := fwkplugin.StateKey(addedTokensKey(eid, profileName))
+	if entry, err := fwkplugin.ReadPluginStateKey[*addedTokensEntry](p.PluginState, request.RequestID, key); err == nil {
+		if t := entry.prefillTokens.Swap(0); t != 0 {
 			decrementClamped(entry.tokenCounter, t)
 			inflightTokens.WithLabelValues(entry.endpointName, entry.namespace, entry.producerName, entry.fairnessID, entry.priority).Sub(float64(t))
 		}

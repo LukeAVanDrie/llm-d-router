@@ -743,9 +743,10 @@ func TestInFlightLoadProducer_ExcludeOutputTokens_StartOfStreamRelease(t *testin
 }
 
 // TestInFlightLoadProducer_ExcludeOutputTokens_PrefillReleasedAtStartOfStream verifies
-// that when AddEstimatedOutputTokens is false, the prefill profile's request counter is
-// released at StartOfStream (the first chunk means prefill has completed and handed off),
-// while the decode profile's request counter is held until EndOfStream.
+// that when AddEstimatedOutputTokens is false, the prefill profile's request and token
+// counters are released at StartOfStream (the first chunk means prefill has completed
+// and handed off), while the decode profile does not double-count prompt tokens and
+// holds its request counter until EndOfStream.
 func TestInFlightLoadProducer_ExcludeOutputTokens_PrefillReleasedAtStartOfStream(t *testing.T) {
 	t.Parallel()
 
@@ -755,7 +756,7 @@ func TestInFlightLoadProducer_ExcludeOutputTokens_PrefillReleasedAtStartOfStream
 	prefillID := fullEndpointName("prefill-endpoint")
 	decodeID := fullEndpointName("decode-endpoint")
 
-	// 4 input tokens per profile. Output tokens are excluded.
+	// 4 input tokens handled by remote prefill. Output tokens are excluded.
 	req := makeTokenRequest("req-pd-no-output", 4)
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "decode",
@@ -768,16 +769,16 @@ func TestInFlightLoadProducer_ExcludeOutputTokens_PrefillReleasedAtStartOfStream
 	require.Equal(t, int64(1), producer.requestTracker.get(prefillID))
 	require.Equal(t, int64(1), producer.requestTracker.get(decodeID))
 	require.Equal(t, int64(4), producer.tokenTracker.get(prefillID))
-	require.Equal(t, int64(4), producer.tokenTracker.get(decodeID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(decodeID), "decode endpoint must not double-count prompt tokens when remote prefill is active")
 
-	// First chunk: prefill is fully released (request included), decode keeps its
-	// request counter with tokens released.
+	// First chunk: prefill is fully released (request + tokens), decode keeps its
+	// request counter until EndOfStream.
 	req.SchedulingResult = res
 	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
 	require.Equal(t, int64(0), producer.requestTracker.get(prefillID), "prefill request should be released at StartOfStream")
 	require.Equal(t, int64(0), producer.tokenTracker.get(prefillID))
 	require.Equal(t, int64(1), producer.requestTracker.get(decodeID), "decode request should still be held")
-	require.Equal(t, int64(0), producer.tokenTracker.get(decodeID), "decode tokens should be released at StartOfStream")
+	require.Equal(t, int64(0), producer.tokenTracker.get(decodeID))
 
 	// EndOfStream releases the decode request counter.
 	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
@@ -1514,4 +1515,122 @@ func TestInFlightLoadProducer_WarnsOnceOnMissingOutlenBucket(t *testing.T) {
 	require.NoError(t, producer.PreRequest(ctx, makeTokenRequest("w3", 4), res))
 
 	require.Equal(t, 1, warnings, "missing-outlen-bucket warning must fire exactly once")
+}
+
+// TestInFlightLoadProducer_PDRoleAwareLoad_ExcludeOutputTokens_NoDoubleCount verifies
+// that when addEstimatedOutputTokens is false and remote prefill is active on role-labeled
+// endpoints, the uncached prompt tokens are charged only to the prefill worker and not
+// double-counted on the decode worker.
+func TestInFlightLoadProducer_PDRoleAwareLoad_ExcludeOutputTokens_NoDoubleCount(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	producer.addEstimatedOutputTokens = false
+	ctx := context.Background()
+
+	req := makeTokenRequest("req-pd-role-no-out", 8)
+	prefillEP := newStubSchedulingEndpointWithRole("prefill-pod", bylabel.RolePrefill)
+	decodeEP := newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode)
+
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{prefillEP}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{decodeEP}},
+		},
+	}
+
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+
+	prefillID := fullEndpointName("prefill-pod")
+	decodeID := fullEndpointName("decode-pod")
+
+	require.Equal(t, int64(1), producer.requestTracker.get(prefillID))
+	require.Equal(t, int64(1), producer.requestTracker.get(decodeID))
+	require.Equal(t, int64(8), producer.tokenTracker.get(prefillID), "prefill pod tracks uncached input tokens")
+	require.Equal(t, int64(0), producer.tokenTracker.get(decodeID), "decode pod must not double-count input tokens when remote prefill runs")
+
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(prefillID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(prefillID))
+	require.Equal(t, int64(1), producer.requestTracker.get(decodeID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(decodeID))
+
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(decodeID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(decodeID))
+}
+
+// TestInFlightLoadProducer_PDRoleAwareLoad_LocalPrefillOnDecodePod verifies that when
+// remote prefill is declined (no prefill profile result) and a role=decode endpoint
+// executes both local prefill and decode with addEstimatedOutputTokens=true:
+//  1. PreRequest charges both uncached input tokens and estimated output tokens.
+//  2. StartOfStream releases only the local prefill tokens while retaining estimated
+//     output tokens and the in-flight request count.
+//  3. EndOfStream releases the remaining output tokens and the request count.
+func TestInFlightLoadProducer_PDRoleAwareLoad_LocalPrefillOnDecodePod(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+
+	req := makeTokenRequest("req-local-pd-decode", 12)
+	req.PutAttribute(outlenbucket.AttributeKey, outlenbucket.Long) // 4096 output tokens
+	decodeEP := newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode)
+
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"decode": {TargetEndpoints: []fwksched.Endpoint{decodeEP}},
+		},
+	}
+
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+
+	decodeID := fullEndpointName("decode-pod")
+	require.Equal(t, int64(1), producer.requestTracker.get(decodeID))
+	require.Equal(t, int64(12+4096), producer.tokenTracker.get(decodeID),
+		"decode pod running local prefill must track both uncached input and estimated output tokens")
+
+	// StartOfStream: local prefill is complete, so the 12 input tokens are released
+	// while the 4096 estimated output tokens and 1 in-flight request remain held.
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+	require.Equal(t, int64(1), producer.requestTracker.get(decodeID), "decode request count must stay held after StartOfStream")
+	require.Equal(t, int64(4096), producer.tokenTracker.get(decodeID), "local prefill tokens released at StartOfStream; output tokens retained")
+
+	// EndOfStream: remaining output tokens and request count are released.
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(decodeID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(decodeID))
+}
+
+// TestInFlightLoadProducer_Monolithic_LocalPrefillReleasedAtStartOfStream verifies that
+// on a monolithic/combined endpoint with addEstimatedOutputTokens=true, StartOfStream
+// releases the prompt's prefill tokens while holding estimated output tokens and the
+// request counter until EndOfStream.
+func TestInFlightLoadProducer_Monolithic_LocalPrefillReleasedAtStartOfStream(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+	endpointName := "mono-sos-endpoint"
+	endpointID := fullEndpointName(endpointName)
+
+	req := makeTokenRequest("req-mono-sos", 10)
+	res := makeSchedulingResult(endpointName)
+
+	require.NoError(t, producer.PreRequest(ctx, req, res))
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(10)+UnknownOutputTokens, producer.tokenTracker.get(endpointID))
+
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+	require.Equal(t, int64(1), producer.requestTracker.get(endpointID), "request counter must stay held during decode")
+	require.Equal(t, UnknownOutputTokens, producer.tokenTracker.get(endpointID), "prompt tokens released at StartOfStream; output tokens retained")
+
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.requestTracker.get(endpointID))
+	require.Equal(t, int64(0), producer.tokenTracker.get(endpointID))
 }
