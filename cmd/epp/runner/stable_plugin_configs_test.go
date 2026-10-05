@@ -79,3 +79,33 @@ func TestStablePluginConfigs(t *testing.T) {
 func testName(file string) string {
 	return filepath.Join(filepath.Base(filepath.Dir(file)), filepath.Base(file))
 }
+
+func TestTokenDelayPluginConfig(t *testing.T) {
+	configText := `apiVersion: llm-d.ai/v1
+kind: EndpointPickerConfig
+plugins:
+  - type: single-profile-handler
+  - type: token-delay-scorer
+schedulingProfiles:
+  - name: default
+    plugins:
+      - pluginRef: token-delay-scorer
+`
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	opts := runserver.NewOptions()
+	opts.ConfigText = configText
+	opts.PoolName = "benchmark-pool"
+	opts.AllowExperimentalPlugins = false
+
+	r := NewRunner()
+	rawConfig, err := r.parseConfigurationPhaseOne(ctx, opts)
+	require.NoError(t, err)
+
+	ds := datastore.NewDatastore(ctx, r.setupMetricsCollection(opts))
+	_, err = r.parseConfigurationPhaseTwo(ctx, rawConfig, ds, opts.RefreshMetricsInterval)
+	require.NoError(t, err)
+
+	require.NoError(t, fwkplugin.ValidatePluginStability(r.PluginHandle, opts.AllowExperimentalPlugins))
+}

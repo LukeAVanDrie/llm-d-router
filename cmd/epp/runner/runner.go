@@ -152,6 +152,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/queuedepth"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/runningrequests"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/sessionaffinity"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/tokendelay"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/tokenload"
 	topologyaffinityscorer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/topologyaffinity"
 	testfilter "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/test/filter"
@@ -672,6 +673,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(runningrequests.RunningRequestsSizeScorerType, fwkplugin.StabilityBeta, runningrequests.RunningRequestsSizeScorerFactory)
 	fwkplugin.Register(loraaffinity.LoraAffinityScorerType, fwkplugin.StabilityBeta, loraaffinity.LoraAffinityScorerFactory)
 	fwkplugin.Register(tokenload.TokenLoadScorerType, fwkplugin.StabilityBeta, tokenload.TokenLoadScorerFactory)
+	fwkplugin.Register(tokendelay.TokenDelayScorerType, fwkplugin.StabilityBeta, tokendelay.TokenDelayScorerFactory)
 	fwkplugin.Register(nohitlru.NoHitLRUType, fwkplugin.StabilityBeta, nohitlru.Factory)
 	fwkplugin.Register(activerequest.ActiveRequestType, fwkplugin.StabilityBeta, activerequest.Factory)
 	fwkplugin.Register(mmcacheaffinity.Type, fwkplugin.StabilityBeta, mmcacheaffinity.Factory)
