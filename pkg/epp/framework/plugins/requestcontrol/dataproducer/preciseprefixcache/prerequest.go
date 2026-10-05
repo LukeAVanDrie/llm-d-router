@@ -123,13 +123,13 @@ func (p *Producer) PreRequest(ctx context.Context,
 		return nil
 	}
 
-	logger := log.FromContext(ctx).WithName(p.typedName.String())
-
 	state, err := plugin.ReadPluginStateKey[*blockKeysState](
 		p.pluginState, request.RequestID, blockKeysStateKey)
 	if err != nil {
-		logger.V(logging.TRACE).Info("No plugin state for PreRequest, skipping speculative indexing",
-			"requestID", request.RequestID)
+		if traceLogger := log.FromContext(ctx).V(logging.TRACE); traceLogger.Enabled() {
+			traceLogger.WithName(p.typedName.String()).Info("No plugin state for PreRequest, skipping speculative indexing",
+				"requestID", request.RequestID)
+		}
 		return nil
 	}
 	p.pluginState.Delete(request.RequestID)
@@ -155,31 +155,31 @@ func (p *Producer) PreRequest(ctx context.Context,
 		return nil
 	}
 	speculativePod := kvblock.PodEntry{
-		PodIdentifier: fmt.Sprintf("%s:%s", targetMeta.Address, targetMeta.Port),
+		PodIdentifier: endpointToKey(targetMeta),
 		Speculative:   true,
 	}
+	allPodEntries := []kvblock.PodEntry{speculativePod}
 
 	index := p.kvCacheIndexer.KVBlockIndex()
 	// Insert per-prompt keys separately to preserve correct block adjacency.
 	for _, promptKeys := range state.perPromptKeys {
-		if err := index.Add(ctx, nil, promptKeys, []kvblock.PodEntry{speculativePod}); err != nil {
-			logger.Error(err, "Failed to add speculative entries to index",
+		if err := index.Add(ctx, nil, promptKeys, allPodEntries); err != nil {
+			log.FromContext(ctx).WithName(p.typedName.String()).Error(err, "Failed to add speculative entries to index",
 				"pod", speculativePod.PodIdentifier)
 		}
 	}
-
-	allPodEntries := []kvblock.PodEntry{speculativePod}
 
 	// P/D disagg: seed the prefill endpoint too.
 	if pr, exists := schedulingResult.ProfileResults[experimentalPrefillProfile]; exists && len(pr.TargetEndpoints) > 0 {
 		if prefillMeta := pr.TargetEndpoints[0].GetMetadata(); prefillMeta != nil {
 			prefillPod := kvblock.PodEntry{
-				PodIdentifier: fmt.Sprintf("%s:%s", prefillMeta.Address, prefillMeta.Port),
+				PodIdentifier: endpointToKey(prefillMeta),
 				Speculative:   true,
 			}
+			prefillEntries := []kvblock.PodEntry{prefillPod}
 			for _, promptKeys := range state.perPromptKeys {
-				if err := index.Add(ctx, nil, promptKeys, []kvblock.PodEntry{prefillPod}); err != nil {
-					logger.Error(err, "Failed to add speculative entries for prefill endpoint",
+				if err := index.Add(ctx, nil, promptKeys, prefillEntries); err != nil {
+					log.FromContext(ctx).WithName(p.typedName.String()).Error(err, "Failed to add speculative entries for prefill endpoint",
 						"pod", prefillPod.PodIdentifier)
 				}
 			}
@@ -192,10 +192,12 @@ func (p *Producer) PreRequest(ctx context.Context,
 		podEntries:    allPodEntries,
 	}, p.speculativeTTL)
 
-	logger.V(logging.TRACE).Info("Added speculative entries",
-		"requestID", request.RequestID,
-		"pod", speculativePod.PodIdentifier,
-		"prompts", len(state.perPromptKeys),
-		"ttl", p.speculativeTTL)
+	if traceLogger := log.FromContext(ctx).V(logging.TRACE); traceLogger.Enabled() {
+		traceLogger.WithName(p.typedName.String()).Info("Added speculative entries",
+			"requestID", request.RequestID,
+			"pod", speculativePod.PodIdentifier,
+			"prompts", len(state.perPromptKeys),
+			"ttl", p.speculativeTTL)
+	}
 	return nil
 }

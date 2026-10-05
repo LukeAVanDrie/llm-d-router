@@ -64,6 +64,10 @@ type PodMatch struct {
 	BlocksByTier map[string]int
 }
 
+var internalSpanStartOpts = []trace.SpanStartOption{
+	trace.WithSpanKind(trace.SpanKindInternal),
+}
+
 // MatchBlockKeys runs the prefix matcher over keys for the pods in podFilter
 // (every pod when empty) and returns one PodMatch per pod that holds the
 // first key. Empty keys match nothing. The matcher walks the index when the
@@ -77,15 +81,15 @@ func (k *Indexer) MatchBlockKeys(ctx context.Context, keys []kvblock.BlockHash,
 	}
 
 	tracer := tracing.Tracer(TracerScope)
-	ctx, span := tracer.Start(ctx, "match_block_keys",
-		trace.WithSpanKind(trace.SpanKindInternal),
-	)
+	ctx, span := tracer.Start(ctx, "match_block_keys", internalSpanStartOpts...)
 	defer span.End()
-	span.SetAttributes(
-		semconv.LLMDKVCachePrefixMatchKeyCount(len(keys)),
-		semconv.LLMDKVCachePrefixMatchPodFilterCount(podFilter.Len()),
-		semconv.LLMDKVCachePrefixMatchWalked(k.keyWalker != nil),
-	)
+	if span.IsRecording() {
+		span.SetAttributes(
+			semconv.LLMDKVCachePrefixMatchKeyCount(len(keys)),
+			semconv.LLMDKVCachePrefixMatchPodFilterCount(podFilter.Len()),
+			semconv.LLMDKVCachePrefixMatchWalked(k.keyWalker != nil),
+		)
+	}
 
 	var matches map[string]PodMatch
 	var err error
@@ -104,10 +108,12 @@ func (k *Indexer) MatchBlockKeys(ctx context.Context, keys []kvblock.BlockHash,
 		metrics.MaxPodHitCount.Add(float64(blocksFound))
 		metrics.LookupHits.Add(float64(blocksFound))
 	}
-	span.SetAttributes(
-		semconv.LLMDKVCachePrefixMatchPodsMatched(len(matches)),
-		semconv.LLMDKVCachePrefixMatchLongestChain(blocksFound),
-	)
+	if span.IsRecording() {
+		span.SetAttributes(
+			semconv.LLMDKVCachePrefixMatchPodsMatched(len(matches)),
+			semconv.LLMDKVCachePrefixMatchLongestChain(blocksFound),
+		)
+	}
 	return matches, nil
 }
 
@@ -139,6 +145,24 @@ func matchWalk(ctx context.Context, walker kvblock.KeyWalker, keys []kvblock.Blo
 	return acc.result(), nil
 }
 
+// scoreWalk feeds the accumulator from an ordered index walk and returns
+// weighted pod scores and the longest matched chain length.
+func scoreWalk(ctx context.Context, walker kvblock.KeyWalker, keys []kvblock.BlockHash,
+	weights map[string]float64, filter sets.Set[string],
+) (map[string]float64, int, error) {
+	acc := acquireScoreAccumulator(weights, filter)
+	defer releaseAccumulator(acc)
+
+	err := walker.WalkKeys(ctx, keys, func(_ int, found bool, entries []kvblock.EntryRef) bool {
+		return found && len(entries) > 0 && acc.key(entries)
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	scores, longest := acc.scores()
+	return scores, longest, nil
+}
+
 // matchLookup feeds the accumulator from a materialized Lookup result, for
 // backends without the walk capability.
 func matchLookup(ctx context.Context, index kvblock.Index, keys []kvblock.BlockHash,
@@ -151,6 +175,25 @@ func matchLookup(ctx context.Context, index kvblock.Index, keys []kvblock.BlockH
 	return matchMaterialized(ctx, keys, keyToPods, weights, filter)
 }
 
+// scoreLookup feeds the accumulator from a materialized Lookup result and
+// returns weighted pod scores and the longest matched chain length.
+func scoreLookup(ctx context.Context, index kvblock.Index, keys []kvblock.BlockHash,
+	weights map[string]float64, filter sets.Set[string],
+) (map[string]float64, int, error) {
+	keyToPods, err := index.Lookup(ctx, keys, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	acc := acquireScoreAccumulator(weights, filter)
+	defer releaseAccumulator(acc)
+
+	if err := feedMaterialized(ctx, acc, keys, keyToPods); err != nil {
+		return nil, 0, err
+	}
+	scores, longest := acc.scores()
+	return scores, longest, nil
+}
+
 // matchMaterialized feeds the accumulator from a Lookup result, walking keys
 // in order and stopping at the first key without entries. Pod and tier
 // ordinals are assigned per call, since materialized entries carry none.
@@ -161,11 +204,20 @@ func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 	acc := acquireAccumulator(weights, filter)
 	defer releaseAccumulator(acc)
 
+	if err := feedMaterialized(ctx, acc, keys, keyToPods); err != nil {
+		return nil, err
+	}
+	return acc.result(), nil
+}
+
+func feedMaterialized(ctx context.Context, acc *prefixAccumulator, keys []kvblock.BlockHash,
+	keyToPods map[kvblock.BlockHash][]kvblock.PodEntry,
+) error {
 	pods, tiers := ordinalTable{}, ordinalTable{}
 	var refs []kvblock.EntryRef
 	for pos, key := range keys {
 		if pos&matchCancellationMask == 0 && ctx.Err() != nil {
-			return nil, ctx.Err()
+			return ctx.Err()
 		}
 		entries := keyToPods[key]
 		if len(entries) == 0 {
@@ -185,10 +237,7 @@ func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 	}
 	// Cancellation is sampled at checkpoints along the keys and once more at
 	// completion, so a cancelled request never reports a match.
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return acc.result(), nil
+	return ctx.Err()
 }
 
 // ordinalTable assigns dense ordinals to names in first-seen order.
@@ -299,11 +348,12 @@ type prefixAccumulator struct {
 	weights map[string]float64
 	filter  sets.Set[string]
 
-	table    slotTable
-	slots    []matchSlot
-	active   []int32
-	keyStamp uint32
-	first    bool
+	table      slotTable
+	slots      []matchSlot
+	active     []int32
+	keyStamp   uint32
+	first      bool
+	trackTiers bool
 
 	// weightCache holds the weight of every tier seen in this accumulation,
 	// scanned linearly: requests see a handful of tiers.
@@ -319,7 +369,14 @@ func acquireAccumulator(weights map[string]float64, filter sets.Set[string]) *pr
 	a.active = a.active[:0]
 	a.keyStamp = 0
 	a.first = true
+	a.trackTiers = true
 	a.weightCache = a.weightCache[:0]
+	return a
+}
+
+func acquireScoreAccumulator(weights map[string]float64, filter sets.Set[string]) *prefixAccumulator {
+	a := acquireAccumulator(weights, filter)
+	a.trackTiers = false
 	return a
 }
 
@@ -371,7 +428,7 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 			slot.weight = w
 		}
 
-		if !a.stampTier(slot, tierOrdinal) && a.first {
+		if a.trackTiers && !a.stampTier(slot, tierOrdinal) && a.first {
 			slot.tiers = append(slot.tiers, tierChain{ordinal: tierOrdinal, name: tier, seen: a.keyStamp, alive: true})
 		}
 	}
@@ -442,6 +499,21 @@ func (a *prefixAccumulator) result() map[string]PodMatch {
 		out[s.pod] = PodMatch{WeightedScore: s.score, MatchedBlocks: s.matched, BlocksByTier: byTier}
 	}
 	return out
+}
+
+// scores materializes the accumulated weighted scores and the longest
+// matched chain length without allocating per-pod tier maps.
+func (a *prefixAccumulator) scores() (map[string]float64, int) {
+	out := make(map[string]float64, len(a.slots))
+	longest := 0
+	for i := range a.slots {
+		s := &a.slots[i]
+		out[s.pod] = s.score
+		if s.matched > longest {
+			longest = s.matched
+		}
+	}
+	return out, longest
 }
 
 // newSlot appends a candidate, reusing a pooled slot's tier storage when one
