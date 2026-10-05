@@ -25,6 +25,10 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 )
 
+var internalSpanStartOpts = []trace.SpanStartOption{
+	trace.WithSpanKind(trace.SpanKindInternal),
+}
+
 type tracedIndex struct {
 	next Index
 }
@@ -51,10 +55,17 @@ func (t *tracedWalker) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	visit func(pos int, found bool, entries []EntryRef) bool,
 ) error {
 	tracer := tracing.Tracer(TracerScope)
-	ctx, span := tracer.Start(ctx, "index_walk",
-		trace.WithSpanKind(trace.SpanKindInternal),
-	)
+	ctx, span := tracer.Start(ctx, "index_walk", internalSpanStartOpts...)
 	defer span.End()
+
+	if !span.IsRecording() {
+		if err := t.walker.WalkKeys(ctx, requestKeys, visit); err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			return err
+		}
+		return nil
+	}
+
 	span.SetAttributes(semconv.LLMDKVCacheIndexWalkKeyCount(len(requestKeys)))
 
 	present := 0
@@ -74,17 +85,17 @@ func (t *tracedWalker) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 
 func (t *tracedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error {
 	tracer := tracing.Tracer(TracerScope)
-	ctx, span := tracer.Start(ctx, "index_add",
-		trace.WithSpanKind(trace.SpanKindInternal),
-	)
+	ctx, span := tracer.Start(ctx, "index_add", internalSpanStartOpts...)
 	defer span.End()
 
-	span.SetAttributes(
-		semconv.LLMDKVCacheIndexAddEngineKeyCount(len(engineKeys)),
-		semconv.LLMDKVCacheIndexAddRequestKeyCount(len(requestKeys)),
-		semconv.LLMDKVCacheIndexAddPodEntryCount(len(entries)),
-		semconv.LLMDKVCacheIndexAddDeviceTierCount(deviceTierCount(entries)),
-	)
+	if span.IsRecording() {
+		span.SetAttributes(
+			semconv.LLMDKVCacheIndexAddEngineKeyCount(len(engineKeys)),
+			semconv.LLMDKVCacheIndexAddRequestKeyCount(len(requestKeys)),
+			semconv.LLMDKVCacheIndexAddPodEntryCount(len(entries)),
+			semconv.LLMDKVCacheIndexAddDeviceTierCount(deviceTierCount(entries)),
+		)
+	}
 
 	err := t.next.Add(ctx, engineKeys, requestKeys, entries)
 	if err != nil {
@@ -97,16 +108,16 @@ func (t *tracedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHa
 
 func (t *tracedIndex) Evict(ctx context.Context, key BlockHash, keyType KeyType, entries []PodEntry) error {
 	tracer := tracing.Tracer(TracerScope)
-	ctx, span := tracer.Start(ctx, "index_evict",
-		trace.WithSpanKind(trace.SpanKindInternal),
-	)
+	ctx, span := tracer.Start(ctx, "index_evict", internalSpanStartOpts...)
 	defer span.End()
 
-	span.SetAttributes(
-		semconv.LLMDKVCacheIndexEvictKeyType(keyTypeLabel(keyType)),
-		semconv.LLMDKVCacheIndexEvictPodEntryCount(len(entries)),
-		semconv.LLMDKVCacheIndexEvictDeviceTierCount(deviceTierCount(entries)),
-	)
+	if span.IsRecording() {
+		span.SetAttributes(
+			semconv.LLMDKVCacheIndexEvictKeyType(keyTypeLabel(keyType)),
+			semconv.LLMDKVCacheIndexEvictPodEntryCount(len(entries)),
+			semconv.LLMDKVCacheIndexEvictDeviceTierCount(deviceTierCount(entries)),
+		)
+	}
 
 	err := t.next.Evict(ctx, key, keyType, entries)
 	if err != nil {
@@ -123,15 +134,15 @@ func (t *tracedIndex) Lookup(
 	podIdentifierSet sets.Set[string],
 ) (map[BlockHash][]PodEntry, error) {
 	tracer := tracing.Tracer(TracerScope)
-	ctx, span := tracer.Start(ctx, "index_lookup",
-		trace.WithSpanKind(trace.SpanKindInternal),
-	)
+	ctx, span := tracer.Start(ctx, "index_lookup", internalSpanStartOpts...)
 	defer span.End()
 
-	span.SetAttributes(
-		semconv.LLMDKVCacheIndexLookupBlockCount(len(requestKeys)),
-		semconv.LLMDKVCacheLookupPodFilterCount(podIdentifierSet.Len()),
-	)
+	if span.IsRecording() {
+		span.SetAttributes(
+			semconv.LLMDKVCacheIndexLookupBlockCount(len(requestKeys)),
+			semconv.LLMDKVCacheLookupPodFilterCount(podIdentifierSet.Len()),
+		)
+	}
 
 	result, err := t.next.Lookup(ctx, requestKeys, podIdentifierSet)
 	if err != nil {
@@ -139,19 +150,20 @@ func (t *tracedIndex) Lookup(
 		return nil, err
 	}
 
-	// Calculate cache hit metrics
-	blocksFound := 0
-	for _, pods := range result {
-		if len(pods) > 0 {
-			blocksFound++
+	if span.IsRecording() {
+		blocksFound := 0
+		for _, pods := range result {
+			if len(pods) > 0 {
+				blocksFound++
+			}
 		}
-	}
-	cacheHit := blocksFound > 0
+		cacheHit := blocksFound > 0
 
-	span.SetAttributes(
-		semconv.LLMDKVCacheLookupCacheHit(cacheHit),
-		semconv.LLMDKVCacheLookupBlocksFound(blocksFound),
-	)
+		span.SetAttributes(
+			semconv.LLMDKVCacheLookupCacheHit(cacheHit),
+			semconv.LLMDKVCacheLookupBlocksFound(blocksFound),
+		)
+	}
 
 	return result, nil
 }
@@ -176,6 +188,15 @@ func keyTypeLabel(keyType KeyType) string {
 }
 
 func deviceTierCount(entries []PodEntry) int {
+	if len(entries) == 0 {
+		return 0
+	}
+	if len(entries) == 1 {
+		if entries[0].DeviceTier == "" {
+			return 0
+		}
+		return 1
+	}
 	deviceTiers := make(map[string]struct{})
 	for _, entry := range entries {
 		if entry.DeviceTier == "" {
