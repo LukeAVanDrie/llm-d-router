@@ -20,6 +20,7 @@ import (
 	"context"
 	"math"
 	"sync"
+	"unsafe"
 
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -231,6 +232,7 @@ func feedMaterialized(ctx context.Context, acc *prefixAccumulator, keys []kvbloc
 				TierOrdinal: tiers.of(e.DeviceTier),
 			})
 		}
+		acc.lastEntriesPtr = nil // refs reuses its backing array across keys
 		if !acc.key(refs) {
 			break
 		}
@@ -355,6 +357,11 @@ type prefixAccumulator struct {
 	first      bool
 	trackTiers bool
 
+	lastEntriesPtr *kvblock.EntryRef
+	lastEntriesLen int
+	pendingRun     int
+	matchedKeys    int
+
 	// weightCache holds the weight of every tier seen in this accumulation,
 	// scanned linearly: requests see a handful of tiers.
 	weightCache []tierWeight
@@ -370,6 +377,10 @@ func acquireAccumulator(weights map[string]float64, filter sets.Set[string]) *pr
 	a.keyStamp = 0
 	a.first = true
 	a.trackTiers = true
+	a.lastEntriesPtr = nil
+	a.lastEntriesLen = 0
+	a.pendingRun = 0
+	a.matchedKeys = 0
 	a.weightCache = a.weightCache[:0]
 	return a
 }
@@ -381,13 +392,22 @@ func acquireScoreAccumulator(weights map[string]float64, filter sets.Set[string]
 }
 
 func releaseAccumulator(a *prefixAccumulator) {
-	a.weights, a.filter = nil, nil
+	a.weights, a.filter, a.lastEntriesPtr = nil, nil, nil
 	accumulatorPool.Put(a)
 }
 
 // key folds one key's entries into the chains and reports whether any chain
 // is still alive. entries is borrowed for the duration of the call.
 func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
+	if !a.first && len(entries) > 0 && len(entries) == a.lastEntriesLen &&
+		unsafe.SliceData(entries) == a.lastEntriesPtr {
+		a.pendingRun++
+		return true
+	}
+	if a.pendingRun > 0 {
+		a.flushPendingRun()
+	}
+
 	a.keyStamp++
 	if a.first {
 		a.table.reset(len(entries))
@@ -413,6 +433,9 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 			a.table.insert(ref.PodOrdinal, s)
 		}
 		slot := &a.slots[s]
+		if !a.first && slot.matched != a.matchedKeys {
+			continue
+		}
 
 		tier, tierOrdinal := ref.DeviceTier, ref.TierOrdinal
 		if ref.Speculative || ref.DeviceTier == SpeculativeTier {
@@ -432,7 +455,31 @@ func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
 			slot.tiers = append(slot.tiers, tierChain{ordinal: tierOrdinal, name: tier, seen: a.keyStamp, alive: true})
 		}
 	}
-	return a.endKey()
+	alive := a.endKey()
+	if alive {
+		a.lastEntriesPtr = unsafe.SliceData(entries)
+		a.lastEntriesLen = len(entries)
+	} else {
+		a.lastEntriesPtr = nil
+		a.lastEntriesLen = 0
+	}
+	return alive
+}
+
+func (a *prefixAccumulator) flushPendingRun() {
+	run := a.pendingRun
+	a.pendingRun = 0
+	a.matchedKeys += run
+	for _, i := range a.active {
+		s := &a.slots[i]
+		s.matched += run
+		s.score += s.weight * float64(run)
+		for t := range s.tiers {
+			if s.tiers[t].alive {
+				s.tiers[t].count += run
+			}
+		}
+	}
 }
 
 // stampTier marks tier as held at the current key and reports whether the
@@ -460,6 +507,9 @@ func (a *prefixAccumulator) endKey() bool {
 			}
 			a.active = append(a.active, int32(i))
 		}
+		if len(a.active) > 0 {
+			a.matchedKeys++
+		}
 		return len(a.active) > 0
 	}
 
@@ -484,11 +534,17 @@ func (a *prefixAccumulator) endKey() bool {
 		keep = append(keep, i)
 	}
 	a.active = keep
+	if len(a.active) > 0 {
+		a.matchedKeys++
+	}
 	return len(a.active) > 0
 }
 
 // result materializes the accumulated matches.
 func (a *prefixAccumulator) result() map[string]PodMatch {
+	if a.pendingRun > 0 {
+		a.flushPendingRun()
+	}
 	out := make(map[string]PodMatch, len(a.slots))
 	for i := range a.slots {
 		s := &a.slots[i]
@@ -504,6 +560,9 @@ func (a *prefixAccumulator) result() map[string]PodMatch {
 // scores materializes the accumulated weighted scores and the longest
 // matched chain length without allocating per-pod tier maps.
 func (a *prefixAccumulator) scores() (map[string]float64, int) {
+	if a.pendingRun > 0 {
+		a.flushPendingRun()
+	}
 	out := make(map[string]float64, len(a.slots))
 	longest := 0
 	for i := range a.slots {
