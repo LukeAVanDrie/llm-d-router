@@ -137,10 +137,7 @@ func matchWalk(ctx context.Context, walker kvblock.KeyWalker, keys []kvblock.Blo
 	acc := acquireAccumulator(weights, filter)
 	defer releaseAccumulator(acc)
 
-	err := walker.WalkKeys(ctx, keys, func(_ int, found bool, entries []kvblock.EntryRef) bool {
-		return found && len(entries) > 0 && acc.key(entries)
-	})
-	if err != nil {
+	if err := walker.WalkKeys(ctx, keys, acc.walkFn); err != nil {
 		return nil, err
 	}
 	return acc.result(), nil
@@ -154,10 +151,7 @@ func scoreWalk(ctx context.Context, walker kvblock.KeyWalker, keys []kvblock.Blo
 	acc := acquireScoreAccumulator(weights, filter)
 	defer releaseAccumulator(acc)
 
-	err := walker.WalkKeys(ctx, keys, func(_ int, found bool, entries []kvblock.EntryRef) bool {
-		return found && len(entries) > 0 && acc.key(entries)
-	})
-	if err != nil {
+	if err := walker.WalkKeys(ctx, keys, acc.walkFn); err != nil {
 		return nil, 0, err
 	}
 	scores, longest := acc.scores()
@@ -365,12 +359,25 @@ type prefixAccumulator struct {
 	// weightCache holds the weight of every tier seen in this accumulation,
 	// scanned linearly: requests see a handful of tiers.
 	weightCache []tierWeight
+
+	walkFn func(int, bool, []kvblock.EntryRef) bool
 }
 
-var accumulatorPool = sync.Pool{New: func() any { return &prefixAccumulator{} }}
+var accumulatorPool = sync.Pool{New: func() any {
+	a := &prefixAccumulator{}
+	a.walkFn = a.walkKey
+	return a
+}}
+
+func (a *prefixAccumulator) walkKey(_ int, found bool, entries []kvblock.EntryRef) bool {
+	return found && len(entries) > 0 && a.key(entries)
+}
 
 func acquireAccumulator(weights map[string]float64, filter sets.Set[string]) *prefixAccumulator {
 	a, _ := accumulatorPool.Get().(*prefixAccumulator)
+	if a.walkFn == nil {
+		a.walkFn = a.walkKey
+	}
 	a.weights, a.filter = weights, filter
 	a.slots = a.slots[:0]
 	a.active = a.active[:0]

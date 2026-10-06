@@ -27,22 +27,26 @@ import (
 
 const (
 	lruShardThreshold = 4096
-	maxLRUShards      = 1
+	maxLRUShards      = 256
+	lruFastCacheSize  = 1 << 16
+	lruFastCacheMask  = lruFastCacheSize - 1
 )
 
 type lruShard struct {
 	mu   sync.RWMutex
 	lru  *simplelru.LRU[BlockHash, *PodCache]
 	size int
+	_    [88]byte
 }
 
-// lruStore is the request-key LRU. Reads follow cached prefix chains lock-free
-// or peek shard maps under a shared lock and stamp atomic read sequence numbers
-// on visited caches; writes reconcile read sequence order before evicting at
-// capacity.
+// lruStore is the request-key LRU. Reads follow cached prefix chains or
+// direct-mapped resident pointers lock-free, falling back to shard shared locks
+// on collisions or misses, and stamp atomic read sequence numbers on visited
+// caches; writes reconcile read sequence order before evicting at capacity.
 type lruStore struct {
 	shards    []lruShard
 	shardMask uint64
+	fast      *[lruFastCacheSize]atomic.Pointer[PodCache]
 	clock     atomic.Uint64
 	writeSeq  atomic.Uint64
 }
@@ -59,8 +63,10 @@ func newLRUStore(size int) (*lruStore, error) {
 		}
 	}
 	numShards := 1
+	var fast *[lruFastCacheSize]atomic.Pointer[PodCache]
 	if size >= lruShardThreshold {
 		numShards = maxLRUShards
+		fast = new([lruFastCacheSize]atomic.Pointer[PodCache])
 	}
 	shardSize := max(1, (size+numShards-1)/numShards)
 	shards := make([]lruShard, numShards)
@@ -79,6 +85,7 @@ func newLRUStore(size int) (*lruStore, error) {
 	return &lruStore{
 		shards:    shards,
 		shardMask: uint64(numShards - 1),
+		fast:      fast,
 	}, nil
 }
 
@@ -87,6 +94,16 @@ func (s *lruStore) shardFor(key BlockHash) *lruShard {
 		return &s.shards[0]
 	}
 	return &s.shards[mixBlockHash(key)&s.shardMask]
+}
+
+func (s *lruStore) lookupFast(h uint64, key BlockHash) *PodCache {
+	if s.fast == nil {
+		return nil
+	}
+	if pc := s.fast[h&lruFastCacheMask].Load(); pc != nil && pc.key == key && pc.resident.Load() {
+		return pc
+	}
+	return nil
 }
 
 func stampReadSeq(pc *PodCache, seq uint64) {
@@ -107,6 +124,9 @@ func (s *lruStore) touchLocked(pc *PodCache) {
 	pc.resident.Store(true)
 	stampReadSeq(pc, seq)
 	s.writeSeq.Store(seq)
+	if s.fast != nil {
+		s.fast[mixBlockHash(pc.key)&lruFastCacheMask].Store(pc)
+	}
 }
 
 type lruReconcileItem struct {
@@ -177,6 +197,9 @@ func (s *lruStore) Get(key BlockHash) (*PodCache, bool) {
 
 // Peek returns the key's cache without touching recency.
 func (s *lruStore) Peek(key BlockHash) (*PodCache, bool) {
+	if pc := s.lookupFast(mixBlockHash(key), key); pc != nil {
+		return pc, true
+	}
 	sh := s.shardFor(key)
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
@@ -199,6 +222,9 @@ func (s *lruStore) peekBatch(keys []BlockHash, dst []*PodCache, nextPC *PodCache
 		if nextPC != nil && nextPC.key == k && nextPC.resident.Load() {
 			pc = nextPC
 		} else {
+			pc = s.lookupFast(mixBlockHash(k), k)
+		}
+		if pc == nil {
 			sh := s.shardFor(k)
 			sh.mu.RLock()
 			foundPC, found := sh.lru.Peek(k)
@@ -273,6 +299,13 @@ func (s *lruStore) Promote(keys []BlockHash) {
 	needStamp := false
 	var lockedShard *lruShard
 	for _, key := range keys {
+		if pc := s.lookupFast(mixBlockHash(key), key); pc != nil {
+			if pc.readSeq.Load() <= pc.addedSeq.Load() {
+				needStamp = true
+				break
+			}
+			continue
+		}
 		sh := s.shardFor(key)
 		if sh != lockedShard {
 			if lockedShard != nil {
@@ -305,6 +338,10 @@ func (s *lruStore) Promote(keys []BlockHash) {
 	seq := end - uint64(len(keys))
 	for _, key := range keys {
 		seq++
+		if pc := s.lookupFast(mixBlockHash(key), key); pc != nil {
+			stampReadSeq(pc, seq)
+			continue
+		}
 		sh := s.shardFor(key)
 		if sh != lockedShard {
 			if lockedShard != nil {
@@ -334,9 +371,14 @@ func (s *lruStore) getOrAddBatch(keys []BlockHash, dst []*PodCache, podCacheSize
 		return dst
 	}
 	seqBase := s.clock.Add(uint64(len(keys))) - uint64(len(keys))
+	fast := s.fast
 	var lockedShard *lruShard
 	for i, key := range keys {
-		sh := s.shardFor(key)
+		h := mixBlockHash(key)
+		sh := &s.shards[0]
+		if s.shardMask != 0 {
+			sh = &s.shards[h&s.shardMask]
+		}
 		if sh != lockedShard {
 			if lockedShard != nil {
 				lockedShard.mu.Unlock()
@@ -356,6 +398,9 @@ func (s *lruStore) getOrAddBatch(keys []BlockHash, dst []*PodCache, podCacheSize
 		pc.addedSeq.Store(seq)
 		pc.resident.Store(true)
 		stampReadSeq(pc, seq)
+		if fast != nil {
+			fast[h&lruFastCacheMask].Store(pc)
+		}
 		dst[i] = pc
 	}
 	if lockedShard != nil {

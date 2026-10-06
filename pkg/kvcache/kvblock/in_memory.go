@@ -113,6 +113,7 @@ var errIndexCardinality = errors.New("index cardinality limit reached")
 type engineKeyShard struct {
 	mu  sync.RWMutex
 	lru *simplelru.LRU[BlockHash, []BlockHash]
+	_   [96]byte
 }
 
 type engineKeyStore struct {
