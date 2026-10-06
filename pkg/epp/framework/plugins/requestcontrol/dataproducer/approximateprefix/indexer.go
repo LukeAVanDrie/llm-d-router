@@ -120,27 +120,49 @@ func (i *indexer) MatchLongestPrefix(hashes []blockHash) map[ServerID]int {
 	}
 
 	res := make(map[ServerID]int, len(firstSet))
+	if len(hashes) == 1 {
+		for pod := range firstSet {
+			res[pod] = 1
+		}
+		return res
+	}
+
+	var activeBuf [128]ServerID
+	var active []ServerID
+	if len(firstSet) <= len(activeBuf) {
+		active = activeBuf[:0]
+	} else {
+		active = make([]ServerID, 0, len(firstSet))
+	}
 	for pod := range firstSet {
-		res[pod] = 1
+		active = append(active, pod)
 	}
 
 	for blockIdx := 1; blockIdx < len(hashes); blockIdx++ {
 		pods := i.hashToPods[hashes[blockIdx]]
 		if len(pods) == 0 {
-			break
+			for _, pod := range active {
+				res[pod] = blockIdx
+			}
+			return res
 		}
-		matchedAny := false
-		for pod, count := range res {
-			if count == blockIdx && pods.Has(pod) {
-				res[pod] = blockIdx + 1
-				matchedAny = true
+		keep := active[:0]
+		for _, pod := range active {
+			if pods.Has(pod) {
+				keep = append(keep, pod)
+			} else {
+				res[pod] = blockIdx
 			}
 		}
-		if !matchedAny {
-			break
+		active = keep
+		if len(active) == 0 {
+			return res
 		}
 	}
 
+	for _, pod := range active {
+		res[pod] = len(hashes)
+	}
 	return res
 }
 
