@@ -75,16 +75,19 @@ type KeyWalker interface {
 
 const walkBatchSize = 256
 
-// WalkKeys implements KeyWalker. Keys are peeked in batches under the LRU's
-// shared lock, each key's immutable entry snapshot is visited without locking,
-// and visited caches are stamped with read sequence numbers on every exit path.
+// WalkKeys implements KeyWalker. Keys follow cached PodCache chains lock-free
+// or are peeked in batches under shard shared locks, each key's immutable
+// entry snapshot is visited without locking, and visited caches are stamped
+// with read sequence numbers on every exit path.
 func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	visit func(pos int, found bool, entries []EntryRef) bool,
 ) error {
 	var batch [walkBatchSize]*PodCache
 	batchVisited := 0
+	prevSeq := m.data.writeSeq.Load()
+	var nextPC *PodCache
 	// Every exit, cancellation included, refreshes what was read.
-	defer func() { m.data.stampBatch(batch[:batchVisited]) }()
+	defer func() { m.data.stampBatch(batch[:batchVisited], &prevSeq) }()
 
 	for base := 0; base < len(requestKeys); {
 		if base&cancellationCheckMask == 0 && ctx.Err() != nil {
@@ -94,7 +97,8 @@ func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 		if nextCheck := (base | cancellationCheckMask) + 1; limit > nextCheck {
 			limit = nextCheck
 		}
-		n := m.data.peekBatch(requestKeys[base:limit], batch[:])
+		var n int
+		n, nextPC = m.data.peekBatch(requestKeys[base:limit], batch[:], nextPC)
 		for i := range n {
 			pos := base + i
 			pc := batch[i]
@@ -109,7 +113,7 @@ func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 				return ctx.Err()
 			}
 		}
-		m.data.stampBatch(batch[:batchVisited])
+		m.data.stampBatch(batch[:batchVisited], &prevSeq)
 		batchVisited = 0
 		base += n
 	}
