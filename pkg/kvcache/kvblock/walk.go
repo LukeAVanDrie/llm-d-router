@@ -73,20 +73,19 @@ type KeyWalker interface {
 		visit func(pos int, found bool, entries []EntryRef) bool) error
 }
 
-const walkBatchSize = 64
+const walkBatchSize = 256
 
 // WalkKeys implements KeyWalker. Keys are peeked in batches under the LRU's
-// shared lock and each key's entries visited under that key's shared lock; the
-// visited prefix is promoted in a deferred call, so every exit path refreshes
-// what was read.
+// shared lock, each key's immutable entry snapshot is visited without locking,
+// and visited caches are stamped with read sequence numbers on every exit path.
 func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	visit func(pos int, found bool, entries []EntryRef) bool,
 ) error {
-	visited := 0
-	// Every exit, cancellation included, refreshes what was read.
-	defer func() { m.data.Promote(requestKeys[:visited]) }()
-
 	var batch [walkBatchSize]*PodCache
+	batchVisited := 0
+	// Every exit, cancellation included, refreshes what was read.
+	defer func() { m.data.stampBatch(batch[:batchVisited]) }()
+
 	for base := 0; base < len(requestKeys); {
 		if base&cancellationCheckMask == 0 && ctx.Err() != nil {
 			return ctx.Err()
@@ -105,20 +104,20 @@ func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 				}
 				continue
 			}
-			visited = pos + 1
+			batchVisited = i + 1
 			if !pc.visitEntries(pos, visit) {
 				return ctx.Err()
 			}
 		}
+		m.data.stampBatch(batch[:batchVisited])
+		batchVisited = 0
 		base += n
 	}
 	return ctx.Err()
 }
 
 func (pc *PodCache) visitEntries(pos int, visit func(int, bool, []EntryRef) bool) bool {
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
-	return visit(pos, true, pc.entries)
+	return visit(pos, true, pc.loadEntries())
 }
 
 // interner assigns dense uint32 ordinals to strings, stable for its lifetime

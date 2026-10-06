@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/go-logr/logr"
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -120,30 +121,54 @@ type InMemoryIndex struct {
 var _ Index = &InMemoryIndex{}
 
 // PodCache holds one request key's pod entries in LRU order (least recent
-// first), bounded by the index's podCacheSize. At per-key pod counts the
-// linear slice operations are cheaper than a map-backed LRU, and iteration
-// allocates nothing.
+// first), bounded by the index's podCacheSize. Readers load an immutable
+// snapshot pointer without locking; writers serialize on mu and publish a
+// replacement slice.
 type PodCache struct {
-	// mu protects entries.
-	mu sync.RWMutex
-	// entries is ordered least recently added first.
-	entries []EntryRef
-	// capacity bounds len(entries); adding beyond it evicts the least
-	// recent entry.
+	mu       sync.Mutex
+	snapshot atomic.Pointer[[]EntryRef]
 	capacity int
+	key      BlockHash
+	addedSeq uint64
+	readSeq  atomic.Uint64
 }
 
-// addAll inserts records with LRU semantics: an existing entry refreshes its
-// recency, a new entry appends, and overflow evicts the least recent entry.
-func (pc *PodCache) addAll(recs []EntryRef) {
+func (pc *PodCache) loadEntries() []EntryRef {
+	if s := pc.snapshot.Load(); s != nil {
+		return *s
+	}
+	return nil
+}
+
+// addAll inserts records with LRU semantics on a copy-on-write slice: an
+// existing entry refreshes its recency, a new entry appends, and overflow
+// evicts the least recent entry. When the current snapshot pointer matches
+// prevSnap and nextSnap is non-nil, nextSnap is reused directly so consecutive
+// keys transitioning from the same state share one backing array.
+func (pc *PodCache) addAll(recs []EntryRef, prevSnap, nextSnap *[]EntryRef) (*[]EntryRef, *[]EntryRef) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
+	curPtr := pc.snapshot.Load()
+	if nextSnap != nil && curPtr == prevSnap {
+		pc.snapshot.Store(nextSnap)
+		return prevSnap, nextSnap
+	}
+	var cur []EntryRef
+	if curPtr != nil {
+		cur = *curPtr
+	}
+	maxLen := len(cur) + len(recs)
+	if pc.capacity > 0 && maxLen > pc.capacity {
+		maxLen = pc.capacity
+	}
+	next := make([]EntryRef, len(cur), maxLen)
+	copy(next, cur)
 	for _, rec := range recs {
 		found := false
-		for i := range pc.entries {
-			if pc.entries[i].PodEntry == rec.PodEntry {
-				copy(pc.entries[i:], pc.entries[i+1:])
-				pc.entries[len(pc.entries)-1] = rec
+		for i := range next {
+			if next[i].PodEntry == rec.PodEntry {
+				copy(next[i:], next[i+1:])
+				next[len(next)-1] = rec
 				found = true
 				break
 			}
@@ -151,57 +176,82 @@ func (pc *PodCache) addAll(recs []EntryRef) {
 		if found {
 			continue
 		}
-		if pc.capacity > 0 && len(pc.entries) >= pc.capacity {
-			copy(pc.entries, pc.entries[1:])
-			pc.entries[len(pc.entries)-1] = rec
+		if pc.capacity > 0 && len(next) >= pc.capacity {
+			copy(next, next[1:])
+			next[len(next)-1] = rec
 			continue
 		}
-		pc.entries = append(pc.entries, rec)
+		next = append(next, rec)
 	}
+	pc.snapshot.Store(&next)
+	return curPtr, &next
 }
 
-// removeAll deletes the given entries and reports whether the cache is empty
-// afterwards.
+// removeAll deletes the given entries on a copy-on-write slice and reports
+// whether the cache is empty afterwards.
 func (pc *PodCache) removeAll(entries []PodEntry) (empty bool) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
-	for _, entry := range entries {
-		for i := range pc.entries {
-			if pc.entries[i].PodEntry == entry {
-				pc.entries = append(pc.entries[:i], pc.entries[i+1:]...)
+	cur := pc.loadEntries()
+	if len(cur) == 0 {
+		return true
+	}
+	var next []EntryRef
+	removed := false
+	for i := range cur {
+		drop := false
+		for _, entry := range entries {
+			if cur[i].PodEntry == entry {
+				drop = true
 				break
 			}
 		}
+		if drop {
+			if !removed {
+				next = make([]EntryRef, 0, len(cur)-1)
+				next = append(next, cur[:i]...)
+				removed = true
+			}
+			continue
+		}
+		if removed {
+			next = append(next, cur[i])
+		}
 	}
-	return len(pc.entries) == 0
+	if !removed {
+		return false
+	}
+	if len(next) == 0 {
+		pc.snapshot.Store(nil)
+		return true
+	}
+	pc.snapshot.Store(&next)
+	return false
 }
 
 // size returns the number of entries.
 func (pc *PodCache) size() int {
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
-	return len(pc.entries)
+	return len(pc.loadEntries())
 }
 
 // filteredEntries returns the entries whose PodIdentifier is in allowed (all
 // entries when allowed is empty) plus the unfiltered entry count.
 func (pc *PodCache) filteredEntries(allowed sets.Set[string]) (filtered []PodEntry, total int) {
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
-	total = len(pc.entries)
+	entries := pc.loadEntries()
+	total = len(entries)
 	if total == 0 {
 		return nil, 0
 	}
 	if allowed.Len() == 0 {
 		filtered = make([]PodEntry, 0, total)
-		for i := range pc.entries {
-			filtered = append(filtered, pc.entries[i].PodEntry)
+		for i := range entries {
+			filtered = append(filtered, entries[i].PodEntry)
 		}
 		return filtered, total
 	}
-	for i := range pc.entries {
-		if allowed.Has(pc.entries[i].PodIdentifier) {
-			filtered = append(filtered, pc.entries[i].PodEntry)
+	for i := range entries {
+		if allowed.Has(entries[i].PodIdentifier) {
+			filtered = append(filtered, entries[i].PodEntry)
 		}
 	}
 	return filtered, total
@@ -209,12 +259,11 @@ func (pc *PodCache) filteredEntries(allowed sets.Set[string]) (filtered []PodEnt
 
 // matching returns the entries belonging to podIdentifier.
 func (pc *PodCache) matching(podIdentifier string) []PodEntry {
-	pc.mu.RLock()
-	defer pc.mu.RUnlock()
+	entries := pc.loadEntries()
 	var matched []PodEntry
-	for i := range pc.entries {
-		if pc.entries[i].PodIdentifier == podIdentifier {
-			matched = append(matched, pc.entries[i].PodEntry)
+	for i := range entries {
+		if entries[i].PodIdentifier == podIdentifier {
+			matched = append(matched, entries[i].PodEntry)
 		}
 	}
 	return matched
@@ -433,8 +482,9 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 
 	var cacheBuf [walkBatchSize]*PodCache
 	podCaches := m.data.getOrAddBatch(requestKeys, cacheBuf[:0], m.podCacheSize)
+	var prevSnap, nextSnap *[]EntryRef
 	for i, podCache := range podCaches {
-		podCache.addAll(records)
+		prevSnap, nextSnap = podCache.addAll(records, prevSnap, nextSnap)
 
 		if traceEnabled {
 			traceLogger.Info("added pods to key", "requestKey", requestKeys[i], "pods", entries)
@@ -521,7 +571,7 @@ func (m *InMemoryIndex) evictPodsFromRequestKey(requestKey, engineKey BlockHash,
 	}
 
 	currentCache.mu.Lock()
-	if len(currentCache.entries) == 0 {
+	if len(currentCache.loadEntries()) == 0 {
 		m.data.Remove(requestKey)
 		if traceLogger.Enabled() {
 			traceLogger.Info("removed requestKey from index as no pods remain", "requestKey", requestKey)
