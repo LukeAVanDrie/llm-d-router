@@ -373,6 +373,8 @@ func localHTTPCollectorOptions() []otlptracehttp.Option {
 
 const instrumentationName = "llm-d-router"
 
+// tracerCacheState holds a copy-on-write map of scoped tracers bound to a
+// specific TracerProvider and build metadata tuple.
 type tracerCacheState struct {
 	provider  trace.TracerProvider
 	buildRef  string
@@ -380,11 +382,15 @@ type tracerCacheState struct {
 	tracers   map[string]trace.Tracer
 }
 
+// fastNoopTracer returns the caller's context unchanged and a shared no-op
+// span without allocating a context wrapper or span value on each Start call.
 type fastNoopTracer struct {
 	noop.Tracer
 }
 
 var (
+	// initialDefaultTP is the default global TracerProvider installed before
+	// InitTracing registers an SDK provider.
 	initialDefaultTP              = otel.GetTracerProvider()
 	noopSpan         trace.Span   = noop.Span{}
 	noopTracer       trace.Tracer = fastNoopTracer{}
@@ -398,7 +404,10 @@ func (fastNoopTracer) Start(ctx context.Context, _ string, _ ...trace.SpanStartO
 
 // Tracer returns a tracer for the given instrumentation scope, defaulting to
 // "llm-d-router". Build version and commit SHA are attached so every span in a
-// trace carries consistent scope metadata.
+// trace carries consistent scope metadata. While the global TracerProvider
+// remains initialDefaultTP, Tracer returns fastNoopTracer; once a provider is
+// configured, scoped tracers are cached in tracerCache and invalidated when
+// the global provider or build metadata changes.
 func Tracer(scope ...string) trace.Tracer {
 	tp := otel.GetTracerProvider()
 	if tp == initialDefaultTP {
