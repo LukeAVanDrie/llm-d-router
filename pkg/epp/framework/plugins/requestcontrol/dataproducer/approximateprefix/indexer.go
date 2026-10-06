@@ -104,6 +104,8 @@ func (i *indexer) Get(hash blockHash) podSet {
 	return res
 }
 
+const matchJumpStride = 32
+
 // MatchLongestPrefix returns the longest contiguous prefix match length in blocks
 // for each server that caches the leading block of hashes.
 func (i *indexer) MatchLongestPrefix(hashes []blockHash) map[ServerID]int {
@@ -138,26 +140,52 @@ func (i *indexer) MatchLongestPrefix(hashes []blockHash) map[ServerID]int {
 		active = append(active, pod)
 	}
 
-	for blockIdx := 1; blockIdx < len(hashes); blockIdx++ {
-		pods := i.hashToPods[hashes[blockIdx]]
-		if len(pods) == 0 {
+	// Prefix residency per server is contiguous from block 0, so if all active
+	// servers hold the block at jumpIdx, every intermediate block in the stride
+	// is also present for those servers.
+	for blockIdx := 1; blockIdx < len(hashes); {
+		stepEnd := len(hashes) - 1
+		if len(hashes) >= matchJumpStride && blockIdx < len(hashes)-1 {
+			jumpIdx := min(blockIdx+matchJumpStride-1, len(hashes)-1)
+			jumpPods := i.hashToPods[hashes[jumpIdx]]
+			allActive := len(jumpPods) >= len(active)
+			if allActive {
+				for _, pod := range active {
+					if !jumpPods.Has(pod) {
+						allActive = false
+						break
+					}
+				}
+			}
+			if allActive {
+				blockIdx = jumpIdx + 1
+				continue
+			}
+			stepEnd = jumpIdx
+		}
+
+		for pos := blockIdx; pos <= stepEnd; pos++ {
+			pods := i.hashToPods[hashes[pos]]
+			if len(pods) == 0 {
+				for _, pod := range active {
+					res[pod] = pos
+				}
+				return res
+			}
+			keep := active[:0]
 			for _, pod := range active {
-				res[pod] = blockIdx
+				if pods.Has(pod) {
+					keep = append(keep, pod)
+				} else {
+					res[pod] = pos
+				}
 			}
-			return res
-		}
-		keep := active[:0]
-		for _, pod := range active {
-			if pods.Has(pod) {
-				keep = append(keep, pod)
-			} else {
-				res[pod] = blockIdx
+			active = keep
+			if len(active) == 0 {
+				return res
 			}
 		}
-		active = keep
-		if len(active) == 0 {
-			return res
-		}
+		blockIdx = stepEnd + 1
 	}
 
 	for _, pod := range active {
