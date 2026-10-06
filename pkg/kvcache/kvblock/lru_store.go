@@ -18,6 +18,7 @@ package kvblock
 
 import (
 	"cmp"
+	"math/bits"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -26,10 +27,19 @@ import (
 )
 
 const (
+	// lruShardThreshold is the minimum index capacity at which lruStore and
+	// engineKeyStore partition keys across maxLRUShards shards and enable the
+	// direct-mapped fast table. Below this threshold, a single shard preserves
+	// exact global LRU eviction order for small capacities.
 	lruShardThreshold = 4096
-	maxLRUShards      = 256
-	lruFastCacheSize  = 1 << 16
-	lruFastCacheMask  = lruFastCacheSize - 1
+	// maxLRUShards is the power-of-two shard count used when capacity reaches
+	// lruShardThreshold.
+	maxLRUShards = 256
+	// minLRUFastSize and maxLRUFastSize bound the power-of-two direct-mapped
+	// atomic PodCache lookup table used by sharded stores.
+	minLRUFastSize   = 1 << 16
+	maxLRUFastSize   = 1 << 22
+	maxLRUFastProbes = 8
 )
 
 type lruShard struct {
@@ -44,16 +54,25 @@ type lruShard struct {
 // on collisions or misses, and stamp atomic read sequence numbers on visited
 // caches; writes reconcile read sequence order before evicting at capacity.
 type lruStore struct {
-	shards    []lruShard
-	shardMask uint64
-	fast      *[lruFastCacheSize]atomic.Pointer[PodCache]
-	clock     atomic.Uint64
-	writeSeq  atomic.Uint64
+	shards       []lruShard
+	shardMask    uint64
+	fast         []atomic.Pointer[PodCache]
+	fastMask     uint64
+	fastOverflow atomic.Bool
+	clock        atomic.Uint64
+	writeSeq     atomic.Uint64
 }
 
 func mixBlockHash(key BlockHash) uint64 {
 	h := (uint64(key) ^ (uint64(key) >> 30)) * 0xbf58476d1ce4e5b9
 	return h ^ (h >> 27)
+}
+
+func nextPow2(n int) int {
+	if n <= 1 {
+		return 1
+	}
+	return 1 << bits.Len64(uint64(n-1))
 }
 
 func newLRUStore(size int) (*lruStore, error) {
@@ -63,10 +82,13 @@ func newLRUStore(size int) (*lruStore, error) {
 		}
 	}
 	numShards := 1
-	var fast *[lruFastCacheSize]atomic.Pointer[PodCache]
+	var fast []atomic.Pointer[PodCache]
+	var fastMask uint64
 	if size >= lruShardThreshold {
 		numShards = maxLRUShards
-		fast = new([lruFastCacheSize]atomic.Pointer[PodCache])
+		fastSize := min(max(minLRUFastSize, nextPow2(size)), maxLRUFastSize)
+		fast = make([]atomic.Pointer[PodCache], fastSize)
+		fastMask = uint64(fastSize - 1)
 	}
 	shardSize := max(1, (size+numShards-1)/numShards)
 	shards := make([]lruShard, numShards)
@@ -86,6 +108,7 @@ func newLRUStore(size int) (*lruStore, error) {
 		shards:    shards,
 		shardMask: uint64(numShards - 1),
 		fast:      fast,
+		fastMask:  fastMask,
 	}, nil
 }
 
@@ -96,14 +119,73 @@ func (s *lruStore) shardFor(key BlockHash) *lruShard {
 	return &s.shards[mixBlockHash(key)&s.shardMask]
 }
 
+func (s *lruStore) insertFast(h uint64, pc *PodCache) {
+	if len(s.fast) == 0 || pc == nil {
+		return
+	}
+	base := h & s.fastMask
+	for p := uint64(0); p < maxLRUFastProbes; p++ {
+		idx := (base + p) & s.fastMask
+		cur := s.fast[idx].Load()
+		if cur == pc {
+			return
+		}
+		if cur == nil {
+			if s.fast[idx].CompareAndSwap(nil, pc) {
+				return
+			}
+			if s.fast[idx].Load() == pc {
+				return
+			}
+		}
+	}
+	s.fastOverflow.Store(true)
+	s.fast[base].Store(pc)
+}
+
+// lookupFast returns the resident PodCache for key in the fast table, or nil
+// on a miss, hash collision, or evicted entry.
 func (s *lruStore) lookupFast(h uint64, key BlockHash) *PodCache {
-	if s.fast == nil {
+	if len(s.fast) == 0 {
 		return nil
 	}
-	if pc := s.fast[h&lruFastCacheMask].Load(); pc != nil && pc.key == key && pc.resident.Load() {
-		return pc
+	base := h & s.fastMask
+	for p := uint64(0); p < maxLRUFastProbes; p++ {
+		pc := s.fast[(base+p)&s.fastMask].Load()
+		if pc == nil {
+			return nil
+		}
+		if pc.key == key {
+			if pc.resident.Load() {
+				return pc
+			}
+			return nil
+		}
 	}
 	return nil
+}
+
+// probeFast returns the resident PodCache for key and whether the result is
+// authoritative without consulting the shard LRU.
+func (s *lruStore) probeFast(h uint64, key BlockHash) (*PodCache, bool) {
+	if len(s.fast) == 0 {
+		return nil, false
+	}
+	base := h & s.fastMask
+	overflow := s.fastOverflow.Load()
+	for p := uint64(0); p < maxLRUFastProbes; p++ {
+		pc := s.fast[(base+p)&s.fastMask].Load()
+		if pc == nil {
+			return nil, !overflow
+		}
+		if pc.key == key {
+			if pc.resident.Load() {
+				return pc, true
+			}
+			return nil, !overflow
+		}
+	}
+	return nil, false
 }
 
 func stampReadSeq(pc *PodCache, seq uint64) {
@@ -119,14 +201,20 @@ func (s *lruStore) touchLocked(pc *PodCache) {
 	if pc == nil {
 		return
 	}
+	if s.shardMask != 0 {
+		seq := pc.addedSeq.Load() + 1
+		pc.addedSeq.Store(seq)
+		pc.readSeq.Store(seq)
+		pc.resident.Store(true)
+		s.insertFast(mixBlockHash(pc.key), pc)
+		return
+	}
 	seq := s.clock.Add(1)
 	pc.addedSeq.Store(seq)
 	pc.resident.Store(true)
 	stampReadSeq(pc, seq)
 	s.writeSeq.Store(seq)
-	if s.fast != nil {
-		s.fast[mixBlockHash(pc.key)&lruFastCacheMask].Store(pc)
-	}
+	s.insertFast(mixBlockHash(pc.key), pc)
 }
 
 type lruReconcileItem struct {
@@ -135,7 +223,30 @@ type lruReconcileItem struct {
 	addedSeq uint64
 }
 
+// reconcileShardLocked replays unrecorded read recency into sh.lru before a
+// capacity eviction. If the current LRU tail has readSeq <= addedSeq, it was
+// not read after its last LRU placement and remains the true eviction victim
+// without scanning the shard. In sharded mode, referenced tail entries are
+// promoted in place without allocating; in single-shard mode, every entry with
+// readSeq >= the minimum dirty readSeq is promoted in ascending (readSeq,
+// addedSeq) order. Caller must hold sh.mu.
 func (s *lruStore) reconcileShardLocked(sh *lruShard) {
+	if s.shardMask != 0 {
+		for range sh.lru.Len() {
+			_, oldestPC, ok := sh.lru.GetOldest()
+			if !ok || oldestPC == nil {
+				return
+			}
+			r := oldestPC.readSeq.Load()
+			if r <= oldestPC.addedSeq.Load() {
+				return
+			}
+			sh.lru.Get(oldestPC.key)
+			oldestPC.addedSeq.Store(r)
+		}
+		return
+	}
+
 	_, oldestPC, ok := sh.lru.GetOldest()
 	if !ok || oldestPC == nil || oldestPC.readSeq.Load() <= oldestPC.addedSeq.Load() {
 		return
@@ -197,13 +308,59 @@ func (s *lruStore) Get(key BlockHash) (*PodCache, bool) {
 
 // Peek returns the key's cache without touching recency.
 func (s *lruStore) Peek(key BlockHash) (*PodCache, bool) {
-	if pc := s.lookupFast(mixBlockHash(key), key); pc != nil {
-		return pc, true
+	h := mixBlockHash(key)
+	if pc, auth := s.probeFast(h, key); auth {
+		return pc, pc != nil
 	}
-	sh := s.shardFor(key)
+	sh := &s.shards[0]
+	if s.shardMask != 0 {
+		sh = &s.shards[h&s.shardMask]
+	}
 	sh.mu.RLock()
-	defer sh.mu.RUnlock()
-	return sh.lru.Peek(key)
+	pc, ok := sh.lru.Peek(key)
+	if ok && pc != nil {
+		s.insertFast(h, pc)
+	}
+	sh.mu.RUnlock()
+	return pc, ok
+}
+
+// hasNonEmpty reports whether key is resident with at least one entry.
+func (s *lruStore) hasNonEmpty(key BlockHash) bool {
+	h := mixBlockHash(key)
+	if pc, auth := s.probeFast(h, key); auth {
+		return pc != nil && pc.size() > 0
+	}
+	sh := &s.shards[0]
+	if s.shardMask != 0 {
+		sh = &s.shards[h&s.shardMask]
+	}
+	sh.mu.RLock()
+	pc, ok := sh.lru.Peek(key)
+	sh.mu.RUnlock()
+	return ok && pc != nil && pc.size() > 0
+}
+
+// peekOne returns the resident PodCache for k without touching recency.
+func (s *lruStore) peekOne(k BlockHash) *PodCache {
+	h := mixBlockHash(k)
+	if pc, auth := s.probeFast(h, k); auth {
+		return pc
+	}
+	sh := &s.shards[0]
+	if s.shardMask != 0 {
+		sh = &s.shards[h&s.shardMask]
+	}
+	sh.mu.RLock()
+	foundPC, found := sh.lru.Peek(k)
+	if found && foundPC != nil {
+		s.insertFast(h, foundPC)
+	}
+	sh.mu.RUnlock()
+	if found {
+		return foundPC
+	}
+	return nil
 }
 
 // peekBatch looks up a prefix of keys (up to len(dst)) without touching
@@ -222,16 +379,7 @@ func (s *lruStore) peekBatch(keys []BlockHash, dst []*PodCache, nextPC *PodCache
 		if nextPC != nil && nextPC.key == k && nextPC.resident.Load() {
 			pc = nextPC
 		} else {
-			pc = s.lookupFast(mixBlockHash(k), k)
-		}
-		if pc == nil {
-			sh := s.shardFor(k)
-			sh.mu.RLock()
-			foundPC, found := sh.lru.Peek(k)
-			sh.mu.RUnlock()
-			if found {
-				pc = foundPC
-			}
+			pc = s.peekOne(k)
 		}
 		dst[i] = pc
 		if pc == nil {
@@ -243,38 +391,40 @@ func (s *lruStore) peekBatch(keys []BlockHash, dst []*PodCache, nextPC *PodCache
 }
 
 // stampBatch marks every non-nil cache in caches as read in slice order
-// without acquiring shard locks.
+// without acquiring shard locks. In sharded mode, stamping is skipped for any
+// cache that already satisfies readSeq > addedSeq; in single-shard mode,
+// stamping is skipped when readSeq values already form a strictly increasing
+// sequence above *prevSeq.
 func (s *lruStore) stampBatch(caches []*PodCache, prevSeq *uint64) {
+	if s.shardMask != 0 {
+		for _, pc := range caches {
+			if pc != nil {
+				if a := pc.addedSeq.Load(); pc.readSeq.Load() <= a {
+					pc.readSeq.Store(a + 1)
+				}
+			}
+		}
+		return
+	}
+
 	count := 0
 	p := *prevSeq
 	needStamp := false
-	if s.shardMask != 0 {
-		for _, pc := range caches {
-			if pc == nil {
-				continue
-			}
-			count++
-			if !needStamp && pc.readSeq.Load() <= pc.addedSeq.Load() {
-				needStamp = true
-			}
+	for _, pc := range caches {
+		if pc == nil {
+			continue
 		}
-	} else {
-		for _, pc := range caches {
-			if pc == nil {
-				continue
-			}
-			count++
-			if !needStamp {
-				if r := pc.readSeq.Load(); r > p {
-					p = r
-				} else {
-					needStamp = true
-				}
+		count++
+		if !needStamp {
+			if r := pc.readSeq.Load(); r > p {
+				p = r
+			} else {
+				needStamp = true
 			}
 		}
 	}
 	if count == 0 || !needStamp {
-		if s.shardMask == 0 && count > 0 {
+		if count > 0 {
 			*prevSeq = p
 		}
 		return
@@ -299,8 +449,8 @@ func (s *lruStore) Promote(keys []BlockHash) {
 	needStamp := false
 	var lockedShard *lruShard
 	for _, key := range keys {
-		if pc := s.lookupFast(mixBlockHash(key), key); pc != nil {
-			if pc.readSeq.Load() <= pc.addedSeq.Load() {
+		if pc, auth := s.probeFast(mixBlockHash(key), key); auth {
+			if pc != nil && pc.readSeq.Load() <= pc.addedSeq.Load() {
 				needStamp = true
 				break
 			}
@@ -338,8 +488,10 @@ func (s *lruStore) Promote(keys []BlockHash) {
 	seq := end - uint64(len(keys))
 	for _, key := range keys {
 		seq++
-		if pc := s.lookupFast(mixBlockHash(key), key); pc != nil {
-			stampReadSeq(pc, seq)
+		if pc, auth := s.probeFast(mixBlockHash(key), key); auth {
+			if pc != nil {
+				stampReadSeq(pc, seq)
+			}
 			continue
 		}
 		sh := s.shardFor(key)
@@ -370,47 +522,100 @@ func (s *lruStore) getOrAddBatch(keys []BlockHash, dst []*PodCache, podCacheSize
 	if len(keys) == 0 {
 		return dst
 	}
-	seqBase := s.clock.Add(uint64(len(keys))) - uint64(len(keys))
-	fast := s.fast
-	var lockedShard *lruShard
-	for i, key := range keys {
-		h := mixBlockHash(key)
-		sh := &s.shards[0]
-		if s.shardMask != 0 {
-			sh = &s.shards[h&s.shardMask]
+	if s.shardMask != 0 && len(keys) < (1<<24) {
+		var orderBuf [512]uint32
+		var order []uint32
+		if len(keys) <= len(orderBuf) {
+			order = orderBuf[:0]
+		} else {
+			order = make([]uint32, 0, len(keys))
 		}
-		if sh != lockedShard {
-			if lockedShard != nil {
-				lockedShard.mu.Unlock()
+		for i, key := range keys {
+			h := mixBlockHash(key)
+			if pc := s.lookupFast(h, key); pc != nil {
+				dst[i] = pc
+				if a := pc.addedSeq.Load(); pc.readSeq.Load() <= a {
+					pc.readSeq.Store(a + 1)
+				}
+				continue
 			}
-			sh.mu.Lock()
-			lockedShard = sh
+			sIdx := uint32(h & s.shardMask)
+			order = append(order, (sIdx<<24)|uint32(i))
 		}
-		pc, found := sh.lru.Get(key)
-		if !found || pc == nil {
-			if sh.lru.Len() >= sh.size {
-				s.reconcileShardLocked(sh)
+		if len(order) > 1 {
+			slices.Sort(order)
+		}
+		var lockedShard *lruShard
+		for _, packed := range order {
+			sIdx := packed >> 24
+			i := int(packed & 0xffffff)
+			key := keys[i]
+			sh := &s.shards[sIdx]
+			if sh != lockedShard {
+				if lockedShard != nil {
+					lockedShard.mu.Unlock()
+				}
+				sh.mu.Lock()
+				lockedShard = sh
 			}
-			pc = &PodCache{capacity: podCacheSize, key: key}
-			sh.lru.Add(key, pc)
+			pc, found := sh.lru.Get(key)
+			if !found || pc == nil {
+				if sh.lru.Len() >= sh.size {
+					s.reconcileShardLocked(sh)
+				}
+				pc = &PodCache{capacity: podCacheSize, key: key}
+				sh.lru.Add(key, pc)
+			}
+			seq := pc.addedSeq.Load() + 1
+			pc.addedSeq.Store(seq)
+			pc.readSeq.Store(seq)
+			pc.resident.Store(true)
+			s.insertFast(mixBlockHash(key), pc)
+			dst[i] = pc
 		}
-		seq := seqBase + uint64(i) + 1
-		pc.addedSeq.Store(seq)
-		pc.resident.Store(true)
-		stampReadSeq(pc, seq)
-		if fast != nil {
-			fast[h&lruFastCacheMask].Store(pc)
+		if lockedShard != nil {
+			lockedShard.mu.Unlock()
 		}
-		dst[i] = pc
-	}
-	if lockedShard != nil {
-		lockedShard.mu.Unlock()
-	}
-	if s.shardMask == 0 {
-		s.writeSeq.Store(seqBase + uint64(len(keys)))
+	} else {
+		seqBase := s.clock.Add(uint64(len(keys))) - uint64(len(keys))
+		var lockedShard *lruShard
+		for i, key := range keys {
+			h := mixBlockHash(key)
+			sh := &s.shards[0]
+			if s.shardMask != 0 {
+				sh = &s.shards[h&s.shardMask]
+			}
+			if sh != lockedShard {
+				if lockedShard != nil {
+					lockedShard.mu.Unlock()
+				}
+				sh.mu.Lock()
+				lockedShard = sh
+			}
+			pc, found := sh.lru.Get(key)
+			if !found || pc == nil {
+				if sh.lru.Len() >= sh.size {
+					s.reconcileShardLocked(sh)
+				}
+				pc = &PodCache{capacity: podCacheSize, key: key}
+				sh.lru.Add(key, pc)
+			}
+			seq := seqBase + uint64(i) + 1
+			pc.addedSeq.Store(seq)
+			pc.resident.Store(true)
+			stampReadSeq(pc, seq)
+			s.insertFast(h, pc)
+			dst[i] = pc
+		}
+		if lockedShard != nil {
+			lockedShard.mu.Unlock()
+		}
+		if s.shardMask == 0 {
+			s.writeSeq.Store(seqBase + uint64(len(keys)))
+		}
 	}
 	for i := 1; i < len(dst); i++ {
-		if dst[i-1] != dst[i] {
+		if dst[i-1] != dst[i] && dst[i-1].next.Load() != dst[i] {
 			dst[i-1].next.Store(dst[i])
 		}
 	}
@@ -457,6 +662,9 @@ func (s *lruStore) Remove(key BlockHash) bool {
 	sh := s.shardFor(key)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
+	if pc, ok := sh.lru.Peek(key); ok && pc != nil {
+		pc.resident.Store(false)
+	}
 	return sh.lru.Remove(key)
 }
 
@@ -465,6 +673,7 @@ func (s *lruStore) removeIfSame(key BlockHash, target *PodCache) bool {
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 	if cur, ok := sh.lru.Peek(key); ok && cur == target {
+		cur.resident.Store(false)
 		return sh.lru.Remove(key)
 	}
 	return false

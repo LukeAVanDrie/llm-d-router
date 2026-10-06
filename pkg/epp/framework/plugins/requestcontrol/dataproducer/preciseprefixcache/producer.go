@@ -344,7 +344,13 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
 	perPromptKeys [][]kvblock.BlockHash, mmBlockIndices []int,
 ) error {
-	endpointKeys := make([]string, len(endpoints))
+	var stackEndpointKeys [256]string
+	var endpointKeys []string
+	if len(endpoints) <= len(stackEndpointKeys) {
+		endpointKeys = stackEndpointKeys[:len(endpoints)]
+	} else {
+		endpointKeys = make([]string, len(endpoints))
+	}
 	podSet := make(sets.Set[string], len(endpoints))
 	for i, ep := range endpoints {
 		if md := ep.GetMetadata(); md != nil {
@@ -376,7 +382,13 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	}
 
 	maxMatch := 0
-	results := make([]endpointResult, 0, len(endpoints))
+	var stackResults [256]endpointResult
+	var results []endpointResult
+	if len(endpoints) <= len(stackResults) {
+		results = stackResults[:0]
+	} else {
+		results = make([]endpointResult, 0, len(endpoints))
+	}
 	for i, ep := range endpoints {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -430,9 +442,14 @@ func addPodMatch(a, b kvcache.PodMatch) kvcache.PodMatch {
 	}
 	a.WeightedScore += b.WeightedScore
 	a.MatchedBlocks += b.MatchedBlocks
-	for tier, count := range b.BlocksByTier {
-		a.BlocksByTier[tier] += count
+	tiers := make(map[string]int, len(a.BlocksByTier)+len(b.BlocksByTier))
+	for tier, count := range a.BlocksByTier {
+		tiers[tier] = count
 	}
+	for tier, count := range b.BlocksByTier {
+		tiers[tier] += count
+	}
+	a.BlocksByTier = tiers
 	return a
 }
 

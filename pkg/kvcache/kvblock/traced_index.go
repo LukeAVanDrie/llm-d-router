@@ -36,7 +36,8 @@ type tracedIndex struct {
 // tracedWalker carries the KeyWalker capability of the wrapped index.
 type tracedWalker struct {
 	*tracedIndex
-	walker KeyWalker
+	walker     KeyWalker
+	snapWalker SnapshotWalker
 }
 
 // NewTracedIndex wraps an Index and emits OpenTelemetry traces for index
@@ -44,7 +45,8 @@ type tracedWalker struct {
 func NewTracedIndex(next Index) Index {
 	t := &tracedIndex{next: next}
 	if walker, ok := next.(KeyWalker); ok {
-		return &tracedWalker{tracedIndex: t, walker: walker}
+		sw, _ := next.(SnapshotWalker)
+		return &tracedWalker{tracedIndex: t, walker: walker, snapWalker: sw}
 	}
 	return t
 }
@@ -81,6 +83,56 @@ func (t *tracedWalker) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	}
 	span.SetAttributes(semconv.LLMDKVCacheIndexWalkKeysPresent(present))
 	return nil
+}
+
+// WalkSnapshots forwards the snapshot walk under a span reporting the keys
+// requested and the keys present.
+func (t *tracedWalker) WalkSnapshots(ctx context.Context, requestKeys []BlockHash,
+	visit func(pos int, snap *PodSnapshot) bool,
+) error {
+	if t.snapWalker == nil {
+		return t.WalkKeys(ctx, requestKeys, func(pos int, found bool, entries []EntryRef) bool {
+			if !found {
+				return visit(pos, nil)
+			}
+			return visit(pos, buildPodSnapshot(entries))
+		})
+	}
+	tracer := tracing.Tracer(TracerScope)
+	ctx, span := tracer.Start(ctx, "index_walk", internalSpanStartOpts...)
+	defer span.End()
+
+	if !span.IsRecording() {
+		if err := t.snapWalker.WalkSnapshots(ctx, requestKeys, visit); err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			return err
+		}
+		return nil
+	}
+
+	span.SetAttributes(semconv.LLMDKVCacheIndexWalkKeyCount(len(requestKeys)))
+
+	present := 0
+	err := t.snapWalker.WalkSnapshots(ctx, requestKeys, func(pos int, snap *PodSnapshot) bool {
+		if snap != nil {
+			present++
+		}
+		return visit(pos, snap)
+	})
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetAttributes(semconv.LLMDKVCacheIndexWalkKeysPresent(present))
+	return nil
+}
+
+// PodName returns the pod identifier assigned to ord.
+func (t *tracedWalker) PodName(ord uint32) string {
+	if t.snapWalker != nil {
+		return t.snapWalker.PodName(ord)
+	}
+	return ""
 }
 
 func (t *tracedIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error {

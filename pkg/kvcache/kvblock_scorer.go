@@ -101,7 +101,7 @@ func (s *LongestPrefixScorer) Score(
 	keys []kvblock.BlockHash,
 	keyToPods map[kvblock.BlockHash][]kvblock.PodEntry,
 ) (map[string]float64, error) {
-	matches, err := matchMaterialized(ctx, keys, keyToPods, s.MediumWeights, nil)
+	matches, _, err := matchMaterialized(ctx, keys, keyToPods, s.MediumWeights, nil)
 	if err != nil {
 		return nil, err
 	}

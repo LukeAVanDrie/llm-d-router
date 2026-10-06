@@ -19,6 +19,7 @@ package kvblock
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 )
 
 // EntryRef is one indexed entry with the ordinals the index assigned to its
@@ -36,6 +37,18 @@ type EntryRef struct {
 	TierOrdinal uint32
 }
 
+// PodSnapshot is an immutable generation of a PodCache's entries.
+type PodSnapshot struct {
+	Entries []EntryRef
+	// PodMask has bit (PodOrdinal) set for every entry in Entries when
+	// MaskValid is true (all entries share one effective tier and have
+	// PodOrdinal < 256).
+	PodMask   [4]uint64
+	TierOrd   uint32
+	TierName  string
+	MaskValid bool
+}
+
 // KeyWalker is an optional Index capability: visit requestKeys in input
 // order without materializing per-key entry slices.
 //
@@ -48,12 +61,10 @@ type EntryRef struct {
 //     position was looked up. A miss is visited with found=false and no
 //     entries; the walk continues.
 //   - entries is every unfiltered record in that generation, in an order the
-//     consumer must not rely on. It is borrowed: read-only and valid only
-//     until visit returns, after which the index may reorder or overwrite its
-//     backing array. Consumers copy what they keep.
-//   - visit must not call back into the index; the generation's lock is held
-//     for the duration of the call. If visit panics, the lock is released
-//     and the panic propagates to the caller.
+//     consumer must not rely on. Consumers must treat entries as read-only.
+//   - entries is backed by an immutable copy-on-write snapshot slice that
+//     remains valid for the duration of visit without holding a per-key lock.
+//     Writers publish a new slice on each mutation.
 //   - A visit sees an internally consistent generation, exclusive of writers
 //     and other visits using that generation. Capacity eviction may detach it
 //     and a later Add may install a new generation of the same key while
@@ -71,6 +82,14 @@ type EntryRef struct {
 type KeyWalker interface {
 	WalkKeys(ctx context.Context, requestKeys []BlockHash,
 		visit func(pos int, found bool, entries []EntryRef) bool) error
+}
+
+// SnapshotWalker is an optional Index capability that visits each request key's
+// immutable PodSnapshot and resolves pod ordinals to pod identifiers.
+type SnapshotWalker interface {
+	WalkSnapshots(ctx context.Context, requestKeys []BlockHash,
+		visit func(pos int, snap *PodSnapshot) bool) error
+	PodName(ord uint32) string
 }
 
 const walkBatchSize = 256
@@ -108,8 +127,15 @@ func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 				}
 				continue
 			}
+			entries := pc.loadEntries()
+			if len(entries) == 0 {
+				if !visit(pos, false, nil) {
+					return ctx.Err()
+				}
+				continue
+			}
 			batchVisited = i + 1
-			if !pc.visitEntries(pos, visit) {
+			if !visit(pos, true, entries) {
 				return ctx.Err()
 			}
 		}
@@ -120,17 +146,113 @@ func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	return ctx.Err()
 }
 
-func (pc *PodCache) visitEntries(pos int, visit func(int, bool, []EntryRef) bool) bool {
-	return visit(pos, true, pc.loadEntries())
+// WalkSnapshots implements SnapshotWalker.
+func (m *InMemoryIndex) WalkSnapshots(ctx context.Context, requestKeys []BlockHash,
+	visit func(pos int, snap *PodSnapshot) bool,
+) error {
+	var batch [walkBatchSize]*PodCache
+	batchVisited := 0
+	prevSeq := m.data.writeSeq.Load()
+	sharded := m.data.shardMask != 0
+	var nextPC *PodCache
+	defer func() { m.data.stampBatch(batch[:batchVisited], &prevSeq) }()
+
+	recordPC := func(pc *PodCache) {
+		if sharded && pc.readSeq.Load() > pc.addedSeq.Load() {
+			return
+		}
+		if batchVisited == walkBatchSize {
+			m.data.stampBatch(batch[:batchVisited], &prevSeq)
+			batchVisited = 0
+		}
+		batch[batchVisited] = pc
+		batchVisited++
+	}
+
+	for base := 0; base < len(requestKeys); {
+		if base&cancellationCheckMask == 0 && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		limit := min(base+walkBatchSize, len(requestKeys))
+		if nextCheck := (base | cancellationCheckMask) + 1; limit > nextCheck {
+			limit = nextCheck
+		}
+		for pos := base; pos < limit; pos++ {
+			k := requestKeys[pos]
+			var pc *PodCache
+			if nextPC != nil && nextPC.key == k && nextPC.resident.Load() {
+				pc = nextPC
+			} else {
+				pc = m.data.peekOne(k)
+			}
+			if pc == nil {
+				nextPC = nil
+				if !visit(pos, nil) {
+					return ctx.Err()
+				}
+				continue
+			}
+			snap := pc.snapshot.Load()
+			if snap == nil || len(snap.Entries) == 0 {
+				nextPC = pc.next.Load()
+				if !visit(pos, nil) {
+					return ctx.Err()
+				}
+				continue
+			}
+			recordPC(pc)
+			nextPC = pc.next.Load()
+			if !visit(pos, snap) {
+				return ctx.Err()
+			}
+			if snap.MaskValid {
+				startPos := pos
+				for pos+1 < limit {
+					nk := requestKeys[pos+1]
+					var npc *PodCache
+					if nextPC != nil && nextPC.key == nk && nextPC.resident.Load() {
+						npc = nextPC
+					} else {
+						npc = m.data.peekOne(nk)
+					}
+					if npc == nil {
+						nextPC = nil
+						break
+					}
+					if npc.snapshot.Load() != snap {
+						nextPC = npc
+						break
+					}
+					recordPC(npc)
+					pos++
+					nextPC = npc.next.Load()
+				}
+				if pos > startPos {
+					if !visit(pos, snap) {
+						return ctx.Err()
+					}
+				}
+			}
+		}
+		base = limit
+	}
+	return ctx.Err()
+}
+
+// PodName returns the pod identifier assigned to ord, or "" if unassigned.
+func (m *InMemoryIndex) PodName(ord uint32) string {
+	return m.pods.nameForOrdinal(ord)
 }
 
 // interner assigns dense uint32 ordinals to strings, stable for its lifetime
 // and never reused, up to a fixed number of distinct strings. Callers hold mu
 // across a whole batch so a batch is assigned all or nothing.
 type interner struct {
-	mu    sync.RWMutex
-	ids   map[string]uint32
-	limit int
+	mu        sync.RWMutex
+	ids       map[string]uint32
+	names     []string
+	fastNames [256]atomic.Pointer[string]
+	limit     int
 }
 
 func newInterner(limit int) *interner {
@@ -183,5 +305,24 @@ func (in *interner) internLocked(s string) uint32 {
 	}
 	id := uint32(len(in.ids))
 	in.ids[s] = id
+	in.names = append(in.names, s)
+	if id < uint32(len(in.fastNames)) {
+		sCopy := s
+		in.fastNames[id].Store(&sCopy)
+	}
 	return id
+}
+
+func (in *interner) nameForOrdinal(ord uint32) string {
+	if ord < uint32(len(in.fastNames)) {
+		if p := in.fastNames[ord].Load(); p != nil {
+			return *p
+		}
+	}
+	in.mu.RLock()
+	defer in.mu.RUnlock()
+	if int(ord) < len(in.names) {
+		return in.names[ord]
+	}
+	return ""
 }
