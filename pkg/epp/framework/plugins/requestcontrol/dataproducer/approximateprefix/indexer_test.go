@@ -19,6 +19,7 @@ package approximateprefix
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -52,21 +53,21 @@ func TestIndexer_AddAndGet(t *testing.T) {
 	servers = i.Get(blockHash(4))
 	assert.Empty(t, servers, "Cache should not contain non-existent hash")
 
-	// A batch larger than the capacity keeps its head: matching is anchored
-	// at the first block, and hashToPods must mirror the LRU membership.
+	// A batch larger than the capacity keeps its leading blocks: matching is
+	// anchored at the first block, and hashToPods must mirror the LRU membership.
 	i.Add([]blockHash{blockHash(4), blockHash(5), blockHash(6)}, pod)
 
 	assert.Equal(t, 2, i.podToLRU[pod.ServerID].Len(), "Cache size should stay at capacity after a batch add")
-	assert.NotEmpty(t, i.Get(blockHash(4)), "head hashes should remain cached")
-	assert.NotEmpty(t, i.Get(blockHash(5)), "head hashes should remain cached")
+	assert.NotEmpty(t, i.Get(blockHash(4)), "leading hashes should remain cached")
+	assert.NotEmpty(t, i.Get(blockHash(5)), "leading hashes should remain cached")
 	assert.Empty(t, i.Get(blockHash(6)), "hash truncated off the batch tail must not be reported as cached")
-	assert.Len(t, i.hashToPods, 2, "hashToPods should track exactly the LRU membership")
+	assert.Len(t, i.hashToPods(), 2, "hashToPods should track exactly the LRU membership")
 
-	// Eviction pressure from a later batch strips the tail first: the head
-	// anchors all matching for the prompt and stays cached longest.
+	// Eviction pressure from a later batch strips the tail first: the leading
+	// block anchors all matching for the prompt and stays cached longest.
 	i.Add([]blockHash{blockHash(7)}, pod)
-	assert.NotEmpty(t, i.Get(blockHash(4)), "head hash should survive tail-first eviction")
-	assert.Empty(t, i.Get(blockHash(5)), "tail hash should be evicted before the head")
+	assert.NotEmpty(t, i.Get(blockHash(4)), "leading hash should survive tail-first eviction")
+	assert.Empty(t, i.Get(blockHash(5)), "tail hash should be evicted before the leading hash")
 }
 
 func TestIndexer_RemovePodAndEviction(t *testing.T) {
@@ -91,8 +92,9 @@ func TestIndexer_RemovePodAndEviction(t *testing.T) {
 	assert.Equal(t, indexerSize, i.podToLRU[server2.ServerID].Len(), "server2 should have 10 entries")
 
 	// Ensure each hash in hashToPods maps to both server1 and server2
+	snapshot := i.hashToPods()
 	for _, h := range hashes {
-		pods := i.hashToPods[h]
+		pods := snapshot[h]
 		assert.Len(t, pods, 2, "Each hash should be associated with exactly 2 pods")
 		assert.Contains(t, pods, server1.ServerID, "hash should be associated with server1")
 		assert.Contains(t, pods, server2.ServerID, "hash should be associated with server2")
@@ -120,20 +122,21 @@ func TestIndexer_RemovePodAndEviction(t *testing.T) {
 	assert.Empty(t, pods, "hash 0 should have no pods after both eviction and removal")
 
 	// All remaining hashes should map only to server1
-	for hash, pods := range i.hashToPods {
+	snapshot = i.hashToPods()
+	for hash, pods := range snapshot {
 		assert.Len(t, pods, 1, "hash %v should have only 1 pod after server2 removal", hash)
 		assert.Contains(t, pods, server1.ServerID, "hash %v should only contain server1", hash)
 	}
 
 	// Ensure hashToPods contains exactly indexerSize hashes (post-eviction and server2 removal)
-	assert.Len(t, i.hashToPods, indexerSize, "hashToPods should contain %d hashes after cleanup", indexerSize)
+	assert.Len(t, snapshot, indexerSize, "hashToPods should contain %d hashes after cleanup", indexerSize)
 
 	// RemovePod enumerates LRU keys to clean hashToPods, so the mirror must
 	// be exact for the cleanup to be complete.
 	i.Add([]blockHash{11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}, server1) // 12 hashes > capacity 10
 	i.RemovePod(server1.ServerID)
 
-	assert.Empty(t, i.hashToPods, "hashToPods should be empty after removing the last pod")
+	assert.Empty(t, i.hashToPods(), "hashToPods should be empty after removing the last pod")
 }
 
 func TestIndexer_ConcurrentAddRemovePod(t *testing.T) {
@@ -149,9 +152,57 @@ func TestIndexer_ConcurrentAddRemovePod(t *testing.T) {
 		wg.Wait()
 
 		if _, exists := i.podToLRU[pod.ServerID]; !exists {
-			for hash, pods := range i.hashToPods {
+			for hash, pods := range i.hashToPods() {
 				assert.NotContains(t, pods, pod.ServerID, "iter %d: hashToPods[%v] references removed pod", iter, hash)
 			}
 		}
 	}
+}
+
+func TestIndexer_MatchLongestPrefixBeyond256Pods(t *testing.T) {
+	const (
+		numPods   = 300
+		numBlocks = 48
+	)
+	i := newIndexer(context.Background(), numBlocks*2, "test-name", "test-type").(*indexer)
+
+	hashes := make([]blockHash, numBlocks)
+	for b := range numBlocks {
+		hashes[b] = blockHash(1000 + b)
+	}
+
+	pods := make([]server, numPods)
+	for p := range numPods {
+		pods[p] = server{
+			ServerID:       ServerID{Namespace: "default", Name: fmt.Sprintf("pod-%03d", p)},
+			NumOfGPUBlocks: numBlocks * 2,
+		}
+		prefixLen := numBlocks
+		switch p % 3 {
+		case 1:
+			prefixLen = 10
+		case 2:
+			prefixLen = 25
+		}
+		i.Add(hashes[:prefixLen], pods[p])
+	}
+
+	matches := i.MatchLongestPrefix(hashes)
+	assert.Len(t, matches, numPods)
+	for p := range numPods {
+		want := numBlocks
+		switch p % 3 {
+		case 1:
+			want = 10
+		case 2:
+			want = 25
+		}
+		assert.Equal(t, want, matches[pods[p].ServerID], "pod %d match length", p)
+	}
+
+	removedPod := pods[280].ServerID
+	i.RemovePod(removedPod)
+	matchesAfter := i.MatchLongestPrefix(hashes)
+	assert.NotContains(t, matchesAfter, removedPod)
+	assert.Len(t, matchesAfter, numPods-1)
 }
