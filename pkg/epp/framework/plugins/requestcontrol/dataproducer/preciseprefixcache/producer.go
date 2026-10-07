@@ -32,6 +32,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
@@ -301,6 +302,13 @@ func (p *Producer) Consumes() plugin.DataDependencies {
 	}
 }
 
+var (
+	emptyBlocksByTier     = map[string]int{}
+	internalSpanStartOpts = []trace.SpanStartOption{
+		trace.WithSpanKind(trace.SpanKindInternal),
+	}
+)
+
 // Produce hashes the request's TokenizedRequest into KV-block keys, looks
 // them up in the per-endpoint KV-block index, and writes PrefixCacheMatchInfo
 // to each candidate endpoint. No-op when the request carries no tokens.
@@ -310,17 +318,19 @@ func (p *Producer) Produce(ctx context.Context,
 	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
 ) error {
 	ctx, span := tracing.Tracer(rcplugins.TracerScope).Start(ctx, "produce_precise_prefix_cache",
-		trace.WithSpanKind(trace.SpanKindInternal),
+		internalSpanStartOpts...,
 	)
 	defer span.End()
 
-	span.SetAttributes(semconv.LLMDEPPProducerCandidateEndpoints(len(endpoints)))
-	if request != nil {
-		if request.TargetModel != "" {
-			span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
-		}
-		if request.RequestID != "" {
-			span.SetAttributes(semconv.GenAIRequestID(request.RequestID))
+	if span.IsRecording() {
+		span.SetAttributes(semconv.LLMDEPPProducerCandidateEndpoints(len(endpoints)))
+		if request != nil {
+			if request.TargetModel != "" {
+				span.SetAttributes(semconv.GenAIRequestModel(request.TargetModel))
+			}
+			if request.RequestID != "" {
+				span.SetAttributes(semconv.GenAIRequestID(request.RequestID))
+			}
 		}
 	}
 
@@ -330,7 +340,9 @@ func (p *Producer) Produce(ctx context.Context,
 		return fmt.Errorf("failed to compute block keys: %w", err)
 	}
 	if len(perPromptKeys) == 0 {
-		span.SetAttributes(semconv.LLMDEPPProducerResult("skipped_no_tokens"))
+		if span.IsRecording() {
+			span.SetAttributes(semconv.LLMDEPPProducerResult("skipped_no_tokens"))
+		}
 		return nil
 	}
 
@@ -341,8 +353,21 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	request *scheduling.InferenceRequest, endpoints []scheduling.Endpoint,
 	perPromptKeys [][]kvblock.BlockHash, mmBlockIndices []int,
 ) error {
-	logger := log.FromContext(ctx).WithName(p.typedName.String())
-	endpointSet := extractEndpointSet(endpoints)
+	var stackEndpointKeys [256]string
+	var endpointKeys []string
+	if len(endpoints) <= len(stackEndpointKeys) {
+		endpointKeys = stackEndpointKeys[:len(endpoints)]
+	} else {
+		endpointKeys = make([]string, len(endpoints))
+	}
+	podSet := make(sets.Set[string], len(endpoints))
+	for i, ep := range endpoints {
+		if md := ep.GetMetadata(); md != nil {
+			key := endpointToKey(md)
+			endpointKeys[i] = key
+			podSet.Insert(key)
+		}
+	}
 
 	// A multi-prompt request scores as the sum of its prompts' matches. The
 	// first prompt's result is the aggregate, so single-prompt requests copy
@@ -350,7 +375,7 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	var matches map[string]kvcache.PodMatch
 	totalBlocks := 0
 	for _, blockKeys := range perPromptKeys {
-		promptMatches, err := p.kvCacheIndexer.MatchBlockKeys(ctx, blockKeys, endpointSet)
+		promptMatches, err := p.kvCacheIndexer.MatchBlockKeys(ctx, blockKeys, podSet)
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 			return fmt.Errorf("failed to match block keys: %w", err)
@@ -366,18 +391,23 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 	}
 
 	maxMatch := 0
-	results := make([]endpointResult, 0, len(endpoints))
-	for _, ep := range endpoints {
+	var stackResults [256]endpointResult
+	var results []endpointResult
+	if len(endpoints) <= len(stackResults) {
+		results = stackResults[:0]
+	} else {
+		results = make([]endpointResult, 0, len(endpoints))
+	}
+	for i, ep := range endpoints {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		md := ep.GetMetadata()
-		if md == nil {
+		if ep.GetMetadata() == nil {
 			continue
 		}
-		match := matches[fmt.Sprintf("%s:%s", md.Address, md.Port)]
-		if match.BlocksByTier == nil {
-			match.BlocksByTier = map[string]int{} // no match: consumers still read a map
+		match, ok := matches[endpointKeys[i]]
+		if !ok || match.BlocksByTier == nil {
+			match.BlocksByTier = emptyBlocksByTier // no match: consumers still read a map
 		}
 		matchLen := int(match.WeightedScore)
 		if matchLen > maxMatch {
@@ -401,13 +431,15 @@ func (p *Producer) produceFromBlockKeys(ctx context.Context, span trace.Span,
 			&blockKeysState{perPromptKeys: perPromptKeys})
 	}
 
-	span.SetAttributes(
-		semconv.LLMDEPPProducerTotalBlocks(totalBlocks),
-		semconv.LLMDEPPProducerMaxMatchBlocks(maxMatch),
-	)
+	if span.IsRecording() {
+		span.SetAttributes(
+			semconv.LLMDEPPProducerTotalBlocks(totalBlocks),
+			semconv.LLMDEPPProducerMaxMatchBlocks(maxMatch),
+		)
+	}
 
-	if v := logger.V(logging.TRACE); v.Enabled() {
-		v.Info("Produce completed", "blockKeys", totalBlocks, "matches", matches)
+	if loggerTrace := log.FromContext(ctx).V(logging.TRACE); loggerTrace.Enabled() {
+		loggerTrace.WithName(p.typedName.String()).Info("Produce completed", "blockKeys", totalBlocks, "matches", matches)
 	}
 	return nil
 }
@@ -421,9 +453,14 @@ func addPodMatch(a, b kvcache.PodMatch) kvcache.PodMatch {
 	a.WeightedScore += b.WeightedScore
 	a.MatchedBlocks += b.MatchedBlocks
 	a.ConfirmedBlocks += b.ConfirmedBlocks
-	for tier, count := range b.BlocksByTier {
-		a.BlocksByTier[tier] += count
+	tiers := make(map[string]int, len(a.BlocksByTier)+len(b.BlocksByTier))
+	for tier, count := range a.BlocksByTier {
+		tiers[tier] = count
 	}
+	for tier, count := range b.BlocksByTier {
+		tiers[tier] += count
+	}
+	a.BlocksByTier = tiers
 	return a
 }
 
