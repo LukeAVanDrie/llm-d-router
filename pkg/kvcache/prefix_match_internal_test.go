@@ -107,3 +107,74 @@ func TestMatchBlockKeysColdStateDoesNotTrackTierHistory(t *testing.T) {
 	assert.Less(t, withChurn, withoutChurn+16*1024,
 		"request state must scale with the tiers a request sees, not with tier ordinal history")
 }
+
+func TestPrefixAccumulatorSingleToMultiTierTransition(t *testing.T) {
+	weights := map[string]float64{"gpu": 1.0, "cpu": 0.5}
+	acc := acquireAccumulator(weights, nil, true)
+	defer releaseAccumulator(acc)
+
+	for i := range 4 {
+		acc.recordLocalPod(uint32(i), fmt.Sprintf("pod-%d", i))
+	}
+
+	// pos 0: single-tier "gpu" with pods 0, 1, 2, 3 (enters singleTier = true)
+	require.True(t, acc.walkSnapshot(0, kvblock.BuildPodSnapshot([]kvblock.EntryRef{
+		{PodEntry: kvblock.PodEntry{PodIdentifier: "pod-0", DeviceTier: "gpu"}, PodOrdinal: 0, TierOrdinal: 0},
+		{PodEntry: kvblock.PodEntry{PodIdentifier: "pod-1", DeviceTier: "gpu"}, PodOrdinal: 1, TierOrdinal: 0},
+		{PodEntry: kvblock.PodEntry{PodIdentifier: "pod-2", DeviceTier: "gpu"}, PodOrdinal: 2, TierOrdinal: 0},
+		{PodEntry: kvblock.PodEntry{PodIdentifier: "pod-3", DeviceTier: "gpu"}, PodOrdinal: 3, TierOrdinal: 0},
+	})))
+	assert.True(t, acc.singleTier)
+
+	// pos 1: single-tier "gpu" with pods 0, 1, 2 (pod-3 drops at firstDropPos = 1)
+	require.True(t, acc.walkSnapshot(1, kvblock.BuildPodSnapshot([]kvblock.EntryRef{
+		{PodEntry: kvblock.PodEntry{PodIdentifier: "pod-0", DeviceTier: "gpu"}, PodOrdinal: 0, TierOrdinal: 0},
+		{PodEntry: kvblock.PodEntry{PodIdentifier: "pod-1", DeviceTier: "gpu"}, PodOrdinal: 1, TierOrdinal: 0},
+		{PodEntry: kvblock.PodEntry{PodIdentifier: "pod-2", DeviceTier: "gpu"}, PodOrdinal: 2, TierOrdinal: 0},
+	})))
+	assert.True(t, acc.singleTier)
+
+	// pos 2: single-tier "gpu" with pods 0, 1 (pod-2 drops into droppedMask at pos = 2)
+	require.True(t, acc.walkSnapshot(2, kvblock.BuildPodSnapshot([]kvblock.EntryRef{
+		{PodEntry: kvblock.PodEntry{PodIdentifier: "pod-0", DeviceTier: "gpu"}, PodOrdinal: 0, TierOrdinal: 0},
+		{PodEntry: kvblock.PodEntry{PodIdentifier: "pod-1", DeviceTier: "gpu"}, PodOrdinal: 1, TierOrdinal: 0},
+	})))
+	assert.True(t, acc.singleTier)
+
+	// pos 3: multi-tier ("gpu" for pod-0, "cpu" for pod-1) triggers transitionToMultiTier()
+	require.True(t, acc.walkSnapshot(3, kvblock.BuildPodSnapshot([]kvblock.EntryRef{
+		{PodEntry: kvblock.PodEntry{PodIdentifier: "pod-0", DeviceTier: "gpu"}, PodOrdinal: 0, TierOrdinal: 0},
+		{PodEntry: kvblock.PodEntry{PodIdentifier: "pod-1", DeviceTier: "cpu"}, PodOrdinal: 1, TierOrdinal: 1},
+	})))
+	assert.False(t, acc.singleTier)
+
+	got, longest := acc.result()
+	assert.Equal(t, 4, longest)
+	assert.Equal(t, PodMatch{WeightedScore: 4.0, MatchedBlocks: 4, BlocksByTier: map[string]int{"gpu": 4}}, got["pod-0"])
+	assert.Equal(t, PodMatch{WeightedScore: 3.5, MatchedBlocks: 4, BlocksByTier: map[string]int{"gpu": 3}}, got["pod-1"])
+	assert.Equal(t, PodMatch{WeightedScore: 2.0, MatchedBlocks: 2, BlocksByTier: map[string]int{"gpu": 2}}, got["pod-2"])
+	assert.Equal(t, PodMatch{WeightedScore: 1.0, MatchedBlocks: 1, BlocksByTier: map[string]int{"gpu": 1}}, got["pod-3"])
+}
+
+func TestPrefixAccumulatorOverflowOrdinalsBeyond256(t *testing.T) {
+	weights := map[string]float64{"gpu": 1.0, "cpu": 0.5}
+	acc := acquireAccumulator(weights, nil, true)
+	defer releaseAccumulator(acc)
+
+	acc.recordLocalPod(300, "pod-300")
+	acc.recordLocalPod(5000, "pod-5000")
+
+	require.True(t, acc.walkSnapshot(0, kvblock.BuildPodSnapshot([]kvblock.EntryRef{
+		{PodEntry: kvblock.PodEntry{PodIdentifier: "pod-300", DeviceTier: "gpu"}, PodOrdinal: 300, TierOrdinal: 0},
+		{PodEntry: kvblock.PodEntry{PodIdentifier: "pod-5000", DeviceTier: "gpu"}, PodOrdinal: 5000, TierOrdinal: 0},
+		{PodEntry: kvblock.PodEntry{PodIdentifier: "pod-5000", DeviceTier: "cpu"}, PodOrdinal: 5000, TierOrdinal: 1},
+	})))
+	require.True(t, acc.walkSnapshot(1, kvblock.BuildPodSnapshot([]kvblock.EntryRef{
+		{PodEntry: kvblock.PodEntry{PodIdentifier: "pod-5000", DeviceTier: "cpu"}, PodOrdinal: 5000, TierOrdinal: 1},
+	})))
+
+	got, longest := acc.result()
+	assert.Equal(t, 2, longest)
+	assert.Equal(t, PodMatch{WeightedScore: 1.0, MatchedBlocks: 1, BlocksByTier: map[string]int{"gpu": 1}}, got["pod-300"])
+	assert.Equal(t, PodMatch{WeightedScore: 1.5, MatchedBlocks: 2, BlocksByTier: map[string]int{"gpu": 1, "cpu": 2}}, got["pod-5000"])
+}

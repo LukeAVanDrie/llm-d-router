@@ -25,8 +25,10 @@ limitations under the License.
 // computes block keys from tokens and returns only the per-pod weighted scores,
 // skipping per-tier map allocation on the scoring path.
 //
-// When the underlying kvblock.Index implements kvblock.KeyWalker, both
-// MatchBlockKeys and ScoreTokens stream per-key EntryRef slices into a pooled
-// prefixAccumulator without materializing intermediate lookup maps. Backends
-// without KeyWalker fall back to Index.Lookup and feed the same accumulator.
+// When the underlying kvblock.Index implements kvblock.SnapshotWalker, both
+// MatchBlockKeys and ScoreTokens stream immutable *kvblock.PodSnapshot values
+// into a pooled prefixAccumulator and intersect per-tier collections.Bitset pod
+// sets without materializing intermediate lookup maps. Backends implementing
+// kvblock.KeyWalker or only Index.Lookup construct temporary snapshots per key
+// and feed the same accumulator.
 package kvcache

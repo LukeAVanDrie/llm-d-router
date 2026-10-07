@@ -18,15 +18,13 @@ package kvcache
 
 import (
 	"context"
-	"math"
-	"math/bits"
 	"sync"
-	"unsafe"
 
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	"github.com/llm-d/llm-d-router/pkg/common/collections"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
@@ -50,7 +48,10 @@ const unknownTierWeight = 0.0
 // positions: positions where pos&mask == 0 poll ctx.Err().
 const matchCancellationMask = 255
 
-const maxStaticTierBlocks = 4096
+const (
+	maxStaticTierBlocks = 4096
+	inlinePodSlots      = 256
+)
 
 var (
 	gpuTierMaps         [maxStaticTierBlocks + 1]map[string]int
@@ -150,18 +151,11 @@ func (k *Indexer) MatchBlockKeys(ctx context.Context, keys []kvblock.BlockHash,
 func matchWalk(ctx context.Context, walker kvblock.KeyWalker, keys []kvblock.BlockHash,
 	weights map[string]float64, filter sets.Set[string],
 ) (map[string]PodMatch, int, error) {
-	acc := acquireAccumulator(weights, filter)
+	acc := acquireAccumulator(weights, filter, true)
 	defer releaseAccumulator(acc)
 
-	if sw, ok := walker.(kvblock.SnapshotWalker); ok {
-		acc.snapWalker = sw
-		if err := sw.WalkSnapshots(ctx, keys, acc.walkSnapFn); err != nil {
-			return nil, 0, err
-		}
-	} else {
-		if err := walker.WalkKeys(ctx, keys, acc.walkFn); err != nil {
-			return nil, 0, err
-		}
+	if err := runWalk(ctx, walker, keys, acc); err != nil {
+		return nil, 0, err
 	}
 	matches, longest := acc.result()
 	return matches, longest, nil
@@ -172,21 +166,48 @@ func matchWalk(ctx context.Context, walker kvblock.KeyWalker, keys []kvblock.Blo
 func scoreWalk(ctx context.Context, walker kvblock.KeyWalker, keys []kvblock.BlockHash,
 	weights map[string]float64, filter sets.Set[string],
 ) (map[string]float64, int, error) {
-	acc := acquireScoreAccumulator(weights, filter)
+	acc := acquireAccumulator(weights, filter, false)
 	defer releaseAccumulator(acc)
 
-	if sw, ok := walker.(kvblock.SnapshotWalker); ok {
-		acc.snapWalker = sw
-		if err := sw.WalkSnapshots(ctx, keys, acc.walkSnapFn); err != nil {
-			return nil, 0, err
-		}
-	} else {
-		if err := walker.WalkKeys(ctx, keys, acc.walkFn); err != nil {
-			return nil, 0, err
-		}
+	if err := runWalk(ctx, walker, keys, acc); err != nil {
+		return nil, 0, err
 	}
 	scores, longest := acc.scores()
 	return scores, longest, nil
+}
+
+func runWalk(ctx context.Context, walker kvblock.KeyWalker, keys []kvblock.BlockHash, acc *prefixAccumulator) error {
+	if sw, ok := walker.(kvblock.SnapshotWalker); ok {
+		acc.snapWalker = sw
+		return sw.WalkSnapshots(ctx, keys, acc.walkSnapFn)
+	}
+	pods := ordinalTable{}
+	var refs []kvblock.EntryRef
+	return walker.WalkKeys(ctx, keys, func(pos int, found bool, entries []kvblock.EntryRef) bool {
+		if !found || len(entries) == 0 {
+			return false
+		}
+		refs = refs[:0]
+		for _, e := range entries {
+			var podOrd uint32
+			if pos == 0 {
+				podOrd = pods.of(e.PodIdentifier)
+				acc.recordLocalPod(podOrd, e.PodIdentifier)
+			} else {
+				var ok bool
+				podOrd, ok = pods[e.PodIdentifier]
+				if !ok {
+					continue
+				}
+			}
+			refs = append(refs, kvblock.EntryRef{
+				PodEntry:    e.PodEntry,
+				PodOrdinal:  podOrd,
+				TierOrdinal: e.TierOrdinal,
+			})
+		}
+		return len(refs) > 0 && acc.walkSnapshot(pos, kvblock.BuildPodSnapshot(refs))
+	})
 }
 
 // matchLookup feeds the accumulator from a materialized Lookup result, for
@@ -210,7 +231,7 @@ func scoreLookup(ctx context.Context, index kvblock.Index, keys []kvblock.BlockH
 	if err != nil {
 		return nil, 0, err
 	}
-	acc := acquireScoreAccumulator(weights, filter)
+	acc := acquireAccumulator(weights, filter, false)
 	defer releaseAccumulator(acc)
 
 	if err := feedMaterialized(ctx, acc, keys, keyToPods); err != nil {
@@ -221,13 +242,12 @@ func scoreLookup(ctx context.Context, index kvblock.Index, keys []kvblock.BlockH
 }
 
 // matchMaterialized feeds the accumulator from a Lookup result, walking keys
-// in order and stopping at the first key without entries. Pod and tier
-// ordinals are assigned per call, since materialized entries carry none.
+// in order and stopping at the first key without entries.
 func matchMaterialized(ctx context.Context, keys []kvblock.BlockHash,
 	keyToPods map[kvblock.BlockHash][]kvblock.PodEntry,
 	weights map[string]float64, filter sets.Set[string],
 ) (map[string]PodMatch, int, error) {
-	acc := acquireAccumulator(weights, filter)
+	acc := acquireAccumulator(weights, filter, true)
 	defer releaseAccumulator(acc)
 
 	if err := feedMaterialized(ctx, acc, keys, keyToPods); err != nil {
@@ -252,19 +272,27 @@ func feedMaterialized(ctx context.Context, acc *prefixAccumulator, keys []kvbloc
 		}
 		refs = refs[:0]
 		for _, e := range entries {
+			var podOrd uint32
+			if pos == 0 {
+				podOrd = pods.of(e.PodIdentifier)
+				acc.recordLocalPod(podOrd, e.PodIdentifier)
+			} else {
+				var ok bool
+				podOrd, ok = pods[e.PodIdentifier]
+				if !ok {
+					continue
+				}
+			}
 			refs = append(refs, kvblock.EntryRef{
 				PodEntry:    e,
-				PodOrdinal:  pods.of(e.PodIdentifier),
+				PodOrdinal:  podOrd,
 				TierOrdinal: tiers.of(e.DeviceTier),
 			})
 		}
-		acc.lastEntriesPtr = nil
-		if !acc.key(refs) {
+		if len(refs) == 0 || !acc.walkSnapshot(pos, kvblock.BuildPodSnapshot(refs)) {
 			break
 		}
 	}
-	// Cancellation is sampled at checkpoints along the keys and once more at
-	// completion, so a cancelled request never reports a match.
 	return ctx.Err()
 }
 
@@ -280,520 +308,373 @@ func (t ordinalTable) of(name string) uint32 {
 	return id
 }
 
-// speculativeTierOrdinal keys the speculative per-tier chain. Feeders assign
-// tier ordinals from zero, so the top of the range never collides.
-const speculativeTierOrdinal = math.MaxUint32
-
-// slotRef maps one pod ordinal to a request-local slot.
-type slotRef struct {
-	ordinal uint32
-	slot    uint32 // slot index plus one; zero marks an empty bucket
-}
-
-// slotTable is an open-addressed map from pod ordinal to request-local slot.
-// It is sized by the first key's entry count, so request state scales with
-// the live candidates rather than with every ordinal an index ever assigned.
-type slotTable struct {
-	buckets []slotRef
-}
-
-func (t *slotTable) reset(numEntries int) {
-	size := 2
-	for size < numEntries*2 {
-		size <<= 1
-	}
-	if cap(t.buckets) < size {
-		t.buckets = make([]slotRef, size)
-		return
-	}
-	t.buckets = t.buckets[:size]
-	clear(t.buckets)
-}
-
-func (t *slotTable) lookup(ordinal uint32) (int32, bool) {
-	mask := uint32(len(t.buckets) - 1)
-	i := ordinal * 2654435761 & mask
-	for {
-		b := t.buckets[i]
-		if b.slot == 0 {
-			return 0, false
-		}
-		if b.ordinal == ordinal {
-			return int32(b.slot - 1), true
-		}
-		i = (i + 1) & mask
-	}
-}
-
-func (t *slotTable) insert(ordinal uint32, slot int32) {
-	mask := uint32(len(t.buckets) - 1)
-	i := ordinal * 2654435761 & mask
-	for t.buckets[i].slot != 0 {
-		i = (i + 1) & mask
-	}
-	t.buckets[i] = slotRef{ordinal: ordinal, slot: uint32(slot) + 1}
-}
-
-// tierChain tracks one tier's contiguous prefix for a candidate pod.
-type tierChain struct {
-	ordinal uint32
-	name    string
-	count   int
-	// seen is the key stamp of the last key where the pod held this tier.
-	seen  uint32
-	alive bool
-}
-
-// tierWeight is one tier's resolved weight, keyed by tier ordinal.
+// tierWeight caches one tier's resolved weight, keyed by tier ordinal.
 type tierWeight struct {
 	ordinal uint32
 	weight  float64
 }
 
-// matchSlot is one candidate pod's accumulated state.
-type matchSlot struct {
-	pod     string
-	matched int
-	score   float64
-	// seen is the key stamp of the last key holding this pod; weight is the
-	// highest tier weight among its entries at that key.
-	seen   uint32
-	weight float64
-	tiers  []tierChain
+// podAccum holds per-pod accumulation state for ordinals in the walk.
+type podAccum struct {
+	dropPos   uint32
+	matched   uint32
+	score     float64
+	keyWeight float64
+}
+
+// tierChainBitset tracks one tier's contiguous prefix across candidate pods.
+type tierChainBitset struct {
+	name       string
+	ord        uint32
+	active     collections.Bitset
+	count      [inlinePodSlots]uint32
+	extraCount []uint32
+}
+
+func (tc *tierChainBitset) countAt(a *prefixAccumulator, ord int) *uint32 {
+	if uint(ord) < inlinePodSlots {
+		return &tc.count[ord]
+	}
+	idx := a.overflowSlot(ord)
+	for len(tc.extraCount) <= idx {
+		tc.extraCount = append(tc.extraCount, 0)
+	}
+	return &tc.extraCount[idx]
 }
 
 // prefixAccumulator folds an ordered walk over request keys into per-pod
-// prefix matches. It is the single implementation of the matching rules:
-// candidates are the pods holding the first key, each chain ends at the
-// first key its pod does not hold, duplicate entries for a pod at one key
-// take the highest weight, and every tier tracks its own contiguous prefix.
-//
-// Feeders present each key's entries through key, in key order, and stop at
-// the first key without entries or once key reports no live chain. Ordinals
-// only need to be stable within one accumulation; they key request-local
-// tables and never size state, so sparse or large values cost nothing.
+// prefix matches using collections.Bitset. Candidates are the pods holding
+// the first key, each chain ends at the first key its pod does not hold,
+// multiple tiers for a pod at one key take the highest tier weight, and every
+// tier tracks its own contiguous prefix from the first key.
 type prefixAccumulator struct {
-	weights map[string]float64
-	filter  sets.Set[string]
-
-	table      slotTable
-	slots      []matchSlot
-	active     []int32
-	keyStamp   uint32
-	first      bool
+	weights    map[string]float64
+	filter     sets.Set[string]
 	trackTiers bool
+	first      bool
+	singleTier bool
 
-	// lastEntriesPtr, lastEntriesLen, and pendingRun coalesce consecutive
-	// keys whose EntryRef slices share the same backing array pointer and
-	// length into a single batch increment in flushPendingRun. Pointer
-	// identity is sound when visiting immutable copy-on-write PodCache
-	// snapshots; feedMaterialized clears lastEntriesPtr before each key
-	// because it reuses a single scratch slice across keys.
-	lastEntriesPtr *kvblock.EntryRef
-	lastEntriesLen int
-	pendingRun     int
-	// matchedKeys is the number of flushed keys accumulated while at least
-	// one candidate chain remained alive; entries for pods whose slot.matched
-	// lags matchedKeys belong to chains that already terminated.
-	matchedKeys int
+	snapWalker    kvblock.SnapshotWalker
+	localPodNames []string
 
-	// weightCache holds the weight of every tier seen in this accumulation,
-	// scanned linearly: requests see a handful of tiers.
-	weightCache []tierWeight
+	initMask     collections.Bitset
+	activeMask   collections.Bitset
+	droppedMask  collections.Bitset
+	firstDropPos int
+	endPos       int
 
-	snapWalker   kvblock.SnapshotWalker
-	fastMode     bool
 	fastTierOrd  uint32
 	fastTierName string
 	fastWeight   float64
-	fastEndPos   int
-	firstDropPos int
-	initMask     [4]uint64
-	activeMask   [4]uint64
-	droppedMask  [4]uint64
-	dropPos      [256]uint32
 
-	// walkFn and walkSnapFn are bound once when the accumulator is constructed
-	// so WalkKeys and WalkSnapshots calls do not allocate a closure per request.
-	walkFn     func(int, bool, []kvblock.EntryRef) bool
-	walkSnapFn func(int, *kvblock.PodSnapshot) bool
+	pods          [inlinePodSlots]podAccum
+	extraPods     []podAccum
+	overflowSlots map[int]int
+	tiers         []tierChainBitset
+
+	weightCache []tierWeight
+	walkSnapFn  func(int, *kvblock.PodSnapshot) bool
 }
 
 var accumulatorPool = sync.Pool{New: func() any {
 	a := &prefixAccumulator{}
-	a.walkFn = a.walkKey
 	a.walkSnapFn = a.walkSnapshot
 	return a
 }}
 
-func (a *prefixAccumulator) walkKey(_ int, found bool, entries []kvblock.EntryRef) bool {
-	return found && len(entries) > 0 && a.key(entries)
-}
-
-func (a *prefixAccumulator) walkSnapshot(pos int, snap *kvblock.PodSnapshot) bool {
-	if snap == nil || len(snap.Entries) == 0 {
-		return false
-	}
-	if a.first {
-		if snap.MaskValid && a.snapWalker != nil {
-			mask := snap.PodMask
-			if a.filter.Len() > 0 {
-				for w := range 4 {
-					word := mask[w]
-					for word != 0 {
-						bit := bits.TrailingZeros64(word)
-						word &= word - 1
-						ord := uint32(w*64 + bit)
-						if !a.filter.Has(a.snapWalker.PodName(ord)) {
-							mask[w] &^= uint64(1) << bit
-						}
-					}
-				}
-			}
-			a.first = false
-			if (mask[0] | mask[1] | mask[2] | mask[3]) == 0 {
-				return false
-			}
-			tOrd := snap.TierOrd
-			if snap.TierName == SpeculativeTier {
-				tOrd = speculativeTierOrdinal
-			}
-			a.fastMode = true
-			a.initMask = mask
-			a.activeMask = mask
-			a.droppedMask = [4]uint64{}
-			a.firstDropPos = 0
-			a.fastTierOrd = snap.TierOrd
-			a.fastTierName = snap.TierName
-			a.fastWeight = a.weightOf(snap.TierName, tOrd)
-			a.fastEndPos = 1
-			return true
-		}
-		return a.key(snap.Entries)
-	}
-	if a.fastMode {
-		if snap.MaskValid && snap.TierOrd == a.fastTierOrd {
-			if (snap.PodMask[0]&a.activeMask[0]) == a.activeMask[0] &&
-				(snap.PodMask[1]&a.activeMask[1]) == a.activeMask[1] &&
-				(snap.PodMask[2]&a.activeMask[2]) == a.activeMask[2] &&
-				(snap.PodMask[3]&a.activeMask[3]) == a.activeMask[3] {
-				a.fastEndPos = pos + 1
-				return true
-			}
-			if a.firstDropPos == 0 {
-				a.firstDropPos = pos
-				a.activeMask[0] &= snap.PodMask[0]
-				a.activeMask[1] &= snap.PodMask[1]
-				a.activeMask[2] &= snap.PodMask[2]
-				a.activeMask[3] &= snap.PodMask[3]
-			} else {
-				for w := range 4 {
-					dropped := a.activeMask[w] &^ snap.PodMask[w]
-					for dropped != 0 {
-						bit := bits.TrailingZeros64(dropped)
-						dropped &= dropped - 1
-						ord := w*64 + bit
-						a.dropPos[ord] = uint32(pos)
-						a.droppedMask[w] |= uint64(1) << bit
-					}
-					a.activeMask[w] &= snap.PodMask[w]
-				}
-			}
-			if (a.activeMask[0] | a.activeMask[1] | a.activeMask[2] | a.activeMask[3]) == 0 {
-				return false
-			}
-			a.fastEndPos = pos + 1
-			return true
-		}
-		a.materializeFastMode()
-	}
-	return a.key(snap.Entries)
-}
-
-func (a *prefixAccumulator) materializeFastMode() {
-	total := bits.OnesCount64(a.initMask[0]) + bits.OnesCount64(a.initMask[1]) +
-		bits.OnesCount64(a.initMask[2]) + bits.OnesCount64(a.initMask[3])
-	a.table.reset(total)
-	a.keyStamp = uint32(a.fastEndPos)
-	a.matchedKeys = a.fastEndPos
-	tOrd := a.fastTierOrd
-	if a.fastTierName == SpeculativeTier {
-		tOrd = speculativeTierOrdinal
-	}
-	if a.firstDropPos != 0 {
-		m := a.firstDropPos
-		for w := range 4 {
-			word := a.initMask[w] &^ (a.droppedMask[w] | a.activeMask[w])
-			for word != 0 {
-				bit := bits.TrailingZeros64(word)
-				word &= word - 1
-				ord := uint32(w*64 + bit)
-				s := a.newSlot(a.snapWalker.PodName(ord))
-				a.table.insert(ord, s)
-				slot := &a.slots[s]
-				slot.matched = m
-				slot.score = a.fastWeight * float64(m)
-				slot.seen = uint32(m)
-				slot.weight = a.fastWeight
-				if a.trackTiers {
-					slot.tiers = append(slot.tiers, tierChain{
-						ordinal: tOrd,
-						name:    a.fastTierName,
-						count:   m,
-						seen:    uint32(m),
-						alive:   false,
-					})
-				}
-			}
-		}
-	}
-	for w := range 4 {
-		word := a.droppedMask[w]
-		for word != 0 {
-			bit := bits.TrailingZeros64(word)
-			word &= word - 1
-			ord := uint32(w*64 + bit)
-			m := int(a.dropPos[ord])
-			s := a.newSlot(a.snapWalker.PodName(ord))
-			a.table.insert(ord, s)
-			slot := &a.slots[s]
-			slot.matched = m
-			slot.score = a.fastWeight * float64(m)
-			slot.seen = uint32(m)
-			slot.weight = a.fastWeight
-			if a.trackTiers {
-				slot.tiers = append(slot.tiers, tierChain{
-					ordinal: tOrd,
-					name:    a.fastTierName,
-					count:   m,
-					seen:    uint32(m),
-					alive:   false,
-				})
-			}
-		}
-	}
-	m := a.fastEndPos
-	for w := range 4 {
-		word := a.activeMask[w]
-		for word != 0 {
-			bit := bits.TrailingZeros64(word)
-			word &= word - 1
-			ord := uint32(w*64 + bit)
-			s := a.newSlot(a.snapWalker.PodName(ord))
-			a.table.insert(ord, s)
-			slot := &a.slots[s]
-			slot.matched = m
-			slot.score = a.fastWeight * float64(m)
-			slot.seen = uint32(m)
-			slot.weight = a.fastWeight
-			if a.trackTiers {
-				slot.tiers = append(slot.tiers, tierChain{
-					ordinal: tOrd,
-					name:    a.fastTierName,
-					count:   m,
-					seen:    uint32(m),
-					alive:   true,
-				})
-			}
-			a.active = append(a.active, s)
-		}
-	}
-	a.fastMode = false
-	a.lastEntriesPtr = nil
-	a.lastEntriesLen = 0
-	a.pendingRun = 0
-}
-
-func acquireAccumulator(weights map[string]float64, filter sets.Set[string]) *prefixAccumulator {
+func acquireAccumulator(weights map[string]float64, filter sets.Set[string], trackTiers bool) *prefixAccumulator {
 	a, _ := accumulatorPool.Get().(*prefixAccumulator)
-	if a.walkFn == nil {
-		a.walkFn = a.walkKey
-	}
 	if a.walkSnapFn == nil {
 		a.walkSnapFn = a.walkSnapshot
 	}
 	a.weights, a.filter = weights, filter
-	a.slots = a.slots[:0]
-	a.active = a.active[:0]
-	a.keyStamp = 0
+	a.trackTiers = trackTiers
 	a.first = true
-	a.trackTiers = true
-	a.lastEntriesPtr = nil
-	a.lastEntriesLen = 0
-	a.pendingRun = 0
-	a.matchedKeys = 0
-	a.weightCache = a.weightCache[:0]
+	a.singleTier = false
 	a.snapWalker = nil
-	a.fastMode = false
-	return a
-}
-
-func acquireScoreAccumulator(weights map[string]float64, filter sets.Set[string]) *prefixAccumulator {
-	a := acquireAccumulator(weights, filter)
-	a.trackTiers = false
+	a.localPodNames = a.localPodNames[:0]
+	a.endPos = 0
+	a.tiers = a.tiers[:0]
+	a.weightCache = a.weightCache[:0]
+	if len(a.overflowSlots) > 0 {
+		clear(a.overflowSlots)
+		a.extraPods = a.extraPods[:0]
+	}
 	return a
 }
 
 func releaseAccumulator(a *prefixAccumulator) {
-	a.weights, a.filter, a.lastEntriesPtr, a.snapWalker = nil, nil, nil, nil
+	a.weights, a.filter, a.snapWalker = nil, nil, nil
 	accumulatorPool.Put(a)
 }
 
-// key folds one key's entries into the chains and reports whether any chain
-// is still alive. entries is borrowed for the duration of the call.
-func (a *prefixAccumulator) key(entries []kvblock.EntryRef) bool {
-	if !a.first && len(entries) > 0 && len(entries) == a.lastEntriesLen &&
-		unsafe.SliceData(entries) == a.lastEntriesPtr {
-		a.pendingRun++
+func (a *prefixAccumulator) recordLocalPod(ord uint32, name string) {
+	for len(a.localPodNames) <= int(ord) {
+		a.localPodNames = append(a.localPodNames, "")
+	}
+	a.localPodNames[ord] = name
+}
+
+func (a *prefixAccumulator) podNameOf(ord int) string {
+	if a.snapWalker != nil {
+		return a.snapWalker.PodName(uint32(ord))
+	}
+	if ord < len(a.localPodNames) {
+		return a.localPodNames[ord]
+	}
+	return ""
+}
+
+func (a *prefixAccumulator) overflowSlot(ord int) int {
+	if a.overflowSlots == nil {
+		a.overflowSlots = make(map[int]int)
+	}
+	if idx, ok := a.overflowSlots[ord]; ok {
+		return idx
+	}
+	idx := len(a.overflowSlots)
+	a.overflowSlots[ord] = idx
+	a.extraPods = append(a.extraPods, podAccum{})
+	return idx
+}
+
+func (a *prefixAccumulator) pod(ord int) *podAccum {
+	if uint(ord) < inlinePodSlots {
+		return &a.pods[ord]
+	}
+	return &a.extraPods[a.overflowSlot(ord)]
+}
+
+func (a *prefixAccumulator) appendTierChain(ord uint32, name string, active collections.Bitset, initCount uint32) {
+	n := len(a.tiers)
+	if n < cap(a.tiers) {
+		a.tiers = a.tiers[:n+1]
+	} else {
+		a.tiers = append(a.tiers, tierChainBitset{})
+	}
+	tc := &a.tiers[n]
+	tc.ord = ord
+	tc.name = name
+	tc.active = active
+	tc.extraCount = tc.extraCount[:0]
+	for podOrd := range a.initMask.All() {
+		if active.Has(podOrd) {
+			*tc.countAt(a, podOrd) = initCount
+		} else {
+			*tc.countAt(a, podOrd) = 0
+		}
+	}
+}
+
+func (a *prefixAccumulator) walkSnapshot(pos int, snap *kvblock.PodSnapshot) bool {
+	if snap == nil || len(snap.Tiers) == 0 {
+		return false
+	}
+	if a.first {
+		return a.initFirstKey(snap)
+	}
+	if a.singleTier {
+		if len(snap.Tiers) == 1 && snap.Tiers[0].TierOrd == a.fastTierOrd {
+			return a.stepSingleTier(pos, &snap.Tiers[0].Pods)
+		}
+		a.transitionToMultiTier()
+	}
+	return a.stepMultiTier(pos, snap)
+}
+
+func (a *prefixAccumulator) initFirstKey(snap *kvblock.PodSnapshot) bool {
+	initMask := snap.AllPods.Clone()
+	if a.filter.Len() > 0 {
+		for ord := range initMask.All() {
+			if !a.filter.Has(a.podNameOf(ord)) {
+				initMask.Clear(ord)
+			}
+		}
+	}
+	if initMask.IsEmpty() {
+		return false
+	}
+	a.first = false
+	a.initMask = initMask
+	a.activeMask = initMask.Clone()
+	a.endPos = 1
+
+	if len(snap.Tiers) == 1 {
+		ts := &snap.Tiers[0]
+		a.singleTier = true
+		a.droppedMask = collections.Bitset{}
+		a.firstDropPos = 0
+		a.fastTierOrd = ts.TierOrd
+		a.fastTierName = ts.TierName
+		a.fastWeight = a.weightOf(ts.TierName, ts.TierOrd)
 		return true
 	}
-	if a.pendingRun > 0 {
-		a.flushPendingRun()
-	}
 
-	a.keyStamp++
-	if a.first {
-		a.table.reset(len(entries))
-	}
-
-	var prev *kvblock.EntryRef
-	for i := range entries {
-		ref := &entries[i]
-		// Another rank of an endpoint just folded at this key adds nothing
-		// to its chains.
-		if prev != nil && ref.PodOrdinal == prev.PodOrdinal && ref.TierOrdinal == prev.TierOrdinal &&
-			ref.Speculative == prev.Speculative {
+	a.singleTier = false
+	var scored collections.Bitset
+	for i := range snap.Tiers {
+		ts := &snap.Tiers[i]
+		tierPods := ts.Pods.Clone()
+		tierPods.And(&initMask)
+		if tierPods.IsEmpty() {
 			continue
 		}
-		prev = ref
-
-		s, ok := a.table.lookup(ref.PodOrdinal)
-		if !ok {
-			if !a.first || (a.filter.Len() > 0 && !a.filter.Has(ref.PodIdentifier)) {
-				continue // the first key fixes the candidate set
+		w := a.weightOf(ts.TierName, ts.TierOrd)
+		for ord := range tierPods.All() {
+			p := a.pod(ord)
+			if !scored.Has(ord) {
+				scored.Set(ord)
+				p.score = w
+			} else if w > p.score {
+				p.score = w
 			}
-			s = a.newSlot(ref.PodIdentifier)
-			a.table.insert(ref.PodOrdinal, s)
 		}
-		slot := &a.slots[s]
-		if !a.first && slot.matched != a.matchedKeys {
-			continue
-		}
-
-		tier, tierOrdinal := ref.DeviceTier, ref.TierOrdinal
-		if ref.Speculative || ref.DeviceTier == SpeculativeTier {
-			tier, tierOrdinal = SpeculativeTier, speculativeTierOrdinal
-		}
-
-		w := a.weightOf(tier, tierOrdinal)
-		switch {
-		case slot.seen != a.keyStamp:
-			slot.seen = a.keyStamp
-			slot.weight = w
-		case w > slot.weight:
-			slot.weight = w
-		}
-
-		if a.trackTiers && !a.stampTier(slot, tierOrdinal) && a.first {
-			slot.tiers = append(slot.tiers, tierChain{ordinal: tierOrdinal, name: tier, seen: a.keyStamp, alive: true})
+		if a.trackTiers {
+			a.appendTierChain(ts.TierOrd, ts.TierName, tierPods, 1)
 		}
 	}
-	alive := a.endKey()
-	if alive {
-		a.lastEntriesPtr = unsafe.SliceData(entries)
-		a.lastEntriesLen = len(entries)
+	for ord := range initMask.All() {
+		a.pod(ord).matched = 1
+	}
+	return true
+}
+
+func (a *prefixAccumulator) stepSingleTier(pos int, podMask *collections.Bitset) bool {
+	if podMask.ContainsAll(&a.activeMask) {
+		a.endPos = pos + 1
+		return true
+	}
+	if a.firstDropPos == 0 {
+		a.firstDropPos = a.endPos
+		a.activeMask.And(podMask)
 	} else {
-		a.lastEntriesPtr = nil
-		a.lastEntriesLen = 0
+		dropped := a.activeMask.AndNot(podMask)
+		dropCount := uint32(a.endPos)
+		for ord := range dropped.All() {
+			a.pod(ord).dropPos = dropCount
+		}
+		a.droppedMask.Or(&dropped)
+		a.activeMask.And(podMask)
 	}
-	return alive
+	if a.activeMask.IsEmpty() {
+		return false
+	}
+	a.endPos = pos + 1
+	return true
 }
 
-func (a *prefixAccumulator) flushPendingRun() {
-	run := a.pendingRun
-	a.pendingRun = 0
-	a.matchedKeys += run
-	for _, i := range a.active {
-		s := &a.slots[i]
-		s.matched += run
-		s.score += s.weight * float64(run)
-		for t := range s.tiers {
-			if s.tiers[t].alive {
-				s.tiers[t].count += run
+func (a *prefixAccumulator) transitionToMultiTier() {
+	a.singleTier = false
+	if a.trackTiers {
+		a.appendTierChain(a.fastTierOrd, a.fastTierName, a.activeMask.Clone(), 0)
+	}
+	for ord := range a.initMask.All() {
+		p := a.pod(ord)
+		var m uint32
+		switch {
+		case a.activeMask.Has(ord):
+			m = uint32(a.endPos)
+		case a.droppedMask.Has(ord):
+			m = p.dropPos
+		default:
+			m = uint32(a.firstDropPos)
+		}
+		p.matched = m
+		p.score = a.fastWeight * float64(m)
+		if a.trackTiers {
+			*a.tiers[0].countAt(a, ord) = m
+		}
+	}
+}
+
+func (a *prefixAccumulator) stepMultiTier(pos int, snap *kvblock.PodSnapshot) bool {
+	delta := uint32(pos + 1 - a.endPos)
+	a.activeMask.And(&snap.AllPods)
+	if a.activeMask.IsEmpty() {
+		if a.trackTiers {
+			for i := range a.tiers {
+				a.tiers[i].active = collections.Bitset{}
+			}
+		}
+		return false
+	}
+
+	if len(snap.Tiers) == 1 {
+		ts := &snap.Tiers[0]
+		w := a.weightOf(ts.TierName, ts.TierOrd) * float64(delta)
+		for ord := range a.activeMask.All() {
+			p := a.pod(ord)
+			p.matched += delta
+			p.score += w
+		}
+	} else {
+		var scored collections.Bitset
+		for i := range snap.Tiers {
+			ts := &snap.Tiers[i]
+			live := ts.Pods.Clone()
+			live.And(&a.activeMask)
+			if live.IsEmpty() {
+				continue
+			}
+			w := a.weightOf(ts.TierName, ts.TierOrd) * float64(delta)
+			for ord := range live.All() {
+				p := a.pod(ord)
+				if !scored.Has(ord) {
+					scored.Set(ord)
+					p.keyWeight = w
+				} else if w > p.keyWeight {
+					p.keyWeight = w
+				}
+			}
+		}
+		for ord := range a.activeMask.All() {
+			p := a.pod(ord)
+			p.matched += delta
+			p.score += p.keyWeight
+		}
+	}
+
+	if a.trackTiers {
+		for i := range a.tiers {
+			tc := &a.tiers[i]
+			if tc.active.IsEmpty() {
+				continue
+			}
+			ts := findTierSnapshot(snap.Tiers, tc.ord)
+			if ts == nil {
+				tc.active = collections.Bitset{}
+				continue
+			}
+			tc.active.And(&ts.Pods)
+			for ord := range tc.active.All() {
+				*tc.countAt(a, ord) += delta
 			}
 		}
 	}
+
+	a.endPos = pos + 1
+	return true
 }
 
-// stampTier marks tier as held at the current key and reports whether the
-// slot tracks that tier.
-func (a *prefixAccumulator) stampTier(slot *matchSlot, tierOrdinal uint32) bool {
-	for i := range slot.tiers {
-		if slot.tiers[i].ordinal == tierOrdinal {
-			slot.tiers[i].seen = a.keyStamp
-			return true
+func findTierSnapshot(tiers []kvblock.TierSnapshot, ord uint32) *kvblock.TierSnapshot {
+	for i := range tiers {
+		if tiers[i].TierOrd == ord {
+			return &tiers[i]
 		}
 	}
-	return false
-}
-
-// endKey closes the current key and reports whether any chain is still
-// alive.
-func (a *prefixAccumulator) endKey() bool {
-	if a.first {
-		a.first = false
-		for i := range a.slots {
-			s := &a.slots[i]
-			s.matched, s.score = 1, s.weight
-			for t := range s.tiers {
-				s.tiers[t].count = 1
-			}
-			a.active = append(a.active, int32(i))
-		}
-		if len(a.active) > 0 {
-			a.matchedKeys++
-		}
-		return len(a.active) > 0
-	}
-
-	keep := a.active[:0]
-	for _, i := range a.active {
-		s := &a.slots[i]
-		if s.seen != a.keyStamp {
-			continue // the chain ends at the first key the pod does not hold
-		}
-		s.matched++
-		s.score += s.weight
-		for t := range s.tiers {
-			tc := &s.tiers[t]
-			switch {
-			case !tc.alive:
-			case tc.seen == a.keyStamp:
-				tc.count++
-			default:
-				tc.alive = false
-			}
-		}
-		keep = append(keep, i)
-	}
-	a.active = keep
-	if len(a.active) > 0 {
-		a.matchedKeys++
-	}
-	return len(a.active) > 0
+	return nil
 }
 
 // result materializes the accumulated matches and the longest matched chain.
 func (a *prefixAccumulator) result() (map[string]PodMatch, int) {
-	if a.fastMode {
-		total := bits.OnesCount64(a.initMask[0]) + bits.OnesCount64(a.initMask[1]) +
-			bits.OnesCount64(a.initMask[2]) + bits.OnesCount64(a.initMask[3])
-		out := make(map[string]PodMatch, total)
-		if total == 0 {
-			return out, 0
-		}
+	if a.first {
+		return map[string]PodMatch{}, 0
+	}
+	total := a.initMask.Len()
+	out := make(map[string]PodMatch, total)
+	if a.singleTier {
 		wScore := a.fastWeight
-		endPos := a.fastEndPos
+		endPos := a.endPos
 		endByTier := singleTierMap(a.fastTierName, endPos)
 		endMatch := PodMatch{
 			WeightedScore: wScore * float64(endPos),
@@ -801,180 +682,115 @@ func (a *prefixAccumulator) result() (map[string]PodMatch, int) {
 			BlocksByTier:  endByTier,
 		}
 		if a.firstDropPos == 0 {
-			for w := range 4 {
-				word := a.initMask[w]
-				for word != 0 {
-					bit := bits.TrailingZeros64(word)
-					word &= word - 1
-					ord := uint32(w*64 + bit)
-					if endByTier == nil {
-						endMatch.BlocksByTier = map[string]int{a.fastTierName: endPos}
-					}
-					out[a.snapWalker.PodName(ord)] = endMatch
+			for ord := range a.initMask.All() {
+				if endByTier == nil {
+					endMatch.BlocksByTier = map[string]int{a.fastTierName: endPos}
 				}
+				out[a.podNameOf(ord)] = endMatch
 			}
 			return out, endPos
 		}
 
+		firstDropped := a.initMask.AndNot(&a.droppedMask)
+		firstDropped.ClearFrom(&a.activeMask)
 		firstByTier := singleTierMap(a.fastTierName, a.firstDropPos)
 		firstMatch := PodMatch{
 			WeightedScore: wScore * float64(a.firstDropPos),
 			MatchedBlocks: a.firstDropPos,
 			BlocksByTier:  firstByTier,
 		}
-		for w := range 4 {
-			word := a.initMask[w] &^ (a.droppedMask[w] | a.activeMask[w])
-			for word != 0 {
-				bit := bits.TrailingZeros64(word)
-				word &= word - 1
-				ord := uint32(w*64 + bit)
-				if firstByTier == nil {
-					firstMatch.BlocksByTier = map[string]int{a.fastTierName: a.firstDropPos}
-				}
-				out[a.snapWalker.PodName(ord)] = firstMatch
+		for ord := range firstDropped.All() {
+			if firstByTier == nil {
+				firstMatch.BlocksByTier = map[string]int{a.fastTierName: a.firstDropPos}
 			}
+			out[a.podNameOf(ord)] = firstMatch
 		}
-		for w := range 4 {
-			word := a.activeMask[w]
-			for word != 0 {
-				bit := bits.TrailingZeros64(word)
-				word &= word - 1
-				ord := uint32(w*64 + bit)
-				if endByTier == nil {
-					endMatch.BlocksByTier = map[string]int{a.fastTierName: endPos}
-				}
-				out[a.snapWalker.PodName(ord)] = endMatch
+		for ord := range a.activeMask.All() {
+			if endByTier == nil {
+				endMatch.BlocksByTier = map[string]int{a.fastTierName: endPos}
 			}
+			out[a.podNameOf(ord)] = endMatch
 		}
-		for w := range 4 {
-			word := a.droppedMask[w]
-			for word != 0 {
-				bit := bits.TrailingZeros64(word)
-				word &= word - 1
-				ord := uint32(w*64 + bit)
-				m := int(a.dropPos[ord])
-				byTier := singleTierMap(a.fastTierName, m)
-				if byTier == nil {
-					byTier = map[string]int{a.fastTierName: m}
-				}
-				out[a.snapWalker.PodName(ord)] = PodMatch{
-					WeightedScore: wScore * float64(m),
-					MatchedBlocks: m,
-					BlocksByTier:  byTier,
-				}
+		for ord := range a.droppedMask.All() {
+			m := int(a.pod(ord).dropPos)
+			byTier := singleTierMap(a.fastTierName, m)
+			if byTier == nil {
+				byTier = map[string]int{a.fastTierName: m}
+			}
+			out[a.podNameOf(ord)] = PodMatch{
+				WeightedScore: wScore * float64(m),
+				MatchedBlocks: m,
+				BlocksByTier:  byTier,
 			}
 		}
 		return out, endPos
 	}
-	if a.pendingRun > 0 {
-		a.flushPendingRun()
-	}
-	out := make(map[string]PodMatch, len(a.slots))
-	longest := 0
-	for i := range a.slots {
-		s := &a.slots[i]
-		if s.matched > longest {
-			longest = s.matched
-		}
+
+	for ord := range a.initMask.All() {
+		p := a.pod(ord)
+		m := int(p.matched)
 		var byTier map[string]int
-		if len(s.tiers) == 1 {
-			byTier = singleTierMap(s.tiers[0].name, s.tiers[0].count)
-		}
-		if byTier == nil {
-			byTier = make(map[string]int, len(s.tiers))
-			for _, tc := range s.tiers {
-				byTier[tc.name] = tc.count
+		if len(a.tiers) == 1 {
+			c := int(*a.tiers[0].countAt(a, ord))
+			byTier = singleTierMap(a.tiers[0].name, c)
+			if byTier == nil {
+				byTier = map[string]int{a.tiers[0].name: c}
+			}
+		} else {
+			byTier = make(map[string]int, len(a.tiers))
+			for i := range a.tiers {
+				if c := int(*a.tiers[i].countAt(a, ord)); c > 0 {
+					byTier[a.tiers[i].name] = c
+				}
 			}
 		}
-		out[s.pod] = PodMatch{WeightedScore: s.score, MatchedBlocks: s.matched, BlocksByTier: byTier}
+		out[a.podNameOf(ord)] = PodMatch{
+			WeightedScore: p.score,
+			MatchedBlocks: m,
+			BlocksByTier:  byTier,
+		}
 	}
-	return out, longest
+	return out, a.endPos
 }
 
 // scores materializes the accumulated weighted scores and the longest
 // matched chain length without allocating per-pod tier maps.
 func (a *prefixAccumulator) scores() (map[string]float64, int) {
-	if a.fastMode {
-		total := bits.OnesCount64(a.initMask[0]) + bits.OnesCount64(a.initMask[1]) +
-			bits.OnesCount64(a.initMask[2]) + bits.OnesCount64(a.initMask[3])
-		out := make(map[string]float64, total)
-		if total == 0 {
-			return out, 0
-		}
+	if a.first {
+		return map[string]float64{}, 0
+	}
+	total := a.initMask.Len()
+	out := make(map[string]float64, total)
+	if a.singleTier {
 		wScore := a.fastWeight
-		endPos := a.fastEndPos
+		endPos := a.endPos
 		endScore := wScore * float64(endPos)
 		if a.firstDropPos == 0 {
-			for w := range 4 {
-				word := a.initMask[w]
-				for word != 0 {
-					bit := bits.TrailingZeros64(word)
-					word &= word - 1
-					ord := uint32(w*64 + bit)
-					out[a.snapWalker.PodName(ord)] = endScore
-				}
+			for ord := range a.initMask.All() {
+				out[a.podNameOf(ord)] = endScore
 			}
 			return out, endPos
 		}
 
+		firstDropped := a.initMask.AndNot(&a.droppedMask)
+		firstDropped.ClearFrom(&a.activeMask)
 		firstScore := wScore * float64(a.firstDropPos)
-		for w := range 4 {
-			word := a.initMask[w] &^ (a.droppedMask[w] | a.activeMask[w])
-			for word != 0 {
-				bit := bits.TrailingZeros64(word)
-				word &= word - 1
-				ord := uint32(w*64 + bit)
-				out[a.snapWalker.PodName(ord)] = firstScore
-			}
+		for ord := range firstDropped.All() {
+			out[a.podNameOf(ord)] = firstScore
 		}
-		for w := range 4 {
-			word := a.activeMask[w]
-			for word != 0 {
-				bit := bits.TrailingZeros64(word)
-				word &= word - 1
-				ord := uint32(w*64 + bit)
-				out[a.snapWalker.PodName(ord)] = endScore
-			}
+		for ord := range a.activeMask.All() {
+			out[a.podNameOf(ord)] = endScore
 		}
-		for w := range 4 {
-			word := a.droppedMask[w]
-			for word != 0 {
-				bit := bits.TrailingZeros64(word)
-				word &= word - 1
-				ord := uint32(w*64 + bit)
-				m := int(a.dropPos[ord])
-				out[a.snapWalker.PodName(ord)] = wScore * float64(m)
-			}
+		for ord := range a.droppedMask.All() {
+			out[a.podNameOf(ord)] = wScore * float64(a.pod(ord).dropPos)
 		}
 		return out, endPos
 	}
-	if a.pendingRun > 0 {
-		a.flushPendingRun()
-	}
-	out := make(map[string]float64, len(a.slots))
-	longest := 0
-	for i := range a.slots {
-		s := &a.slots[i]
-		out[s.pod] = s.score
-		if s.matched > longest {
-			longest = s.matched
-		}
-	}
-	return out, longest
-}
 
-// newSlot appends a candidate, reusing a pooled slot's tier storage when one
-// is available.
-func (a *prefixAccumulator) newSlot(pod string) int32 {
-	n := len(a.slots)
-	if n < cap(a.slots) {
-		a.slots = a.slots[:n+1]
-		s := &a.slots[n]
-		*s = matchSlot{pod: pod, tiers: s.tiers[:0]}
-	} else {
-		a.slots = append(a.slots, matchSlot{pod: pod})
+	for ord := range a.initMask.All() {
+		out[a.podNameOf(ord)] = a.pod(ord).score
 	}
-	return int32(n)
+	return out, a.endPos
 }
 
 // weightOf resolves a tier's weight, caching by ordinal so the configured

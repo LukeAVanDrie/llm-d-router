@@ -60,10 +60,6 @@ type PodSnapshot struct {
 	// AllPods has bit PodOrdinal set for every entry in Entries across tiers.
 	AllPods collections.Bitset
 	tierBuf [1]TierSnapshot
-	PodMask   [4]uint64
-	TierOrd   uint32
-	TierName  string
-	MaskValid bool
 }
 
 func effectiveTier(e *EntryRef) (name string, ord uint32) {
@@ -88,8 +84,6 @@ func BuildPodSnapshot(entries []EntryRef) *PodSnapshot {
 		TierOrd:  ord0,
 	}
 	singleTier := true
-	maskValid := true
-	var podMask [4]uint64
 	for i := range entries {
 		e := &entries[i]
 		_, tOrd := effectiveTier(e)
@@ -98,21 +92,10 @@ func BuildPodSnapshot(entries []EntryRef) *PodSnapshot {
 			break
 		}
 		snap.tierBuf[0].Pods.Set(int(e.PodOrdinal))
-		if e.PodOrdinal < 256 {
-			podMask[e.PodOrdinal>>6] |= uint64(1) << (e.PodOrdinal & 63)
-		} else {
-			maskValid = false
-		}
 	}
 	if singleTier {
 		snap.Tiers = snap.tierBuf[:1]
 		snap.AllPods = snap.tierBuf[0].Pods
-		if maskValid {
-			snap.PodMask = podMask
-			snap.TierOrd = ord0
-			snap.TierName = name0
-			snap.MaskValid = true
-		}
 		return snap
 	}
 
