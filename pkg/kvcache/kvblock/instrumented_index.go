@@ -26,20 +26,24 @@ type instrumentedIndex struct {
 	next Index
 }
 
-// instrumentedWalker carries the KeyWalker capability of the wrapped index.
+// instrumentedWalker carries the KeyWalker and SnapshotWalker capabilities of
+// the wrapped index.
 type instrumentedWalker struct {
 	*instrumentedIndex
-	walker KeyWalker
+	walker     KeyWalker
+	snapWalker SnapshotWalker
 }
 
 // NewInstrumentedIndex wraps an Index and emits metrics for Add, Evict,
-// Lookup, and WalkKeys. The wrapper is a KeyWalker exactly when next is one.
-// Read metrics count and time Lookup and WalkKeys calls; contiguous-chain
-// hit metrics are recorded by the kvcache matcher.
+// Lookup, WalkKeys, and WalkSnapshots. The wrapper implements KeyWalker and
+// SnapshotWalker when next implements KeyWalker. Read metrics count and time
+// Lookup, WalkKeys, and WalkSnapshots calls; contiguous-chain hit metrics are
+// recorded by the kvcache matcher.
 func NewInstrumentedIndex(next Index) Index {
 	m := &instrumentedIndex{next: next}
 	if walker, ok := next.(KeyWalker); ok {
-		return &instrumentedWalker{instrumentedIndex: m, walker: walker}
+		sw, _ := next.(SnapshotWalker)
+		return &instrumentedWalker{instrumentedIndex: m, walker: walker, snapWalker: sw}
 	}
 	return m
 }
@@ -79,6 +83,34 @@ func (m *instrumentedWalker) WalkKeys(ctx context.Context, requestKeys []BlockHa
 	metrics.LookupRequests.Inc()
 
 	return m.walker.WalkKeys(ctx, requestKeys, visit)
+}
+
+// WalkSnapshots forwards the snapshot walk as a lookup request.
+func (m *instrumentedWalker) WalkSnapshots(ctx context.Context, requestKeys []BlockHash,
+	visit func(pos int, snap *PodSnapshot) bool,
+) error {
+	timer := prometheus.NewTimer(metrics.LookupLatency)
+	defer timer.ObserveDuration()
+
+	metrics.LookupRequests.Inc()
+
+	if m.snapWalker != nil {
+		return m.snapWalker.WalkSnapshots(ctx, requestKeys, visit)
+	}
+	return m.walker.WalkKeys(ctx, requestKeys, func(pos int, found bool, entries []EntryRef) bool {
+		if !found {
+			return visit(pos, nil)
+		}
+		return visit(pos, BuildPodSnapshot(entries))
+	})
+}
+
+// PodName returns the pod identifier assigned to ord.
+func (m *instrumentedWalker) PodName(ord uint32) string {
+	if m.snapWalker != nil {
+		return m.snapWalker.PodName(ord)
+	}
+	return ""
 }
 
 func (m *instrumentedIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error) {

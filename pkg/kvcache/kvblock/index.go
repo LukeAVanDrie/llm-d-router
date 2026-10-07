@@ -207,10 +207,16 @@ func engineToRequestMapping(engineKeys, requestKeys []BlockHash) map[BlockHash][
 		return mappings
 	}
 	n := max(len(engineKeys), len(requestKeys))
-	for i := 0; i < n; i++ {
+	backing := make([]BlockHash, n)
+	for i := range n {
 		ek := engineKeys[i*len(engineKeys)/n]
 		rk := requestKeys[i*len(requestKeys)/n]
-		mappings[ek] = append(mappings[ek], rk)
+		backing[i] = rk
+		if existing, ok := mappings[ek]; ok {
+			mappings[ek] = append(existing, rk)
+		} else {
+			mappings[ek] = backing[i : i+1 : i+1]
+		}
 	}
 	return mappings
 }
