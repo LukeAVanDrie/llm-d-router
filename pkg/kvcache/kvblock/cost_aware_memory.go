@@ -77,7 +77,7 @@ func NewCostAwareMemoryIndex(cfg *CostAwareMemoryIndexConfig) (*CostAwareMemoryI
 
 	index := &CostAwareMemoryIndex{
 		requestKeys: requestKeys,
-		keyIndex:    make(map[string]struct{}),
+		keyIndex:    make(map[BlockHash]struct{}),
 	}
 
 	// OnEvict/OnReject fire from ristretto's processing goroutine whenever an entry
@@ -86,7 +86,7 @@ func NewCostAwareMemoryIndex(cfg *CostAwareMemoryIndexConfig) (*CostAwareMemoryI
 	// with every key ever added. The callback takes keyIndexMu only — never mu —
 	// because Add holds mu while blocking in data.Wait(), which is what drains the
 	// buffer that triggers these callbacks; taking mu here would deadlock.
-	cache, err := ristretto.NewCache(&ristretto.Config[string, *CostPodCache]{
+	cache, err := ristretto.NewCache(&ristretto.Config[uint64, *CostPodCache]{
 		NumCounters: numCounters,        // number of keys to track.
 		MaxCost:     int64(sizeBytes),   //#nosec G115 -- maximum cost of cache
 		BufferItems: defaultBufferItems, // number of keys per Get buffer.
@@ -110,15 +110,15 @@ func NewCostAwareMemoryIndex(cfg *CostAwareMemoryIndexConfig) (*CostAwareMemoryI
 // both the requestKey entry and its engineKey mapping to avoid dangling keys.
 type CostAwareMemoryIndex struct {
 	// data holds the mapping of request keys to sets of pod identifiers.
-	data *ristretto.Cache[string, *CostPodCache]
+	data *ristretto.Cache[uint64, *CostPodCache]
 	// requestKeys holds the mapping of engine keys to request keys.
 	requestKeys *lru.Cache[BlockHash, []BlockHash]
-	// keyIndex tracks live request-key strings so Clear can enumerate them
+	// keyIndex tracks live request keys so Clear can enumerate them
 	// (ristretto exposes no iteration). Kept bounded to the live cost-cache set by
 	// onCostCacheRemoval, which prunes a key when ristretto evicts or rejects it.
 	// Guarded by keyIndexMu (not mu) so the ristretto callback can prune without
 	// deadlocking against Add's data.Wait().
-	keyIndex map[string]struct{}
+	keyIndex map[BlockHash]struct{}
 	// keyIndexMu guards keyIndex independently of mu.
 	keyIndexMu sync.Mutex
 	// mu protects concurrent access to the index operations
@@ -128,32 +128,32 @@ type CostAwareMemoryIndex struct {
 // onCostCacheRemoval prunes keyIndex when ristretto evicts or rejects an entry.
 // It runs on ristretto's processing goroutine, so it must take keyIndexMu only —
 // never mu. The Item carries only the hashed key, so it recovers the original
-// request-key string from the cached value's key field.
+// request key from the cached value's key field.
 func (m *CostAwareMemoryIndex) onCostCacheRemoval(item *ristretto.Item[*CostPodCache]) {
-	if item == nil || item.Value == nil || item.Value.key == "" {
+	if item == nil || item.Value == nil || item.Value.key == EmptyBlockHash {
 		return
 	}
 	m.removeKeyIndex(item.Value.key)
 }
 
-func (m *CostAwareMemoryIndex) addKeyIndex(keyStr string) {
+func (m *CostAwareMemoryIndex) addKeyIndex(key BlockHash) {
 	m.keyIndexMu.Lock()
-	m.keyIndex[keyStr] = struct{}{}
+	m.keyIndex[key] = struct{}{}
 	m.keyIndexMu.Unlock()
 }
 
-func (m *CostAwareMemoryIndex) removeKeyIndex(keyStr string) {
+func (m *CostAwareMemoryIndex) removeKeyIndex(key BlockHash) {
 	m.keyIndexMu.Lock()
-	delete(m.keyIndex, keyStr)
+	delete(m.keyIndex, key)
 	m.keyIndexMu.Unlock()
 }
 
 // snapshotKeyIndex returns a copy of the live request keys so Clear can scan them
 // without holding keyIndexMu (or mu) for the whole pass.
-func (m *CostAwareMemoryIndex) snapshotKeyIndex() []string {
+func (m *CostAwareMemoryIndex) snapshotKeyIndex() []BlockHash {
 	m.keyIndexMu.Lock()
 	defer m.keyIndexMu.Unlock()
-	keys := make([]string, 0, len(m.keyIndex))
+	keys := make([]BlockHash, 0, len(m.keyIndex))
 	for k := range m.keyIndex {
 		keys = append(keys, k)
 	}
@@ -164,29 +164,110 @@ func (m *CostAwareMemoryIndex) MaxCost() int64 {
 	return m.data.MaxCost()
 }
 
-// CostPodCache wraps a sync.Map of PodEntry and provides cost calculation for memory usage estimation.
+const (
+	costPodCacheStructOverhead = 64
+	podEntryFixedOverhead      = 32 + 8 + 24 // string headers (32) + struct alignment (8) + map entry overhead (24)
+)
+
+func podEntryByteSize(entry PodEntry) int64 {
+	return podEntryFixedOverhead + int64(len(entry.PodIdentifier)+len(entry.DeviceTier))
+}
+
+func decimalDigits(v uint64) int {
+	n := 1
+	for v >= 10000 {
+		v /= 10000
+		n += 4
+	}
+	for v >= 10 {
+		v /= 10
+		n++
+	}
+	return n
+}
+
+// CostPodCache holds a set of PodEntry records for one request key and tracks
+// its estimated byte size in O(1) for Ristretto cost calculation.
 type CostPodCache struct {
-	cache sync.Map // map[PodEntry]struct{}
+	mu    sync.RWMutex
+	cache map[PodEntry]struct{}
 	// size tracks the number of entries in cache for O(1) Len().
 	size atomic.Int64
-	// key is the request-key string this cache is stored under. It is captured so
+	// entryBytes tracks the cumulative byte size of all entries in cache.
+	entryBytes atomic.Int64
+	// key is the request key this cache is stored under. It is captured so
 	// the ristretto OnEvict/OnReject callback can prune keyIndex — the callback's
-	// Item carries only the hashed key, not the original string.
-	key string
+	// Item carries only the hashed key, not the original key.
+	key BlockHash
 }
 
 // Add adds a PodEntry to the cache.
 func (c *CostPodCache) Add(entry PodEntry) {
-	if _, loaded := c.cache.LoadOrStore(entry, struct{}{}); !loaded {
-		c.size.Add(1)
+	c.mu.Lock()
+	if c.cache == nil {
+		c.cache = make(map[PodEntry]struct{})
 	}
+	if _, loaded := c.cache[entry]; !loaded {
+		c.cache[entry] = struct{}{}
+		c.size.Add(1)
+		c.entryBytes.Add(podEntryByteSize(entry))
+	}
+	c.mu.Unlock()
+}
+
+func (c *CostPodCache) addEntries(entries []PodEntry) {
+	c.mu.Lock()
+	if c.cache == nil {
+		c.cache = make(map[PodEntry]struct{}, len(entries))
+	}
+	var addedCount, addedBytes int64
+	for _, entry := range entries {
+		if _, loaded := c.cache[entry]; !loaded {
+			c.cache[entry] = struct{}{}
+			addedCount++
+			addedBytes += podEntryByteSize(entry)
+		}
+	}
+	if addedCount != 0 {
+		c.size.Add(addedCount)
+		c.entryBytes.Add(addedBytes)
+	}
+	c.mu.Unlock()
 }
 
 // Delete removes a PodEntry from the cache.
 func (c *CostPodCache) Delete(entry PodEntry) {
-	if _, loaded := c.cache.LoadAndDelete(entry); loaded {
+	c.mu.Lock()
+	if _, loaded := c.cache[entry]; loaded {
+		delete(c.cache, entry)
 		c.size.Add(-1)
+		c.entryBytes.Add(-podEntryByteSize(entry))
 	}
+	c.mu.Unlock()
+}
+
+func (c *CostPodCache) deleteEntries(entries []PodEntry) (int, int) {
+	c.mu.Lock()
+	before := len(c.cache)
+	if before == 0 {
+		c.mu.Unlock()
+		return 0, 0
+	}
+	var removedCount, removedBytes int64
+	for _, entry := range entries {
+		if _, loaded := c.cache[entry]; loaded {
+			delete(c.cache, entry)
+			removedCount++
+			removedBytes += podEntryByteSize(entry)
+		}
+	}
+	if removedCount != 0 {
+		c.size.Add(-removedCount)
+		c.entryBytes.Add(-removedBytes)
+	}
+	after := len(c.cache)
+	c.mu.Unlock()
+	return before, after
 }
 
 // Len returns the number of entries in the cache.
@@ -197,40 +278,67 @@ func (c *CostPodCache) Len() int {
 // CalculateByteSize estimates memory usage for ristretto cost calculation.
 // This is an approximation used for cache eviction decisions.
 func (c *CostPodCache) CalculateByteSize(keyStr string) int64 {
-	var totalBytes int64
-	var entryCount int64
+	return costPodCacheStructOverhead + int64(len(keyStr)) + c.entryBytes.Load()
+}
 
-	// Key string memory usage
-	totalBytes += int64(len(keyStr))
-
-	// CostPodCache struct overhead (sync.Map overhead)
-	totalBytes += 64 // approximate sync.Map overhead
-
-	// Count entries and calculate their size
-	c.cache.Range(func(key, value interface{}) bool {
-		entry, ok := key.(PodEntry)
-		if !ok {
-			return true
-		}
-
-		entryCount++
-		totalBytes += int64(len(entry.PodIdentifier)) // PodIdentifier string content
-		totalBytes += int64(len(entry.DeviceTier))    // DeviceTier string content
-		totalBytes += 32                              // string headers (16 bytes each for 2 strings)
-		totalBytes += 8                               // struct padding/alignment
-		return true
-	})
-
-	// sync.Map overhead estimation
-	if entryCount > 0 {
-		// Map overhead: assuming 24 bytes per entry (key+value+metadata in sync.Map)
-		totalBytes += entryCount * 24
-	}
-
-	return totalBytes
+func (c *CostPodCache) byteCost(key BlockHash) int64 {
+	return costPodCacheStructOverhead + int64(decimalDigits(uint64(key))) + c.entryBytes.Load()
 }
 
 var _ Index = &CostAwareMemoryIndex{}
+
+func hasDuplicateBlockHashes(keys []BlockHash) bool {
+	for i := 1; i < len(keys); i++ {
+		for j := range i {
+			if keys[i] == keys[j] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (m *CostAwareMemoryIndex) addEngineKeyMappings(engineKeys, requestKeys []BlockHash) {
+	if len(engineKeys) == 0 || len(requestKeys) == 0 {
+		return
+	}
+	if len(engineKeys) <= 64 && !hasDuplicateBlockHashes(engineKeys) {
+		switch {
+		case len(engineKeys) == len(requestKeys):
+			backing := make([]BlockHash, len(requestKeys))
+			copy(backing, requestKeys)
+			for i, ek := range engineKeys {
+				m.requestKeys.Add(ek, backing[i:i+1:i+1])
+			}
+			return
+		case len(engineKeys) > len(requestKeys):
+			n := len(engineKeys)
+			backing := make([]BlockHash, n)
+			for i, ek := range engineKeys {
+				backing[i] = requestKeys[i*len(requestKeys)/n]
+				m.requestKeys.Add(ek, backing[i:i+1:i+1])
+			}
+			return
+		default:
+			n := len(requestKeys)
+			backing := make([]BlockHash, n)
+			copy(backing, requestKeys)
+			start := 0
+			for i := 1; i <= n; i++ {
+				if i == n || (i*len(engineKeys)/n) != ((i-1)*len(engineKeys)/n) {
+					ek := engineKeys[(i-1)*len(engineKeys)/n]
+					m.requestKeys.Add(ek, backing[start:i:i])
+					start = i
+				}
+			}
+			return
+		}
+	}
+	mappings := engineToRequestMapping(engineKeys, requestKeys)
+	for ek, rks := range mappings {
+		m.requestKeys.Add(ek, rks)
+	}
+}
 
 // Add adds a set of keys and their associated pod entries to the index backend.
 // If engineKeys is nil, only requestKey -> PodEntry mappings are created (no engineKey -> requestKey mapping).
@@ -244,7 +352,11 @@ func (m *CostAwareMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys 
 		return fmt.Errorf("no keys or entries provided for adding to index")
 	}
 
-	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.CostAwareMemoryIndex.Add")
+	traceLogger := log.FromContext(ctx).V(logging.TRACE)
+	traceEnabled := traceLogger.Enabled()
+	if traceEnabled {
+		traceLogger = traceLogger.WithName("kvblock.CostAwareMemoryIndex.Add")
+	}
 
 	// Build engine->request mappings when engine keys are provided.
 	// The ratio of array lengths determines the mapping type:
@@ -252,29 +364,29 @@ func (m *CostAwareMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys 
 	//   many:1 (4 eng, 1 req) -> E0->R0, E1->R0, E2->R0, E3->R0
 	//   1:many (1 eng, 4 req) -> E0->[R0, R1, R2, R3]
 	if engineKeys != nil {
-		mappings := engineToRequestMapping(engineKeys, requestKeys)
-		for ek, rks := range mappings {
-			m.requestKeys.Add(ek, rks)
-		}
+		m.addEngineKeyMappings(engineKeys, requestKeys)
 	}
 
 	// Store requestKey -> PodCache mappings for all request keys.
 	for _, requestKey := range requestKeys {
-		keyStr := requestKey.String()
-		podCache, found := m.data.Get(keyStr)
+		rawKey := uint64(requestKey)
+		podCache, found := m.data.Get(rawKey)
 		if !found {
-			podCache = &CostPodCache{key: keyStr}
+			podCache = &CostPodCache{
+				cache: make(map[PodEntry]struct{}, len(entries)),
+				key:   requestKey,
+			}
 		}
 
-		for _, entry := range entries {
-			podCache.Add(entry)
-		}
+		podCache.addEntries(entries)
 
 		// Calculate the actual cost for this cache entry
-		cost := podCache.CalculateByteSize(keyStr)
-		m.data.Set(keyStr, podCache, cost)
-		m.addKeyIndex(keyStr)
-		traceLogger.Info("added pods to key", "requestKey", requestKey, "pods", entries, "cost-bytes", cost)
+		cost := podCache.byteCost(requestKey)
+		m.data.Set(rawKey, podCache, cost)
+		m.addKeyIndex(requestKey)
+		if traceEnabled {
+			traceLogger.Info("added pods to key", "requestKey", requestKey, "pods", entries, "cost-bytes", cost)
+		}
 	}
 	m.data.Wait()
 	return nil
@@ -290,47 +402,51 @@ func (m *CostAwareMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHa
 		return nil, fmt.Errorf("no keys provided for lookup")
 	}
 
-	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.CostAwareMemoryIndex.Lookup")
+	traceLogger := log.FromContext(ctx).V(logging.TRACE)
+	traceEnabled := traceLogger.Enabled()
+	if traceEnabled {
+		traceLogger = traceLogger.WithName("kvblock.CostAwareMemoryIndex.Lookup")
+	}
 
 	podsPerKey := make(map[BlockHash][]PodEntry)
 	highestHitIdx := 0
+	filterByPods := podIdentifierSet.Len() > 0
 
 	for idx, key := range requestKeys {
-		keyStr := key.String()
-		if pods, found := m.data.Get(keyStr); found { //nolint:nestif // TODO: can this be optimized?
+		if pods, found := m.data.Get(uint64(key)); found { //nolint:nestif // lookup path branches on hit/empty/filter
 			if pods == nil || pods.Len() == 0 {
-				traceLogger.Info("no pods found for key, cutting search", "key", key)
+				if traceEnabled {
+					traceLogger.Info("no pods found for key, cutting search", "key", key)
+				}
 				return podsPerKey, nil // early stop since prefix-chain breaks here
 			}
 
 			highestHitIdx = idx
 
-			if podIdentifierSet.Len() == 0 {
-				// If no pod identifiers are provided, return all pods
-				pods.cache.Range(func(k, value interface{}) bool {
-					if pod, ok := k.(PodEntry); ok {
+			pods.mu.RLock()
+			if !filterByPods {
+				list := make([]PodEntry, 0, len(pods.cache))
+				for pod := range pods.cache {
+					list = append(list, pod)
+				}
+				podsPerKey[key] = list
+			} else {
+				for pod := range pods.cache {
+					if podIdentifierSet.Has(pod.PodIdentifier) {
 						podsPerKey[key] = append(podsPerKey[key], pod)
 					}
-					return true
-				})
-			} else {
-				// Filter pods based on the provided pod identifiers
-				pods.cache.Range(func(k, value interface{}) bool {
-					if pod, ok := k.(PodEntry); ok {
-						if podIdentifierSet.Has(pod.PodIdentifier) {
-							podsPerKey[key] = append(podsPerKey[key], pod)
-						}
-					}
-					return true
-				})
+				}
 			}
-		} else {
+			pods.mu.RUnlock()
+		} else if traceEnabled {
 			traceLogger.Info("key not found in index", "key", key)
 		}
 	}
 
-	traceLogger.Info("lookup completed", "highest-hit-index", highestHitIdx,
-		"pods-per-key", podsPerKeyPrintHelper(podsPerKey))
+	if traceEnabled {
+		traceLogger.Info("lookup completed", "highest-hit-index", highestHitIdx,
+			"pods-per-key", podsPerKeyPrintHelper(podsPerKey))
+	}
 
 	return podsPerKey, nil
 }
@@ -346,21 +462,27 @@ func (m *CostAwareMemoryIndex) Evict(ctx context.Context, key BlockHash, keyType
 		return fmt.Errorf("no entries provided for eviction from index")
 	}
 
-	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.CostAwareMemoryIndex.Evict")
+	traceLogger := log.FromContext(ctx).V(logging.TRACE)
+	traceEnabled := traceLogger.Enabled()
+	if traceEnabled {
+		traceLogger = traceLogger.WithName("kvblock.CostAwareMemoryIndex.Evict")
+	}
 
 	switch keyType {
 	case EngineKey:
 		rks, found := m.requestKeys.Get(key)
 		if !found {
-			traceLogger.Info("engineKey not found in mapping, nothing to evict", "engineKey", key)
+			if traceEnabled {
+				traceLogger.Info("engineKey not found in mapping, nothing to evict", "engineKey", key)
+			}
 			return nil
 		}
 		for _, rk := range rks {
-			m.evictPodsFromRequestKey(rk, key, entries, traceLogger)
+			m.evictPodsFromRequestKey(rk, key, entries, traceLogger, traceEnabled)
 		}
 		allEmpty := true
 		for _, rk := range rks {
-			if pc, found := m.data.Get(rk.String()); found && pc != nil && pc.Len() > 0 {
+			if pc, found := m.data.Get(uint64(rk)); found && pc != nil && pc.Len() > 0 {
 				allEmpty = false
 				break
 			}
@@ -371,7 +493,7 @@ func (m *CostAwareMemoryIndex) Evict(ctx context.Context, key BlockHash, keyType
 		m.data.Wait()
 		return nil
 	case RequestKey:
-		m.evictPodsFromRequestKey(key, EmptyBlockHash, entries, traceLogger)
+		m.evictPodsFromRequestKey(key, EmptyBlockHash, entries, traceLogger, traceEnabled)
 		m.data.Wait()
 		return nil
 	default:
@@ -382,28 +504,30 @@ func (m *CostAwareMemoryIndex) Evict(ctx context.Context, key BlockHash, keyType
 // evictPodsFromRequestKey removes the given pod entries from a single request key's cache.
 // If the cache becomes empty, the request key is removed from the index.
 func (m *CostAwareMemoryIndex) evictPodsFromRequestKey(
-	requestKey, engineKey BlockHash, entries []PodEntry, traceLogger logr.Logger,
+	requestKey, engineKey BlockHash, entries []PodEntry, traceLogger logr.Logger, traceEnabled bool,
 ) {
-	keyStr := requestKey.String()
-	podCache, found := m.data.Get(keyStr)
+	rawKey := uint64(requestKey)
+	podCache, found := m.data.Get(rawKey)
 	if !found || podCache == nil {
-		traceLogger.Info("requestKey not found in index, nothing to evict", "requestKey", requestKey, "engineKey", engineKey)
+		if traceEnabled {
+			traceLogger.Info("requestKey not found in index, nothing to evict", "requestKey", requestKey, "engineKey", engineKey)
+		}
 		return
 	}
 
-	podCacheLenBefore := podCache.Len()
+	podCacheLenBefore, podCacheLenAfter := podCache.deleteEntries(entries)
 
-	for _, entry := range entries {
-		podCache.Delete(entry)
-	}
-
-	if podCache.Len() == 0 {
-		m.data.Del(keyStr)
-		m.removeKeyIndex(keyStr)
-		traceLogger.Info("removed requestKey from index as no pods remain", "requestKey", requestKey)
-	} else if podCacheLenBefore != podCache.Len() {
-		m.data.Set(keyStr, podCache, podCache.CalculateByteSize(keyStr))
-		traceLogger.Info("evicted pods from key", "requestKey", requestKey, "engineKey", engineKey, "pods", entries)
+	if podCacheLenAfter == 0 {
+		m.data.Del(rawKey)
+		m.removeKeyIndex(requestKey)
+		if traceEnabled {
+			traceLogger.Info("removed requestKey from index as no pods remain", "requestKey", requestKey)
+		}
+	} else if podCacheLenBefore != podCacheLenAfter {
+		m.data.Set(rawKey, podCache, podCache.byteCost(requestKey))
+		if traceEnabled {
+			traceLogger.Info("evicted pods from key", "requestKey", requestKey, "engineKey", engineKey, "pods", entries)
+		}
 	}
 }
 
@@ -422,7 +546,11 @@ func (m *CostAwareMemoryIndex) evictPodsFromRequestKey(
 // prefix chain in Lookup. Reverse-pruning it would need an O(M) scan for no
 // correctness gain.
 func (m *CostAwareMemoryIndex) Clear(ctx context.Context, podIdentifier string) error {
-	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.CostAwareMemoryIndex.Clear")
+	traceLogger := log.FromContext(ctx).V(logging.TRACE)
+	traceEnabled := traceLogger.Enabled()
+	if traceEnabled {
+		traceLogger = traceLogger.WithName("kvblock.CostAwareMemoryIndex.Clear")
+	}
 
 	keys := m.snapshotKeyIndex()
 
@@ -433,47 +561,51 @@ func (m *CostAwareMemoryIndex) Clear(ctx context.Context, podIdentifier string) 
 	}
 
 	m.data.Wait()
-	traceLogger.Info("cleared pod from index", "pod", podIdentifier, "scanned", len(keys))
+	if traceEnabled {
+		traceLogger.Info("cleared pod from index", "pod", podIdentifier, "scanned", len(keys))
+	}
 	return nil
 }
 
 // clearChunk removes the pod's entries from one chunk of request keys under a
 // single mu hold, bounding how long Clear blocks the Lookup/Add path.
-func (m *CostAwareMemoryIndex) clearChunk(podIdentifier string, keys []string) {
+func (m *CostAwareMemoryIndex) clearChunk(podIdentifier string, keys []BlockHash) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	for _, keyStr := range keys {
-		podCache, found := m.data.Get(keyStr)
+	for _, key := range keys {
+		rawKey := uint64(key)
+		podCache, found := m.data.Get(rawKey)
 		if !found || podCache == nil {
-			m.removeKeyIndex(keyStr) // ristretto dropped it under us; drop the stale key
+			m.removeKeyIndex(key) // ristretto dropped it under us; drop the stale key
 			continue
 		}
 
-		// Collect-then-delete: sync.Map.Range tolerates deletes by f, but collecting
-		// first keeps the deletion explicit and the iteration simple.
-		var matched []PodEntry
-		podCache.cache.Range(func(k, _ any) bool {
-			if entry, ok := k.(PodEntry); ok && entry.PodIdentifier == podIdentifier {
-				matched = append(matched, entry)
+		podCache.mu.Lock()
+		var removedCount, removedBytes int64
+		for entry := range podCache.cache {
+			if entry.PodIdentifier == podIdentifier {
+				delete(podCache.cache, entry)
+				removedCount++
+				removedBytes += podEntryByteSize(entry)
 			}
-			return true
-		})
-		if len(matched) == 0 {
+		}
+		if removedCount != 0 {
+			podCache.size.Add(-removedCount)
+			podCache.entryBytes.Add(-removedBytes)
+		}
+		remaining := len(podCache.cache)
+		podCache.mu.Unlock()
+
+		if removedCount == 0 {
 			continue
 		}
 
-		lenBefore := podCache.Len()
-		for _, entry := range matched {
-			podCache.Delete(entry)
-		}
-
-		switch {
-		case podCache.Len() == 0:
-			m.data.Del(keyStr)
-			m.removeKeyIndex(keyStr)
-		case podCache.Len() != lenBefore:
-			m.data.Set(keyStr, podCache, podCache.CalculateByteSize(keyStr))
+		if remaining == 0 {
+			m.data.Del(rawKey)
+			m.removeKeyIndex(key)
+		} else {
+			m.data.Set(rawKey, podCache, podCache.byteCost(key))
 		}
 	}
 }
