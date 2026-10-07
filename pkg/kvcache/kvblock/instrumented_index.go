@@ -26,7 +26,8 @@ type instrumentedIndex struct {
 	next Index
 }
 
-// instrumentedWalker carries the KeyWalker capability of the wrapped index.
+// instrumentedWalker carries the KeyWalker and SnapshotWalker capabilities of
+// the wrapped index.
 type instrumentedWalker struct {
 	*instrumentedIndex
 	walker     KeyWalker
@@ -34,9 +35,10 @@ type instrumentedWalker struct {
 }
 
 // NewInstrumentedIndex wraps an Index and emits metrics for Add, Evict,
-// Lookup, and WalkKeys. The wrapper is a KeyWalker exactly when next is one.
-// Read metrics count and time Lookup and WalkKeys calls; contiguous-chain
-// hit metrics are recorded by the kvcache matcher.
+// Lookup, WalkKeys, and WalkSnapshots. The wrapper implements KeyWalker and
+// SnapshotWalker when next implements KeyWalker. Read metrics count and time
+// Lookup, WalkKeys, and WalkSnapshots calls; contiguous-chain hit metrics are
+// recorded by the kvcache matcher.
 func NewInstrumentedIndex(next Index) Index {
 	m := &instrumentedIndex{next: next}
 	if walker, ok := next.(KeyWalker); ok {
@@ -99,7 +101,7 @@ func (m *instrumentedWalker) WalkSnapshots(ctx context.Context, requestKeys []Bl
 		if !found {
 			return visit(pos, nil)
 		}
-		return visit(pos, buildPodSnapshot(entries))
+		return visit(pos, BuildPodSnapshot(entries))
 	})
 }
 

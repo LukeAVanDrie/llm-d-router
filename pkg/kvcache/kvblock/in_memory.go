@@ -99,8 +99,8 @@ func NewInMemoryIndex(cfg *InMemoryIndexConfig) (*InMemoryIndex, error) {
 			mask:   uint64(numShards - 1),
 		},
 		podCacheSize: podCacheSize,
-		pods:         newInterner(maxInternedPods),
-		tiers:        newInterner(maxInternedTiers),
+		pods:         collections.NewInterner[string](maxInternedPods),
+		tiers:        collections.NewInterner[string](maxInternedTiers),
 	}, nil
 }
 
@@ -146,6 +146,11 @@ func (e *engineKeyStore) Contains(key BlockHash) bool {
 	return sh.lru.Contains(key)
 }
 
+// evictCoalesce caches a single-entry removal transition (prevSnap -> nextSnap).
+// Add processes key batches and shares one *PodSnapshot across consecutive keys,
+// whereas Evict is invoked one key at a time; reusing nextSnap across single-key
+// Evict calls preserves *PodSnapshot pointer equality so WalkSnapshots run-coalescing
+// survives partial evictions.
 type evictCoalesce struct {
 	entry    PodEntry
 	prevSnap *PodSnapshot
@@ -173,8 +178,8 @@ type InMemoryIndex struct {
 	// address:port values, bounded by the pod network's address space, and
 	// tiers are the engine-reported names. Each is capped, and an Add past
 	// a cap fails rather than admitting an entry that cannot be matched.
-	pods       *interner
-	tiers      *interner
+	pods       *collections.Interner[string]
+	tiers      *collections.Interner[string]
 	evictCache [256]atomic.Pointer[evictCoalesce]
 }
 
@@ -196,56 +201,12 @@ type PodCache struct {
 	capacity int
 	// key is the request BlockHash this cache serves; immutable while resident in a shard LRU.
 	key BlockHash
-	// addedSeq is the lruStore.clock value when key was last inserted, updated, or reconciled in its shard LRU.
-	addedSeq atomic.Uint64
-	// readSeq is the highest lruStore.clock value stamped by a read hit; readSeq > addedSeq marks unrecorded recency.
-	readSeq atomic.Uint64
-	// next is an opportunistic pointer to the PodCache that followed this key in the most recent Add batch.
-	next atomic.Pointer[PodCache]
-	// singleEngineKey holds uint64(engineKey) when key has a 1:1 mapping where engineKey == key.
+	// singleEngineKey holds uint64(engineKey) when key has a 1:1 mapping to a single non-empty engineKey.
 	singleEngineKey atomic.Uint64
+	// referenced marks whether key has been read since its last shard LRU insertion or promotion.
+	referenced atomic.Bool
 	// resident reports whether this PodCache is still present in its shard LRU; cleared by the LRU eviction callback.
 	resident atomic.Bool
-}
-
-const (
-	speculativeSnapshotTierOrdinal = ^uint32(0)
-	speculativeSnapshotTierName    = "speculative"
-)
-
-func buildPodSnapshot(entries []EntryRef) *PodSnapshot {
-	if len(entries) == 0 {
-		return nil
-	}
-	tier0 := entries[0].TierOrdinal
-	name0 := entries[0].DeviceTier
-	if entries[0].Speculative || name0 == speculativeSnapshotTierName {
-		tier0 = speculativeSnapshotTierOrdinal
-		name0 = speculativeSnapshotTierName
-	}
-	snap := &PodSnapshot{
-		Entries:  entries,
-		TierOrd:  tier0,
-		TierName: name0,
-	}
-	var mask [4]uint64
-	for i := range entries {
-		e := &entries[i]
-		if e.PodOrdinal >= 256 {
-			return snap
-		}
-		tOrd := e.TierOrdinal
-		if e.Speculative || e.DeviceTier == speculativeSnapshotTierName {
-			tOrd = speculativeSnapshotTierOrdinal
-		}
-		if tOrd != tier0 {
-			return snap
-		}
-		mask[e.PodOrdinal>>6] |= uint64(1) << (e.PodOrdinal & 63)
-	}
-	snap.PodMask = mask
-	snap.MaskValid = true
-	return snap
 }
 
 func (pc *PodCache) loadEntries() []EntryRef {
@@ -301,7 +262,7 @@ func (pc *PodCache) addAll(recs []EntryRef, prevSnap, nextSnap *PodSnapshot) (*P
 		}
 		next = append(next, rec)
 	}
-	snap := buildPodSnapshot(next)
+	snap := BuildPodSnapshot(next)
 	pc.snapshot.Store(snap)
 	return curPtr, snap
 }
@@ -327,8 +288,7 @@ func (pc *PodCache) removeAll(entries []PodEntry, data *lruStore, requestKey Blo
 				if data.shardMask == 0 {
 					removedKey = data.removeIfSame(requestKey, pc)
 				} else {
-					pc.readSeq.Store(0)
-					pc.addedSeq.Store(0)
+					pc.referenced.Store(false)
 				}
 				return true, removedKey
 			}
@@ -344,8 +304,7 @@ func (pc *PodCache) removeAll(entries []PodEntry, data *lruStore, requestKey Blo
 				if data.shardMask == 0 {
 					removedKey = data.removeIfSame(requestKey, pc)
 				} else {
-					pc.readSeq.Store(0)
-					pc.addedSeq.Store(0)
+					pc.referenced.Store(false)
 				}
 				return true, removedKey
 			}
@@ -387,12 +346,11 @@ func (pc *PodCache) removeAll(entries []PodEntry, data *lruStore, requestKey Blo
 		if data.shardMask == 0 {
 			removedKey = data.removeIfSame(requestKey, pc)
 		} else {
-			pc.readSeq.Store(0)
-			pc.addedSeq.Store(0)
+			pc.referenced.Store(false)
 		}
 		return true, removedKey
 	}
-	snap := buildPodSnapshot(next)
+	snap := BuildPodSnapshot(next)
 	pc.snapshot.Store(snap)
 	if len(entries) == 1 && evictCache != nil {
 		evictCache[cSlot].Store(&evictCoalesce{entry: entries[0], prevSnap: curPtr, nextSnap: snap})
@@ -444,17 +402,17 @@ func (pc *PodCache) matching(podIdentifier string) []PodEntry {
 // assigned all or nothing: when its new pods or tiers would exceed a cap, no
 // ordinal is consumed and the error names the cap.
 func (m *InMemoryIndex) internRecords(entries []PodEntry) ([]EntryRef, error) {
-	m.pods.mu.RLock()
-	m.tiers.mu.RLock()
+	m.pods.RLock()
+	m.tiers.RLock()
 	var records []EntryRef
 	allFound := true
 	for i, entry := range entries {
-		podOrd, okPod := m.pods.ids[entry.PodIdentifier]
+		podOrd, okPod := m.pods.LookupLocked(entry.PodIdentifier)
 		if !okPod {
 			allFound = false
 			break
 		}
-		tierOrd, okTier := m.tiers.ids[entry.DeviceTier]
+		tierOrd, okTier := m.tiers.LookupLocked(entry.DeviceTier)
 		if !okTier {
 			allFound = false
 			break
@@ -464,31 +422,35 @@ func (m *InMemoryIndex) internRecords(entries []PodEntry) ([]EntryRef, error) {
 		}
 		records[i] = EntryRef{
 			PodEntry:    entry,
-			PodOrdinal:  podOrd,
-			TierOrdinal: tierOrd,
+			PodOrdinal:  uint32(podOrd),
+			TierOrdinal: uint32(tierOrd),
 		}
 	}
-	m.tiers.mu.RUnlock()
-	m.pods.mu.RUnlock()
+	m.tiers.RUnlock()
+	m.pods.RUnlock()
 	if allFound {
 		return records, nil
 	}
 
-	m.pods.mu.Lock()
-	defer m.pods.mu.Unlock()
-	m.tiers.mu.Lock()
-	defer m.tiers.mu.Unlock()
+	m.pods.Lock()
+	defer m.pods.Unlock()
+	m.tiers.Lock()
+	defer m.tiers.Unlock()
 
-	if !m.pods.fitsLocked(func(yield func(string)) {
+	if !m.pods.FitsLocked(func(yield func(string) bool) {
 		for i := range entries {
-			yield(entries[i].PodIdentifier)
+			if !yield(entries[i].PodIdentifier) {
+				return
+			}
 		}
 	}) {
 		return nil, fmt.Errorf("%w: %d pod identifiers", errIndexCardinality, maxInternedPods)
 	}
-	if !m.tiers.fitsLocked(func(yield func(string)) {
+	if !m.tiers.FitsLocked(func(yield func(string) bool) {
 		for i := range entries {
-			yield(entries[i].DeviceTier)
+			if !yield(entries[i].DeviceTier) {
+				return
+			}
 		}
 	}) {
 		return nil, fmt.Errorf("%w: %d device tiers", errIndexCardinality, maxInternedTiers)
@@ -500,8 +462,8 @@ func (m *InMemoryIndex) internRecords(entries []PodEntry) ([]EntryRef, error) {
 	for i, entry := range entries {
 		records[i] = EntryRef{
 			PodEntry:    entry,
-			PodOrdinal:  m.pods.internLocked(entry.PodIdentifier),
-			TierOrdinal: m.tiers.internLocked(entry.DeviceTier),
+			PodOrdinal:  uint32(m.pods.InternLocked(entry.PodIdentifier)),
+			TierOrdinal: uint32(m.tiers.InternLocked(entry.DeviceTier)),
 		}
 	}
 	return records, nil
@@ -628,212 +590,142 @@ func (m *InMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []Block
 			traceLogger.Info("added pods to key", "requestKey", requestKeys[i], "pods", entries)
 		}
 	}
-	if allSingleMapped {
+	if allSingleMapped || len(engineKeys) == 0 {
 		return nil
 	}
 
-	// Build engine->request mappings when engine keys are provided.
-	// The ratio of array lengths determines the mapping type:
-	//   equal  (4 eng, 4 req) -> 1:1   E0->R0, E1->R1, ...
-	//   many:1 (4 eng, 1 req) -> E0->R0, E1->R0, E2->R0, E3->R0
-	//   1:many (1 eng, 4 req) -> E0->[R0, R1, R2, R3]
-	if len(engineKeys) > 0 {
-		n := max(len(engineKeys), len(requestKeys))
-		if n < (1 << 24) {
-			var runBuf [512]uint64
-			runs := runBuf[:0]
-			for start := 0; start < n; {
-				engIdx := start * len(engineKeys) / n
-				ek := engineKeys[engIdx]
-				end := start + 1
-				for end < n && engineKeys[end*len(engineKeys)/n] == ek {
-					end++
-				}
-				var sIdx uint64
-				if mask != 0 {
-					sIdx = mixBlockHash(ek) & mask
-				}
-				runs = append(runs, (sIdx<<48)|(uint64(start)<<24)|uint64(end))
-				start = end
-			}
-			if mask != 0 && len(runs) > 1 {
-				slices.Sort(runs)
-			}
-			var backing []BlockHash
-			ensureBacking := func() {
-				if backing != nil {
-					return
-				}
-				backing = make([]BlockHash, n)
-				if isOneToOne {
-					copy(backing, requestKeys)
-				} else {
-					for i := range n {
-						backing[i] = requestKeys[i*len(requestKeys)/n]
+	m.addEngineKeyMappings(engineKeys, requestKeys, podCaches, records)
+	return nil
+}
+
+// addEngineKeyMappings records engineKey -> requestKey mappings across shards.
+// The ratio of array lengths determines the mapping type:
+//   - equal  (4 eng, 4 req) -> 1:1   E0->R0, E1->R1, ...
+//   - many:1 (4 eng, 1 req) -> E0->R0, E1->R0, E2->R0, E3->R0
+//   - 1:many (1 eng, 4 req) -> E0->[R0, R1, R2, R3]
+func (m *InMemoryIndex) addEngineKeyMappings(engineKeys, requestKeys []BlockHash, podCaches []*PodCache, records []EntryRef) {
+	isOneToOne := len(engineKeys) == len(requestKeys)
+	mask := m.engineToRequestKeys.mask
+	n := max(len(engineKeys), len(requestKeys))
+	if n >= (1 << 24) {
+		for ek, rks := range engineToRequestMapping(engineKeys, requestKeys) {
+			es := m.engineShardFor(ek)
+			es.mu.Lock()
+			if existing, hadExisting := es.lru.Peek(ek); hadExisting {
+				for _, oldRK := range existing {
+					if oldPC, ok := m.data.Peek(oldRK); ok && oldPC != nil {
+						oldPC.singleEngineKey.Store(0)
 					}
 				}
 			}
-			for r := 0; r < len(runs); {
-				sIdx := runs[r] >> 48
-				rEnd := r + 1
-				for rEnd < len(runs) && (runs[rEnd]>>48) == sIdx {
-					rEnd++
-				}
-				if isOneToOne && mask != 0 {
-					allMapped := true
-					for k := r; k < rEnd; k++ {
-						packed := runs[k]
-						start := int((packed >> 24) & 0xffffff)
-						end := int(packed & 0xffffff)
-						if end != start+1 {
-							allMapped = false
-							break
-						}
-						ek := engineKeys[start]
-						pc := podCaches[start]
-						if ek == EmptyBlockHash || pc.singleEngineKey.Load() != uint64(ek) || len(pc.loadEntries()) == 0 {
-							allMapped = false
-							break
-						}
-						for p := r; p < k; p++ {
-							prevStart := int((runs[p] >> 24) & 0xffffff)
-							if engineKeys[prevStart] == ek {
-								allMapped = false
-								break
-							}
-						}
-						if !allMapped {
-							break
-						}
-					}
-					if allMapped {
-						r = rEnd
-						continue
-					}
-				}
-				ensureBacking()
-				es := &m.engineToRequestKeys.shards[sIdx]
-				es.mu.Lock()
-				for k := r; k < rEnd; k++ {
-					packed := runs[k]
-					start := int((packed >> 24) & 0xffffff)
-					end := int(packed & 0xffffff)
-					ek := engineKeys[start*len(engineKeys)/n]
-					for idx := start; idx < end; idx++ {
-						reqIdx := idx * len(requestKeys) / n
-						pc := podCaches[reqIdx]
-						if len(pc.loadEntries()) == 0 {
-							pc.addAll(records, nil, nil)
-							m.data.Add(requestKeys[reqIdx], pc)
-						} else if !pc.resident.Load() {
-							m.data.Add(requestKeys[reqIdx], pc)
-						}
-					}
-					seenBefore := false
-					dupInShard := false
-					for p := r; p < rEnd; p++ {
-						if p == k {
-							continue
-						}
-						otherStart := int((runs[p] >> 24) & 0xffffff)
-						if engineKeys[otherStart*len(engineKeys)/n] == ek {
-							dupInShard = true
-							if p < k {
-								seenBefore = true
-							}
-						}
-					}
-					if isOneToOne && !dupInShard && end == start+1 && ek != EmptyBlockHash && podCaches[start].singleEngineKey.Load() == uint64(ek) {
-						continue
-					}
-					existing, hadExisting := es.lru.Peek(ek)
-					if isOneToOne && !dupInShard && end == start+1 && ek != EmptyBlockHash && hadExisting && len(existing) == 1 && existing[0] == backing[start] {
-						podCaches[start].singleEngineKey.Store(uint64(ek))
-						continue
-					}
-					if hadExisting {
-						for _, oldRK := range existing {
-							if oldPC, ok := m.data.Peek(oldRK); ok && oldPC != nil {
-								oldPC.singleEngineKey.Store(0)
-							}
-						}
-					}
-					if seenBefore {
-						es.lru.Add(ek, append(existing, backing[start:end]...))
-					} else {
-						es.lru.Add(ek, backing[start:end:end])
-						if isOneToOne && !dupInShard && end == start+1 && ek != EmptyBlockHash {
-							podCaches[start].singleEngineKey.Store(uint64(ek))
-						}
-					}
-				}
-				es.mu.Unlock()
-				r = rEnd
-			}
+			es.lru.Add(ek, rks)
+			es.mu.Unlock()
+		}
+		return
+	}
+
+	var runBuf [512]uint64
+	runs := runBuf[:0]
+	for start := 0; start < n; {
+		engIdx := start * len(engineKeys) / n
+		ek := engineKeys[engIdx]
+		end := start + 1
+		for end < n && engineKeys[end*len(engineKeys)/n] == ek {
+			end++
+		}
+		var sIdx uint64
+		if mask != 0 {
+			sIdx = mixBlockHash(ek) & mask
+		}
+		runs = append(runs, (sIdx<<48)|(uint64(start)<<24)|uint64(end))
+		start = end
+	}
+	if mask != 0 && len(runs) > 1 {
+		slices.Sort(runs)
+	}
+	var backing []BlockHash
+	ensureBacking := func() {
+		if backing != nil {
+			return
+		}
+		backing = make([]BlockHash, n)
+		if isOneToOne {
+			copy(backing, requestKeys)
 		} else {
-			backing := make([]BlockHash, n)
-			if isOneToOne {
-				copy(backing, requestKeys)
-			} else {
-				for i := range n {
-					backing[i] = requestKeys[i*len(requestKeys)/n]
-				}
-			}
-			var lockedShard *engineKeyShard
-			for start := 0; start < n; {
-				engIdx := start * len(engineKeys) / n
-				ek := engineKeys[engIdx]
-				end := start + 1
-				for end < n && engineKeys[end*len(engineKeys)/n] == ek {
-					end++
-				}
-				es := m.engineShardFor(ek)
-				if es != lockedShard {
-					if lockedShard != nil {
-						lockedShard.mu.Unlock()
-					}
-					es.mu.Lock()
-					lockedShard = es
-				}
-				for idx := start; idx < end; idx++ {
-					reqIdx := idx * len(requestKeys) / n
-					pc := podCaches[reqIdx]
-					if len(pc.loadEntries()) == 0 {
-						pc.addAll(records, nil, nil)
-						m.data.Add(requestKeys[reqIdx], pc)
-					} else if !pc.resident.Load() {
-						m.data.Add(requestKeys[reqIdx], pc)
-					}
-				}
-				seenInBatch := false
-				for j := range engIdx {
-					if engineKeys[j] == ek {
-						seenInBatch = true
-						break
-					}
-				}
-				existing, hadExisting := es.lru.Peek(ek)
-				if hadExisting {
-					for _, oldRK := range existing {
-						if oldPC, ok := m.data.Peek(oldRK); ok && oldPC != nil {
-							oldPC.singleEngineKey.Store(0)
-						}
-					}
-				}
-				if seenInBatch {
-					es.lru.Add(ek, append(existing, backing[start:end]...))
-				} else {
-					es.lru.Add(ek, backing[start:end:end])
-				}
-				start = end
-			}
-			if lockedShard != nil {
-				lockedShard.mu.Unlock()
+			for i := range n {
+				backing[i] = requestKeys[i*len(requestKeys)/n]
 			}
 		}
 	}
-
-	return nil
+	for r := 0; r < len(runs); {
+		sIdx := runs[r] >> 48
+		rEnd := r + 1
+		for rEnd < len(runs) && (runs[rEnd]>>48) == sIdx {
+			rEnd++
+		}
+		es := &m.engineToRequestKeys.shards[sIdx]
+		es.mu.Lock()
+		for k := r; k < rEnd; k++ {
+			packed := runs[k]
+			start := int((packed >> 24) & 0xffffff)
+			end := int(packed & 0xffffff)
+			ek := engineKeys[start*len(engineKeys)/n]
+			for idx := start; idx < end; idx++ {
+				reqIdx := idx * len(requestKeys) / n
+				pc := podCaches[reqIdx]
+				if len(pc.loadEntries()) == 0 {
+					pc.addAll(records, nil, nil)
+					m.data.Add(requestKeys[reqIdx], pc)
+				} else if !pc.resident.Load() {
+					m.data.Add(requestKeys[reqIdx], pc)
+				}
+			}
+			seenBefore := false
+			dupInShard := false
+			for p := r; p < rEnd; p++ {
+				if p == k {
+					continue
+				}
+				otherStart := int((runs[p] >> 24) & 0xffffff)
+				if engineKeys[otherStart*len(engineKeys)/n] == ek {
+					dupInShard = true
+					if p < k {
+						seenBefore = true
+					}
+				}
+			}
+			if isOneToOne && !dupInShard && end == start+1 && ek != EmptyBlockHash && podCaches[start].singleEngineKey.Load() == uint64(ek) {
+				continue
+			}
+			existing, hadExisting := es.lru.Peek(ek)
+			if isOneToOne && !dupInShard && end == start+1 && ek != EmptyBlockHash && hadExisting && len(existing) == 1 && existing[0] == requestKeys[start] {
+				if mask == 0 {
+					es.lru.Get(ek)
+				} else {
+					podCaches[start].singleEngineKey.Store(uint64(ek))
+				}
+				continue
+			}
+			if hadExisting {
+				for _, oldRK := range existing {
+					if oldPC, ok := m.data.Peek(oldRK); ok && oldPC != nil {
+						oldPC.singleEngineKey.Store(0)
+					}
+				}
+			}
+			ensureBacking()
+			if seenBefore {
+				es.lru.Add(ek, append(existing, backing[start:end]...))
+			} else {
+				es.lru.Add(ek, backing[start:end:end])
+				if isOneToOne && !dupInShard && end == start+1 && ek != EmptyBlockHash {
+					podCaches[start].singleEngineKey.Store(uint64(ek))
+				}
+			}
+		}
+		es.mu.Unlock()
+		r = rEnd
+	}
 }
 
 // Evict removes a key and its associated pod entries from the index backend.
@@ -853,14 +745,13 @@ func (m *InMemoryIndex) Evict(ctx context.Context, key BlockHash, keyType KeyTyp
 	case EngineKey:
 		if m.data.shardMask != 0 && key != EmptyBlockHash {
 			if pc := m.data.lookupFast(mixBlockHash(key), key); pc != nil && pc.singleEngineKey.Load() == uint64(key) {
-				empty, removedKey := pc.removeAll(entries, m.data, key, &m.evictCache)
+				_, removedKey := pc.removeAll(entries, m.data, key, &m.evictCache)
 				if traceLogger.Enabled() {
 					traceLogger.Info("evicted pods from key", "requestKey", key, "engineKey", key, "pods", entries)
 					if removedKey {
 						traceLogger.Info("removed requestKey from index as no pods remain", "requestKey", key)
 					}
 				}
-				_ = empty
 				return nil
 			}
 		}
@@ -881,7 +772,7 @@ func (m *InMemoryIndex) Evict(ctx context.Context, key BlockHash, keyType KeyTyp
 				allPossiblyEmpty = false
 			}
 		}
-		if !allPossiblyEmpty || m.data.shardMask != 0 {
+		if !allPossiblyEmpty {
 			return nil
 		}
 
@@ -894,6 +785,11 @@ func (m *InMemoryIndex) Evict(ctx context.Context, key BlockHash, keyType KeyTyp
 			}
 		}
 		if allEmpty {
+			for _, rk := range rks {
+				if pc, ok := m.data.Peek(rk); ok && pc != nil {
+					pc.singleEngineKey.Store(0)
+				}
+			}
 			es.lru.Remove(key)
 		}
 		es.mu.Unlock()
@@ -977,12 +873,7 @@ func (m *InMemoryIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) 
 	if !found || len(rks) == 0 {
 		return EmptyBlockHash, fmt.Errorf("engine key not found: %s", engineKey.String())
 	}
-	for i := len(rks) - 1; i >= 0; i-- {
-		if m.data.hasNonEmpty(rks[i]) {
-			return rks[i], nil
-		}
-	}
-	return EmptyBlockHash, fmt.Errorf("engine key not found: %s", engineKey.String())
+	return rks[len(rks)-1], nil
 }
 
 // podsPerKeyPrintHelper formats a map of keys to pod names for printing.

@@ -27,17 +27,18 @@ limitations under the License.
 // request keys to PodEntry sets and maintain an engine-key to request-key
 // reverse mapping for KV-event eviction and parent-hash resolution.
 // NewInstrumentedIndex and NewTracedIndex wrap an Index for Prometheus metrics
-// and OpenTelemetry spans while preserving the optional KeyWalker interface
-// when the underlying backend implements it.
+// and OpenTelemetry spans while preserving the optional KeyWalker and
+// SnapshotWalker interfaces when the underlying backend implements them.
 //
 // InMemoryIndex partitions request-key and engine-key state across 256 shards
 // once configured capacity reaches lruShardThreshold. Each request key maps to
-// a PodCache whose entry slice is replaced copy-on-write under PodCache.mu and
-// read through an atomic snapshot pointer. Readers resolve consecutive prefix
-// keys through opportunistic PodCache.next pointers and the direct-mapped
-// lruStore.fast table, both validated by key equality and PodCache.resident,
-// before falling back to a shard read lock. Read hits record recency by
-// advancing PodCache.readSeq from a monotonic atomic clock, and capacity
-// evictions lazily replay entries where readSeq exceeds addedSeq into the
-// shard LRU under the shard write lock.
+// a PodCache whose PodSnapshot (carrying both the EntryRef slice and per-tier
+// collections.Bitset pod-ordinal sets) is replaced copy-on-write under
+// PodCache.mu and read through an atomic pointer. Readers probe the lock-free
+// 8-way linear-probing collections.FastTable in lruStore.fast, validated by
+// key equality and PodCache.resident, before falling back to a shard read lock,
+// and WalkSnapshots coalesces consecutive keys that share an identical
+// *PodSnapshot pointer. Read hits in sharded mode set PodCache.referenced
+// without acquiring shard locks, and capacity evictions lazily promote
+// referenced tail entries in the shard LRU under the shard write lock.
 package kvblock

@@ -17,9 +17,17 @@ limitations under the License.
 package kvblock
 
 import (
+	"cmp"
 	"context"
-	"sync"
-	"sync/atomic"
+	"slices"
+
+	"github.com/llm-d/llm-d-router/pkg/common/collections"
+)
+
+const (
+	speculativeSnapshotTierOrdinal = ^uint32(0)
+	speculativeSnapshotTierName    = "speculative"
+	walkBatchSize                  = 256
 )
 
 // EntryRef is one indexed entry with the ordinals the index assigned to its
@@ -28,25 +36,114 @@ import (
 // a DeviceTier. An ordinal is assigned on the first Add of its name and
 // belongs to that name for the index lifetime: Evict and Clear never reclaim
 // or reassign one, and an Add whose new names would exceed the index's caps
-// fails before writing anything. Live entries hold a sparse subset of the
-// assigned range, so consumers key request-local tables by ordinals and
-// never size state by them.
+// fails before writing anything.
 type EntryRef struct {
 	PodEntry
 	PodOrdinal  uint32
 	TierOrdinal uint32
 }
 
+// TierSnapshot holds the set of pod ordinals resident in one device tier (or
+// the speculative tier) within a PodSnapshot.
+type TierSnapshot struct {
+	TierName string
+	TierOrd  uint32
+	Pods     collections.Bitset
+}
+
 // PodSnapshot is an immutable generation of a PodCache's entries.
 type PodSnapshot struct {
 	Entries []EntryRef
-	// PodMask has bit (PodOrdinal) set for every entry in Entries when
-	// MaskValid is true (all entries share one effective tier and have
-	// PodOrdinal < 256).
+	// Tiers holds one TierSnapshot per distinct effective tier in Entries,
+	// sorted by TierOrd. When len(Tiers) == 1, Tiers is backed by tierBuf.
+	Tiers []TierSnapshot
+	// AllPods has bit PodOrdinal set for every entry in Entries across tiers.
+	AllPods collections.Bitset
+	tierBuf [1]TierSnapshot
 	PodMask   [4]uint64
 	TierOrd   uint32
 	TierName  string
 	MaskValid bool
+}
+
+func effectiveTier(e *EntryRef) (name string, ord uint32) {
+	if e.Speculative || e.DeviceTier == speculativeSnapshotTierName {
+		return speculativeSnapshotTierName, speculativeSnapshotTierOrdinal
+	}
+	return e.DeviceTier, e.TierOrdinal
+}
+
+// BuildPodSnapshot constructs an immutable PodSnapshot with per-tier bitsets
+// from entries.
+func BuildPodSnapshot(entries []EntryRef) *PodSnapshot {
+	if len(entries) == 0 {
+		return nil
+	}
+	name0, ord0 := effectiveTier(&entries[0])
+	snap := &PodSnapshot{
+		Entries: entries,
+	}
+	snap.tierBuf[0] = TierSnapshot{
+		TierName: name0,
+		TierOrd:  ord0,
+	}
+	singleTier := true
+	maskValid := true
+	var podMask [4]uint64
+	for i := range entries {
+		e := &entries[i]
+		_, tOrd := effectiveTier(e)
+		if tOrd != ord0 {
+			singleTier = false
+			break
+		}
+		snap.tierBuf[0].Pods.Set(int(e.PodOrdinal))
+		if e.PodOrdinal < 256 {
+			podMask[e.PodOrdinal>>6] |= uint64(1) << (e.PodOrdinal & 63)
+		} else {
+			maskValid = false
+		}
+	}
+	if singleTier {
+		snap.Tiers = snap.tierBuf[:1]
+		snap.AllPods = snap.tierBuf[0].Pods
+		if maskValid {
+			snap.PodMask = podMask
+			snap.TierOrd = ord0
+			snap.TierName = name0
+			snap.MaskValid = true
+		}
+		return snap
+	}
+
+	snap.tierBuf[0].Pods = collections.Bitset{}
+	var tiers []TierSnapshot
+	for i := range entries {
+		e := &entries[i]
+		tName, tOrd := effectiveTier(e)
+		podOrd := int(e.PodOrdinal)
+		snap.AllPods.Set(podOrd)
+		found := false
+		for t := range tiers {
+			if tiers[t].TierOrd == tOrd {
+				tiers[t].Pods.Set(podOrd)
+				found = true
+				break
+			}
+		}
+		if !found {
+			var ts TierSnapshot
+			ts.TierName = tName
+			ts.TierOrd = tOrd
+			ts.Pods.Set(podOrd)
+			tiers = append(tiers, ts)
+		}
+	}
+	slices.SortFunc(tiers, func(a, b TierSnapshot) int {
+		return cmp.Compare(a.TierOrd, b.TierOrd)
+	})
+	snap.Tiers = tiers
+	return snap
 }
 
 // KeyWalker is an optional Index capability: visit requestKeys in input
@@ -74,11 +171,10 @@ type PodSnapshot struct {
 //     after it, and once more when the walk ends, so a cancelled ctx always
 //     yields ctx.Err(); visits may run between the cancellation and the
 //     next poll.
-//   - When the walk ends, for any reason, the prefix of requestKeys through
-//     the last key found is marked most recently used in position order
-//     under one acquisition, skipping keys absent by then. Positions after
-//     the last key found are not promoted. Lookup promotes the same way, so
-//     a prefix that is only read stays resident under capacity pressure.
+//   - Visited keys through the last key found have their read recency recorded
+//     in position order, skipping keys absent by then. Positions after the last
+//     key found are not promoted. Lookup promotes the same way, so a prefix
+//     that is only read stays resident under capacity pressure.
 type KeyWalker interface {
 	WalkKeys(ctx context.Context, requestKeys []BlockHash,
 		visit func(pos int, found bool, entries []EntryRef) bool) error
@@ -86,27 +182,25 @@ type KeyWalker interface {
 
 // SnapshotWalker is an optional Index capability that visits each request key's
 // immutable PodSnapshot and resolves pod ordinals to pod identifiers.
+// Consecutive positions that share an identical *PodSnapshot pointer may be
+// coalesced so visit is called at the start and end positions of the run; a
+// miss visits with snap == nil.
 type SnapshotWalker interface {
 	WalkSnapshots(ctx context.Context, requestKeys []BlockHash,
 		visit func(pos int, snap *PodSnapshot) bool) error
 	PodName(ord uint32) string
 }
 
-const walkBatchSize = 256
-
-// WalkKeys implements KeyWalker. Keys follow cached PodCache chains lock-free
-// or are peeked in batches under shard shared locks, each key's immutable
-// entry snapshot is visited without locking, and visited caches are stamped
-// with read sequence numbers on every exit path.
+// WalkKeys implements KeyWalker. Keys are peeked in batches, each key's
+// immutable entry snapshot is visited without locking, and visited caches are
+// marked as referenced on every exit path.
 func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 	visit func(pos int, found bool, entries []EntryRef) bool,
 ) error {
 	var batch [walkBatchSize]*PodCache
 	batchVisited := 0
-	prevSeq := m.data.writeSeq.Load()
-	var nextPC *PodCache
 	// Every exit, cancellation included, refreshes what was read.
-	defer func() { m.data.stampBatch(batch[:batchVisited], &prevSeq) }()
+	defer func() { m.data.stampBatch(batch[:batchVisited]) }()
 
 	for base := 0; base < len(requestKeys); {
 		if base&cancellationCheckMask == 0 && ctx.Err() != nil {
@@ -116,8 +210,7 @@ func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 		if nextCheck := (base | cancellationCheckMask) + 1; limit > nextCheck {
 			limit = nextCheck
 		}
-		var n int
-		n, nextPC = m.data.peekBatch(requestKeys[base:limit], batch[:], nextPC)
+		n := m.data.peekBatch(requestKeys[base:limit], batch[:])
 		for i := range n {
 			pos := base + i
 			pc := batch[i]
@@ -139,7 +232,7 @@ func (m *InMemoryIndex) WalkKeys(ctx context.Context, requestKeys []BlockHash,
 				return ctx.Err()
 			}
 		}
-		m.data.stampBatch(batch[:batchVisited], &prevSeq)
+		m.data.stampBatch(batch[:batchVisited])
 		batchVisited = 0
 		base += n
 	}
@@ -152,22 +245,26 @@ func (m *InMemoryIndex) WalkSnapshots(ctx context.Context, requestKeys []BlockHa
 ) error {
 	var batch [walkBatchSize]*PodCache
 	batchVisited := 0
-	prevSeq := m.data.writeSeq.Load()
 	sharded := m.data.shardMask != 0
-	var nextPC *PodCache
-	defer func() { m.data.stampBatch(batch[:batchVisited], &prevSeq) }()
+	defer func() { m.data.stampBatch(batch[:batchVisited]) }()
 
 	recordPC := func(pc *PodCache) {
-		if sharded && pc.readSeq.Load() > pc.addedSeq.Load() {
+		if sharded {
+			if !pc.referenced.Load() {
+				pc.referenced.Store(true)
+			}
 			return
 		}
 		if batchVisited == walkBatchSize {
-			m.data.stampBatch(batch[:batchVisited], &prevSeq)
+			m.data.stampBatch(batch[:batchVisited])
 			batchVisited = 0
 		}
 		batch[batchVisited] = pc
 		batchVisited++
 	}
+
+	var carriedPC *PodCache
+	carriedPos := -1
 
 	for base := 0; base < len(requestKeys); {
 		if base&cancellationCheckMask == 0 && ctx.Err() != nil {
@@ -178,15 +275,15 @@ func (m *InMemoryIndex) WalkSnapshots(ctx context.Context, requestKeys []BlockHa
 			limit = nextCheck
 		}
 		for pos := base; pos < limit; pos++ {
-			k := requestKeys[pos]
 			var pc *PodCache
-			if nextPC != nil && nextPC.key == k && nextPC.resident.Load() {
-				pc = nextPC
+			if carriedPos == pos {
+				pc = carriedPC
+				carriedPC = nil
+				carriedPos = -1
 			} else {
-				pc = m.data.peekOne(k)
+				pc = m.data.peekOne(requestKeys[pos])
 			}
 			if pc == nil {
-				nextPC = nil
 				if !visit(pos, nil) {
 					return ctx.Err()
 				}
@@ -194,43 +291,32 @@ func (m *InMemoryIndex) WalkSnapshots(ctx context.Context, requestKeys []BlockHa
 			}
 			snap := pc.snapshot.Load()
 			if snap == nil || len(snap.Entries) == 0 {
-				nextPC = pc.next.Load()
 				if !visit(pos, nil) {
 					return ctx.Err()
 				}
 				continue
 			}
 			recordPC(pc)
-			nextPC = pc.next.Load()
 			if !visit(pos, snap) {
 				return ctx.Err()
 			}
-			if snap.MaskValid {
-				startPos := pos
-				for pos+1 < limit {
-					nk := requestKeys[pos+1]
-					var npc *PodCache
-					if nextPC != nil && nextPC.key == nk && nextPC.resident.Load() {
-						npc = nextPC
-					} else {
-						npc = m.data.peekOne(nk)
-					}
-					if npc == nil {
-						nextPC = nil
-						break
-					}
-					if npc.snapshot.Load() != snap {
-						nextPC = npc
-						break
-					}
-					recordPC(npc)
-					pos++
-					nextPC = npc.next.Load()
+			startPos := pos
+			for pos+1 < limit {
+				npc := m.data.peekOne(requestKeys[pos+1])
+				if npc == nil {
+					break
 				}
-				if pos > startPos {
-					if !visit(pos, snap) {
-						return ctx.Err()
-					}
+				if npc.snapshot.Load() != snap {
+					carriedPC = npc
+					carriedPos = pos + 1
+					break
+				}
+				recordPC(npc)
+				pos++
+			}
+			if pos > startPos {
+				if !visit(pos, snap) {
+					return ctx.Err()
 				}
 			}
 		}
@@ -241,88 +327,5 @@ func (m *InMemoryIndex) WalkSnapshots(ctx context.Context, requestKeys []BlockHa
 
 // PodName returns the pod identifier assigned to ord, or "" if unassigned.
 func (m *InMemoryIndex) PodName(ord uint32) string {
-	return m.pods.nameForOrdinal(ord)
-}
-
-// interner assigns dense uint32 ordinals to strings, stable for its lifetime
-// and never reused, up to a fixed number of distinct strings. Callers hold mu
-// across a whole batch so a batch is assigned all or nothing.
-type interner struct {
-	mu        sync.RWMutex
-	ids       map[string]uint32
-	names     []string
-	fastNames [256]atomic.Pointer[string]
-	limit     int
-}
-
-func newInterner(limit int) *interner {
-	return &interner{ids: make(map[string]uint32), limit: limit}
-}
-
-// fitsLocked reports whether the names not yet interned fit under the
-// limit. Called with mu held.
-func (in *interner) fitsLocked(names func(yield func(string))) bool {
-	pending := 0
-	var seenBuf [8]string
-	var seenMap map[string]struct{}
-	names(func(s string) {
-		if _, ok := in.ids[s]; ok {
-			return
-		}
-		if seenMap != nil {
-			if _, dup := seenMap[s]; dup {
-				return
-			}
-			seenMap[s] = struct{}{}
-			pending++
-			return
-		}
-		for i := range pending {
-			if seenBuf[i] == s {
-				return
-			}
-		}
-		if pending < len(seenBuf) {
-			seenBuf[pending] = s
-			pending++
-			return
-		}
-		seenMap = make(map[string]struct{}, len(seenBuf)+1)
-		for _, prev := range seenBuf {
-			seenMap[prev] = struct{}{}
-		}
-		seenMap[s] = struct{}{}
-		pending++
-	})
-	return len(in.ids)+pending <= in.limit
-}
-
-// internLocked returns the ordinal for s, assigning the next free one on
-// first use. Called with mu held, after fitsLocked.
-func (in *interner) internLocked(s string) uint32 {
-	if id, ok := in.ids[s]; ok {
-		return id
-	}
-	id := uint32(len(in.ids))
-	in.ids[s] = id
-	in.names = append(in.names, s)
-	if id < uint32(len(in.fastNames)) {
-		sCopy := s
-		in.fastNames[id].Store(&sCopy)
-	}
-	return id
-}
-
-func (in *interner) nameForOrdinal(ord uint32) string {
-	if ord < uint32(len(in.fastNames)) {
-		if p := in.fastNames[ord].Load(); p != nil {
-			return *p
-		}
-	}
-	in.mu.RLock()
-	defer in.mu.RUnlock()
-	if int(ord) < len(in.names) {
-		return in.names[ord]
-	}
-	return ""
+	return m.pods.At(int(ord))
 }

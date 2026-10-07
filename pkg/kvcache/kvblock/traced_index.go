@@ -33,7 +33,8 @@ type tracedIndex struct {
 	next Index
 }
 
-// tracedWalker carries the KeyWalker capability of the wrapped index.
+// tracedWalker carries the KeyWalker and SnapshotWalker capabilities of the
+// wrapped index.
 type tracedWalker struct {
 	*tracedIndex
 	walker     KeyWalker
@@ -41,7 +42,8 @@ type tracedWalker struct {
 }
 
 // NewTracedIndex wraps an Index and emits OpenTelemetry traces for index
-// operations. The wrapper is a KeyWalker exactly when next is one.
+// operations. The wrapper implements KeyWalker and SnapshotWalker when next
+// implements KeyWalker.
 func NewTracedIndex(next Index) Index {
 	t := &tracedIndex{next: next}
 	if walker, ok := next.(KeyWalker); ok {
@@ -95,7 +97,7 @@ func (t *tracedWalker) WalkSnapshots(ctx context.Context, requestKeys []BlockHas
 			if !found {
 				return visit(pos, nil)
 			}
-			return visit(pos, buildPodSnapshot(entries))
+			return visit(pos, BuildPodSnapshot(entries))
 		})
 	}
 	tracer := tracing.Tracer(TracerScope)
@@ -113,9 +115,17 @@ func (t *tracedWalker) WalkSnapshots(ctx context.Context, requestKeys []BlockHas
 	span.SetAttributes(semconv.LLMDKVCacheIndexWalkKeyCount(len(requestKeys)))
 
 	present := 0
+	lastPresentPos := -1
 	err := t.snapWalker.WalkSnapshots(ctx, requestKeys, func(pos int, snap *PodSnapshot) bool {
 		if snap != nil {
-			present++
+			if lastPresentPos >= 0 && pos > lastPresentPos {
+				present += pos - lastPresentPos
+			} else {
+				present++
+			}
+			lastPresentPos = pos
+		} else {
+			lastPresentPos = -1
 		}
 		return visit(pos, snap)
 	})
