@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -29,6 +28,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	"github.com/llm-d/llm-d-router/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-router/pkg/kvcache/metrics"
 )
 
 // Config holds the configuration for the Indexer module.
@@ -125,18 +125,21 @@ func (k *Indexer) KVBlockIndex() kvblock.Index {
 func (k *Indexer) ComputeBlockKeysFromTokens(ctx context.Context, tokens []uint32, modelName string,
 	extraFeatures []*kvblock.BlockExtraFeatures,
 ) ([]kvblock.BlockHash, error) {
-	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvcache.ComputeBlockKeysFromTokens")
-
 	blockKeys, err := k.tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, extraFeatures)
 	if err != nil {
-		traceLogger.Error(err, "blockKey conversion failed")
+		log.FromContext(ctx).V(logging.TRACE).WithName("kvcache.ComputeBlockKeysFromTokens").Error(err, "blockKey conversion failed")
 		return nil, fmt.Errorf("blockKey conversion failed: %w", err)
 	}
-	if len(blockKeys) == 0 {
-		traceLogger.Info("no block keys found")
+	if traceLogger := log.FromContext(ctx).V(logging.TRACE); traceLogger.Enabled() {
+		traceLogger = traceLogger.WithName("kvcache.ComputeBlockKeysFromTokens")
+		if len(blockKeys) == 0 {
+			traceLogger.Info("no block keys found")
+			return nil, nil
+		}
+		traceLogger.Info("computed block keys", "tokens", tokens, "block-keys", blockKeys)
+	} else if len(blockKeys) == 0 {
 		return nil, nil
 	}
-	traceLogger.Info("computed block keys", "tokens", tokens, "block-keys", blockKeys)
 
 	return blockKeys, nil
 }
@@ -156,54 +159,109 @@ func (k *Indexer) ScoreTokens(
 	extraFeatures []*kvblock.BlockExtraFeatures,
 ) (map[string]float64, error) {
 	tracer := tracing.Tracer(TracerScope)
-	ctx, span := tracer.Start(ctx, "score_tokens",
-		trace.WithSpanKind(trace.SpanKindInternal),
-	)
+	ctx, span := tracer.Start(ctx, "score_tokens", internalSpanStartOpts...)
 	defer span.End()
 
 	// Correlate the log lines below (block keys, pod scores) when the indexer is
 	// driven directly. Reached through an EPP request the context is already
 	// correlated at the entry point and this is a no-op.
 	ctx = tracing.LoggerWithSpanContext(ctx, span)
-	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvcache.ScoreTokens")
+	traceLogger := log.FromContext(ctx).V(logging.TRACE)
+	traceEnabled := traceLogger.Enabled()
+	if traceEnabled {
+		traceLogger = traceLogger.WithName("kvcache.ScoreTokens")
+	}
 
 	blockKeys, err := k.tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, modelName, extraFeatures)
 	if err != nil {
 		return nil, fmt.Errorf("blockKey conversion failed: %w", err)
 	}
 
-	span.SetAttributes(
-		semconv.GenAIRequestModel(modelName),
-		semconv.LLMDKVCachePodCount(len(podIdentifiers)),
-		semconv.LLMDKVCacheTokenCount(len(tokens)),
-		semconv.LLMDKVCacheBlockKeysCount(len(blockKeys)),
-	)
+	if span.IsRecording() {
+		span.SetAttributes(
+			semconv.GenAIRequestModel(modelName),
+			semconv.LLMDKVCachePodCount(len(podIdentifiers)),
+			semconv.LLMDKVCacheTokenCount(len(tokens)),
+			semconv.LLMDKVCacheBlockKeysCount(len(blockKeys)),
+		)
+	}
 
 	if len(blockKeys) == 0 {
-		traceLogger.Info("no block keys found, returning empty scores")
+		if traceEnabled {
+			traceLogger.Info("no block keys found, returning empty scores")
+		}
 		//nolint:nilnil // no need to return an error
 		return nil, nil
 	}
-	traceLogger.Info("found tokens", "tokens", tokens, "block-keys", blockKeys)
+	if traceEnabled {
+		traceLogger.Info("found tokens", "tokens", tokens, "block-keys", blockKeys)
+	}
 
-	matches, err := k.MatchBlockKeys(ctx, blockKeys, sets.New(podIdentifiers...))
+	var podFilter sets.Set[string]
+	if len(podIdentifiers) > 0 {
+		podFilter = sets.New(podIdentifiers...)
+	}
+	podScores, blocksFound, err := k.scoreBlockKeys(ctx, blockKeys, podFilter)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("failed to match block keys: %w", err)
 	}
-	traceLogger.Info("matched block keys", "block-keys", blockKeys, "matches", matches)
-
-	podScores := make(map[string]float64, len(matches))
-	for pod, m := range matches {
-		podScores[pod] = m.WeightedScore
+	if traceEnabled {
+		traceLogger.Info("matched block keys", "block-keys", blockKeys, "scores", podScores)
 	}
+
 	// Block-level hit telemetry: the longest contiguous prefix one candidate
 	// holds, which is as far as a walk reads.
-	blocksFound := maxMatchedBlocks(matches)
-	span.SetAttributes(
-		semconv.LLMDKVCacheBlockHitRatio(float64(blocksFound)/float64(len(blockKeys))),
-		semconv.LLMDKVCacheBlocksFound(blocksFound),
-	)
+	if span.IsRecording() {
+		span.SetAttributes(
+			semconv.LLMDKVCacheBlockHitRatio(float64(blocksFound)/float64(len(blockKeys))),
+			semconv.LLMDKVCacheBlocksFound(blocksFound),
+		)
+	}
 
 	return podScores, nil
+}
+
+func (k *Indexer) scoreBlockKeys(ctx context.Context, keys []kvblock.BlockHash,
+	podFilter sets.Set[string],
+) (map[string]float64, int, error) {
+	if len(keys) == 0 {
+		return map[string]float64{}, 0, nil
+	}
+
+	tracer := tracing.Tracer(TracerScope)
+	ctx, span := tracer.Start(ctx, "match_block_keys", internalSpanStartOpts...)
+	defer span.End()
+	if span.IsRecording() {
+		span.SetAttributes(
+			semconv.LLMDKVCachePrefixMatchKeyCount(len(keys)),
+			semconv.LLMDKVCachePrefixMatchPodFilterCount(podFilter.Len()),
+			semconv.LLMDKVCachePrefixMatchWalked(k.keyWalker != nil),
+		)
+	}
+
+	var scores map[string]float64
+	var blocksFound int
+	var err error
+	if k.keyWalker != nil {
+		scores, blocksFound, err = scoreWalk(ctx, k.keyWalker, keys, k.tierWeights, podFilter)
+	} else {
+		scores, blocksFound, err = scoreLookup(ctx, k.kvBlockIndex, keys, k.tierWeights, podFilter)
+	}
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, 0, err
+	}
+
+	if k.recordHits {
+		metrics.MaxPodHitCount.Add(float64(blocksFound))
+		metrics.LookupHits.Add(float64(blocksFound))
+	}
+	if span.IsRecording() {
+		span.SetAttributes(
+			semconv.LLMDKVCachePrefixMatchPodsMatched(len(scores)),
+			semconv.LLMDKVCachePrefixMatchLongestChain(blocksFound),
+		)
+	}
+	return scores, blocksFound, nil
 }
