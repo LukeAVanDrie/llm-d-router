@@ -18,28 +18,31 @@ package multimodal
 
 import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
+
+	attrmm "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/multimodal"
 )
 
 // cacheSnapshot returns a hash→pod-set view of the per-endpoint caches for assertions.
 func (p *Producer) cacheSnapshot() map[string]map[string]struct{} {
-	p.mutex.RLock()
-	defer p.mutex.RUnlock()
+	p.podMu.RLock()
+	defer p.podMu.RUnlock()
 	snapshot := map[string]map[string]struct{}{}
-	for pod, podCache := range p.caches {
-		for _, hash := range podCache.Keys() {
+	for _, ps := range p.podToLRU {
+		ps.mu.Lock()
+		for _, hash := range ps.lru.Keys() {
 			if snapshot[hash] == nil {
 				snapshot[hash] = map[string]struct{}{}
 			}
-			snapshot[hash][pod] = struct{}{}
+			snapshot[hash][ps.podStr] = struct{}{}
 		}
+		ps.mu.Unlock()
 	}
 	return snapshot
 }
 
 func (p *Producer) putCacheEntry(hash string, pods ...k8stypes.NamespacedName) {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
+	item := [1]attrmm.MatchItem{{Hash: hash, Size: 1}}
 	for _, pod := range pods {
-		p.getOrCreatePodCache(pod.String()).Add(hash, struct{}{})
+		p.addItemsToPod(pod, item[:])
 	}
 }

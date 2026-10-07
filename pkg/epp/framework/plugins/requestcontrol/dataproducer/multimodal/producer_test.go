@@ -344,6 +344,76 @@ func TestExtractEndpointRemovesDeletedPod(t *testing.T) {
 	assert.NotContains(t, cache["hash-a"], podB.String())
 }
 
+func TestProduceBeyond256PodsAndOrdinalRecycling(t *testing.T) {
+	const numPods = 300
+	producer := newTestProducer(t, nil, nil)
+
+	pods := make([]k8stypes.NamespacedName, numPods)
+	endpoints := make([]scheduling.Endpoint, numPods)
+	for i := range numPods {
+		pods[i] = k8stypes.NamespacedName{Namespace: "default", Name: fmt.Sprintf("pod-%03d", i)}
+		endpoints[i] = newEndpoint(pods[i])
+		switch i % 3 {
+		case 0:
+			producer.putCacheEntry("hash-1", pods[i])
+			producer.putCacheEntry("hash-3", pods[i])
+		case 1:
+			producer.putCacheEntry("hash-2", pods[i])
+		}
+	}
+
+	req := &scheduling.InferenceRequest{
+		RequestID: "req-overflow",
+		Body: &fwkrh.InferenceRequestBody{
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{
+					MultiModalFeatures: []fwkrh.MultiModalFeature{
+						{Modality: fwkrh.ModalityImage, Hash: "hash-1", Length: 10},
+						{Modality: fwkrh.ModalityImage, Hash: "hash-2", Length: 10},
+						{Modality: fwkrh.ModalityImage, Hash: "hash-3", Length: 10},
+					},
+				}},
+			},
+		},
+	}
+	require.NoError(t, producer.Produce(context.Background(), req, endpoints))
+
+	img := string(fwkrh.ModalityImage)
+	allItems := []attrmm.MatchItem{
+		{Hash: "hash-1", Size: 10, Modality: img},
+		{Hash: "hash-2", Size: 10, Modality: img},
+		{Hash: "hash-3", Size: 10, Modality: img},
+	}
+	for i := range numPods {
+		switch i % 3 {
+		case 0:
+			assertMatchInfo(t, producer, endpoints[i],
+				[]attrmm.MatchItem{{Hash: "hash-1", Size: 10, Modality: img}, {Hash: "hash-3", Size: 10, Modality: img}},
+				allItems)
+		case 1:
+			assertMatchInfo(t, producer, endpoints[i],
+				[]attrmm.MatchItem{{Hash: "hash-2", Size: 10, Modality: img}},
+				allItems)
+		case 2:
+			assertMatchInfo(t, producer, endpoints[i], nil, allItems)
+		}
+	}
+
+	removedPod := pods[270]
+	require.NoError(t, producer.Extract(context.Background(), fwkdl.EndpointEvent{
+		Type:     fwkdl.EventDelete,
+		Endpoint: fwkdl.NewEndpoint(&fwkdl.EndpointMetadata{ID: removedPod}, nil),
+	}))
+	newPod := k8stypes.NamespacedName{Namespace: "default", Name: "pod-recycled"}
+	producer.putCacheEntry("hash-2", newPod)
+
+	epRemoved := newEndpoint(removedPod)
+	epNew := newEndpoint(newPod)
+	require.NoError(t, producer.Produce(context.Background(), req, []scheduling.Endpoint{epRemoved, epNew}))
+	assertMatchInfo(t, producer, epRemoved, nil, allItems)
+	assertMatchInfo(t, producer, epNew, []attrmm.MatchItem{{Hash: "hash-2", Size: 10, Modality: img}}, allItems)
+}
+
 type testHandle struct {
 	ctx                context.Context
 	podList            func() []k8stypes.NamespacedName

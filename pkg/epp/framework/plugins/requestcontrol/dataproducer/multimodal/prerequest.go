@@ -49,17 +49,12 @@ func (p *Producer) PreRequest(ctx context.Context, request *scheduling.Inference
 	items := state.items
 	// Update cache asynchronously to avoid blocking the request path.
 	p.wg.Go(func() {
-		p.mutex.Lock()
-		defer p.mutex.Unlock()
 		for _, endpoint := range targets {
 			metadata := endpoint.GetMetadata()
 			if metadata == nil {
 				continue
 			}
-			podCache := p.getOrCreatePodCache(metadata.ID.String())
-			for _, item := range items {
-				podCache.Add(item.Hash, struct{}{})
-			}
+			p.addItemsToPod(metadata.ID, items)
 		}
 	})
 	return nil
