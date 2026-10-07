@@ -18,10 +18,13 @@ package prefixhash
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
@@ -279,5 +282,63 @@ func TestKVCacheBlock_Hash(t *testing.T) {
 				assert.NotEqual(t, hashA, hashB)
 			}
 		})
+	}
+}
+
+// BenchmarkPrefixHashGetBlockHashes measures GetBlockHashes across prompt block
+// lengths (at 64 tokens per block) in sequential and parallel modes.
+func BenchmarkPrefixHashGetBlockHashes(b *testing.B) {
+	const blockSizeTokens = 64
+
+	modes := []string{"Sequential", "Parallel"}
+	blockCounts := []int{64, 512, 3750}
+
+	for _, mode := range modes {
+		for _, numBlocks := range blockCounts {
+			name := fmt.Sprintf("Mode=%s/Blocks=%d", mode, numBlocks)
+			b.Run(name, func(b *testing.B) {
+				ctx := log.IntoContext(context.Background(), logr.Discard())
+				tokenIDs := make([]uint32, numBlocks*blockSizeTokens)
+				for i := range tokenIDs {
+					tokenIDs[i] = uint32(i + 1) //#nosec G115 -- bounded benchmark fixture
+				}
+				req := &fwksched.InferenceRequest{
+					RequestID:   "bench-req",
+					TargetModel: "bench-model",
+					Body: &fwkrh.InferenceRequestBody{
+						TokenizedRequest: &fwkrh.TokenizedRequest{
+							Prompts: []fwkrh.PromptTokens{{TokenIDs: tokenIDs}},
+						},
+					},
+				}
+
+				b.ReportAllocs()
+				b.ResetTimer()
+				if mode == "Sequential" {
+					for range b.N {
+						hashes := GetBlockHashes(ctx, req, blockSizeTokens, numBlocks)
+						if len(hashes) != 1 || len(hashes[0]) != numBlocks {
+							b.Fatalf("got %v prompt hashes, want 1x%d", len(hashes), numBlocks)
+						}
+					}
+				} else {
+					b.RunParallel(func(pb *testing.PB) {
+						for pb.Next() {
+							hashes := GetBlockHashes(ctx, req, blockSizeTokens, numBlocks)
+							if len(hashes) != 1 || len(hashes[0]) != numBlocks {
+								b.Errorf("got %v prompt hashes, want 1x%d", len(hashes), numBlocks)
+								return
+							}
+						}
+					})
+				}
+				b.StopTimer()
+				if elapsed := b.Elapsed().Seconds(); elapsed > 0 {
+					reqsPerSec := float64(b.N) / elapsed
+					b.ReportMetric(float64(numBlocks)*reqsPerSec, "block_ops/s")
+					b.ReportMetric(reqsPerSec, "reqs/s")
+				}
+			})
+		}
 	}
 }
