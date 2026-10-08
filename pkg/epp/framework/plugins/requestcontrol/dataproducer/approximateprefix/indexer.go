@@ -128,7 +128,8 @@ func (i *indexer) MatchLongestPrefix(hashes []blockHash, candidates []ServerID) 
 }
 
 // runLength returns the largest n such that the LRU holds hashes[n-1], relying
-// on the contiguous run described on Add.
+// on the contiguous run described on Add. It uses only Contains, which does not
+// update recency, so callers need only the pod's read lock.
 func runLength(l *simplelru.LRU[blockHash, struct{}], hashes []blockHash) int {
 	if !l.Contains(hashes[0]) {
 		return 0
