@@ -20,8 +20,11 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strconv"
 	"sync/atomic"
 	"testing"
+
+	"github.com/llm-d/llm-d-router/test/utils/mooncake"
 )
 
 // BenchmarkParallel runs concurrent queries, alone (read) or each followed by
@@ -88,6 +91,59 @@ func BenchmarkRetainedHeap(b *testing.B) {
 				runtime.KeepAlive(idx)
 				cancel()
 			}
+		})
+	}
+}
+
+// BenchmarkMooncakeReplay replays the Mooncake trace against the indexer from
+// concurrent goroutines, after loading every worker's resident blocks.
+// QueryOnly matches each turn against all workers. MixedOverload also adds
+// the blocks the turn's worker stored. It
+// reports block_ops/s over Dynamo's denominators (mooncake.Replay). Set
+// mooncake.TraceEnv to run it.
+func BenchmarkMooncakeReplay(b *testing.B) {
+	r := mooncake.Load(b)
+	idx := newIndexer(b.Context(), mooncake.WorkerBlocks, "bench", "bench")
+	pods := make([]server, mooncake.Workers)
+	ids := make([]ServerID, mooncake.Workers)
+	for w := range pods {
+		ids[w] = ServerID{Namespace: "default", Name: "pod-" + strconv.Itoa(w)}
+		pods[w] = server{ServerID: ids[w], NumOfGPUBlocks: mooncake.WorkerBlocks}
+	}
+
+	type turn struct {
+		query, stored []blockHash
+		pod           server
+	}
+	turns := make([]turn, len(r.Turns))
+	for i, t := range r.Turns {
+		turns[i] = turn{mooncake.Convert[blockHash](t.Query), mooncake.Convert[blockHash](t.Stored), pods[t.Worker]}
+		if len(t.Warm) > 0 {
+			idx.Add(mooncake.Convert[blockHash](t.Warm), turns[i].pod)
+		}
+	}
+
+	for _, mode := range []string{"QueryOnly", "MixedOverload"} {
+		b.Run(mode, func(b *testing.B) {
+			blocks := r.QueryBlocks
+			if mode == "MixedOverload" {
+				blocks = r.EventBlocks
+			}
+			var goroutines atomic.Int64
+			b.ReportAllocs()
+			b.RunParallel(func(pb *testing.PB) {
+				// Each goroutine walks the turns from its own offset.
+				i := int(goroutines.Add(1)) * 9973
+				for pb.Next() {
+					i++
+					t := &turns[i%len(turns)]
+					idx.MatchLongestPrefix(t.query, ids)
+					if mode == "MixedOverload" && len(t.stored) > 0 {
+						idx.Add(t.stored, t.pod)
+					}
+				}
+			})
+			b.ReportMetric(blocks*float64(b.N)/b.Elapsed().Seconds(), "block_ops/s")
 		})
 	}
 }
