@@ -213,7 +213,7 @@ func worker(dup, record uint64, ids []uint64) int {
 	if !nonZero {
 		session = mix(session ^ (record + 1))
 	}
-	return int(mix(dup<<32|session) % Workers)
+	return int(mix(session^mix(dup+1)) % Workers)
 }
 
 // Convert copies keys into a slice of an indexer's block hash type.

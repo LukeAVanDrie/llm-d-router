@@ -96,11 +96,11 @@ func BenchmarkRetainedHeap(b *testing.B) {
 }
 
 // BenchmarkMooncakeReplay replays the Mooncake trace against the indexer from
-// concurrent goroutines, after loading every worker's resident blocks.
-// QueryOnly matches each turn against all workers. MixedOverload also adds
-// the blocks the turn's worker stored. It
-// reports block_ops/s over Dynamo's denominators (mooncake.Replay). Set
-// mooncake.TraceEnv to run it.
+// concurrent goroutines, after adding every turn's query to its worker in
+// trace order. QueryOnly matches each turn against all workers. MixedOverload
+// also adds the query to the turn's worker, as the plugin does after
+// scheduling. It reports block_ops/s over Dynamo's denominators
+// (mooncake.Replay). Set mooncake.TraceEnv to run it.
 func BenchmarkMooncakeReplay(b *testing.B) {
 	r := mooncake.Load(b)
 	idx := newIndexer(b.Context(), mooncake.WorkerBlocks, "bench", "bench")
@@ -112,15 +112,13 @@ func BenchmarkMooncakeReplay(b *testing.B) {
 	}
 
 	type turn struct {
-		query, stored []blockHash
-		pod           server
+		query []blockHash
+		pod   server
 	}
 	turns := make([]turn, len(r.Turns))
 	for i, t := range r.Turns {
-		turns[i] = turn{mooncake.Convert[blockHash](t.Query), mooncake.Convert[blockHash](t.Stored), pods[t.Worker]}
-		if len(t.Warm) > 0 {
-			idx.Add(mooncake.Convert[blockHash](t.Warm), turns[i].pod)
-		}
+		turns[i] = turn{mooncake.Convert[blockHash](t.Query), pods[t.Worker]}
+		idx.Add(turns[i].query, turns[i].pod)
 	}
 
 	for _, mode := range []string{"QueryOnly", "MixedOverload"} {
@@ -138,8 +136,8 @@ func BenchmarkMooncakeReplay(b *testing.B) {
 					i++
 					t := &turns[i%len(turns)]
 					idx.MatchLongestPrefix(t.query, ids)
-					if mode == "MixedOverload" && len(t.stored) > 0 {
-						idx.Add(t.stored, t.pod)
+					if mode == "MixedOverload" {
+						idx.Add(t.query, t.pod)
 					}
 				}
 			})
