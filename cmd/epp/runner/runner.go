@@ -116,6 +116,7 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/responsereceived/topologystamp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/screener/disaggregatedsetrollout"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/screener/endpointpin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/selectivekv"
 	testresponsereceived "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/test/responsereceived"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
@@ -626,6 +627,7 @@ func (r *Runner) registerInTreePlugins() {
 	// request control screeners
 	// Alpha
 	fwkplugin.Register(disaggregatedsetrollout.PluginType, fwkplugin.StabilityAlpha, disaggregatedsetrollout.Factory)
+	fwkplugin.Register(endpointpin.PluginType, fwkplugin.StabilityAlpha, endpointpin.Factory)
 
 	// request control response-received handlers
 	// Alpha
@@ -718,10 +720,10 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(slodeadline.SLODeadlineOrderingPolicyType, fwkplugin.StabilityBeta, slodeadline.SLODeadlineOrderingPolicyFactory)
 	fwkplugin.Register(usagelimits.StaticUsageLimitPolicyType, fwkplugin.StabilityBeta, usagelimits.StaticPolicyFactory)
 	fwkplugin.Register(bandselection.StrictBandSelectionPolicyType, fwkplugin.StabilityBeta, bandselection.StrictPolicyFactory)
+	fwkplugin.Register(priorityholdback.PolicyType, fwkplugin.StabilityBeta, priorityholdback.PolicyFactory)
 	// Alpha
 	fwkplugin.Register(evictfiltering.SheddableFilterType, fwkplugin.StabilityAlpha, evictfiltering.SheddableFilterFactory)
 	fwkplugin.Register(evictordering.PriorityThenTimeOrderingType, fwkplugin.StabilityAlpha, evictordering.PriorityThenTimeOrderingFactory)
-	fwkplugin.Register(priorityholdback.PolicyType, fwkplugin.StabilityAlpha, priorityholdback.PolicyFactory)
 	fwkplugin.Register(softreflectiveceiling.PolicyType, fwkplugin.StabilityAlpha, softreflectiveceiling.Factory)
 
 	// Register Request level data producer plugins as defaults for their respective data keys.
