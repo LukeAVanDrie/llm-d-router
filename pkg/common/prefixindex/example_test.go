@@ -3,7 +3,7 @@ package prefixindex_test
 import (
 	"fmt"
 
-	prefixindex "github.com/lukevandrie/prefix-index"
+	"github.com/llm-d/llm-d-router/pkg/common/prefixindex"
 )
 
 func ExampleChainSet() {
