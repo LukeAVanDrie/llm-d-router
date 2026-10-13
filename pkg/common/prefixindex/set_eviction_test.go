@@ -230,3 +230,29 @@ func TestClassesMatchModel(t *testing.T) {
 		}
 	}
 }
+
+// Shrinking the capacity evicts oldest leaves until the bound holds; zero
+// removes the bound.
+func TestSetCapacity(t *testing.T) {
+	s := NewChainSet(0, nil)
+	s.AddRootChain([]uint64{1, 2, 3})    // stamp 1
+	s.AddRootChain([]uint64{11, 12, 13}) // stamp 2
+	s.SetCapacity(4)
+	checkInvariants(t, s)
+	if s.Len() != 4 || s.Contains(2) || s.Contains(3) || !s.Contains(13) {
+		t.Fatalf("after shrinking to 4: Len %d, contains 2=%v 3=%v 13=%v",
+			s.Len(), s.Contains(2), s.Contains(3), s.Contains(13))
+	}
+	s.SetCapacity(0)
+	s.AddRootChain([]uint64{21, 22, 23, 24})
+	if s.Len() != 8 {
+		t.Fatalf("unbounded set holds %d, want 8", s.Len())
+	}
+
+	idx := NewIndex(Config{Endpoints: 2})
+	idx.AddRootChain(1, []uint64{1, 2, 3, 4})
+	idx.SetEndpointCapacity(1, 2)
+	if got := idx.Match([]uint64{1, 2, 3, 4}, []int{1}); got[0] != 2 {
+		t.Fatalf("Match after SetEndpointCapacity = %v, want [2]", got)
+	}
+}

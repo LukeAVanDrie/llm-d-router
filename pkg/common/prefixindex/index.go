@@ -190,6 +190,18 @@ func (idx *Index) Remove(endpoint int, key uint64) bool {
 	return ok
 }
 
+// SetEndpointCapacity bounds the resident blocks on endpoint (0 means
+// unlimited), typically at the engine's reported block capacity.
+func (idx *Index) SetEndpointCapacity(endpoint, capacity int) {
+	if uint(endpoint) >= uint(len(idx.endpoints)) {
+		return
+	}
+	es := &idx.endpoints[endpoint]
+	es.mu.Lock()
+	es.set.SetCapacity(capacity)
+	es.mu.Unlock()
+}
+
 // ClearEndpoint removes all resident blocks on endpoint and clears its root
 // bitmask bits across all shards.
 func (idx *Index) ClearEndpoint(endpoint int) {

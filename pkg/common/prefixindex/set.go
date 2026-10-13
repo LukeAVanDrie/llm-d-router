@@ -379,6 +379,14 @@ func (s *ChainSet) insertBlock(k, parentKey uint64, isRoot bool, stamp uint64) (
 	return false
 }
 
+// SetCapacity changes the bound on resident blocks (0 means unlimited),
+// evicting the oldest leaves, Dormant first, when the new bound is below the
+// current count.
+func (s *ChainSet) SetCapacity(capacity int) {
+	s.capacity = capacity
+	s.enforceCapacity()
+}
+
 func (s *ChainSet) enforceCapacity() {
 	for s.capacity > 0 && len(s.blocks) > s.capacity {
 		if _, ok := s.EvictOldestLeaf(); !ok {
