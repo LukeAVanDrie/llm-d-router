@@ -269,6 +269,17 @@ func (idx *Index[K]) ClearEndpoint(endpoint int) {
 	es.mu.Unlock()
 }
 
+// Contains reports whether key is resident on endpoint (Visible or Dormant).
+func (idx *Index[K]) Contains(endpoint int, key K) bool {
+	es := idx.slot(endpoint)
+	if es == nil {
+		return false
+	}
+	es.mu.RLock()
+	defer es.mu.RUnlock()
+	return es.set.Contains(key)
+}
+
 // Len returns the number of resident blocks on endpoint.
 func (idx *Index[K]) Len(endpoint int) int {
 	es := idx.slot(endpoint)
