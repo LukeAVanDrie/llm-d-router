@@ -196,6 +196,11 @@ func (s *ChainSet) AddRootChain(keys []uint64) {
 // If parentKey is not currently resident in s (or is itself Dormant), newly
 // inserted blocks in keys are marked Dormant until the missing ancestor chain
 // to a depth-0 root is restored.
+//
+// parentKey must name the actual parent block. A segment that starts at a
+// root goes through [ChainSet.AddRootChain]: a parentKey that never becomes
+// resident, such as 0 for an event without a parent, leaves the segment
+// Dormant until capacity evicts it.
 func (s *ChainSet) AddChainUnder(parentKey uint64, keys []uint64) {
 	s.addSegment(parentKey, false, keys)
 }
@@ -330,9 +335,7 @@ func (s *ChainSet) Remove(key uint64) bool {
 	if !removed.isRoot {
 		if pIdx, ok := s.byKey[removed.parentKey]; ok {
 			p := &s.blocks[pIdx]
-			if p.children > 0 {
-				p.children--
-			}
+			p.children--
 			p.stamp = max(p.stamp, removed.stamp)
 			s.syncLeafHeap(pIdx)
 		} else if cnt := s.waitingOn[removed.parentKey]; cnt <= 1 {

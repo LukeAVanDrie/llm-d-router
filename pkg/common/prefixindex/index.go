@@ -165,7 +165,8 @@ func (idx *Index) AddRootChain(endpoint int, keys []uint64) {
 // AddChainUnder records a continuation segment keys[0..L-1] under parentKey on
 // endpoint (used on the precise KV-event path). If parentKey is not currently
 // resident on endpoint, new blocks in keys are stored as Dormant until the
-// missing ancestor chain is restored.
+// missing ancestor chain is restored. Segments that start at a root go through
+// [Index.AddRootChain]; see [ChainSet.AddChainUnder].
 func (idx *Index) AddChainUnder(endpoint int, parentKey uint64, keys []uint64) {
 	if uint(endpoint) >= uint(len(idx.endpoints)) || len(keys) == 0 {
 		return
