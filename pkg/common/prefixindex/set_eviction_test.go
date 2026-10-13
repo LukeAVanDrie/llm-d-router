@@ -256,3 +256,26 @@ func TestSetCapacity(t *testing.T) {
 		t.Fatalf("Match after SetEndpointCapacity = %v, want [2]", got)
 	}
 }
+
+// BenchmarkIndexSharedRootParallel queries one prompt whose root 19 of 128
+// endpoints hold, from every core: the shape where all queries contend on one
+// root shard and the same endpoints' locks.
+func BenchmarkIndexSharedRootParallel(b *testing.B) {
+	const endpoints, holders = 128, 19
+	idx := NewIndex(Config{Endpoints: endpoints})
+	chain := makeChain(7, 320)
+	for ep := range holders {
+		idx.AddRootChain(ep*6, chain[:256+ep])
+	}
+	candidates := make([]int, endpoints)
+	for i := range candidates {
+		candidates[i] = i
+	}
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		out := make([]int, endpoints)
+		for pb.Next() {
+			idx.MatchInto(chain, candidates, out)
+		}
+	})
+}
