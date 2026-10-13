@@ -96,14 +96,14 @@ func (r refSet) runLength(keys []uint64) int {
 	return len(keys)
 }
 
-// checkInvariants verifies that all derived projections (byKey, children, vis,
+// checkInvariants verifies that all derived projections (index, children, vis,
 // dormantCount, waitingOn, and leaves heap) match a fresh recomputation from
 // the authoritative facts (key, parentKey, isRoot, stamp) of s.blocks, and
 // enforces the Forest Leaf Invariant (zero cycles; len(blocks) > 0 => len(leaves) > 0).
 func checkInvariants(t *testing.T, s *ChainSet[uint64]) {
 	t.Helper()
-	if len(s.blocks) != len(s.byKey) {
-		t.Fatalf("len(blocks)=%d != len(byKey)=%d", len(s.blocks), len(s.byKey))
+	if len(s.blocks) != s.index.Len() {
+		t.Fatalf("len(blocks)=%d != index.Len()=%d", len(s.blocks), s.index.Len())
 	}
 	if s.Len() != len(s.blocks) {
 		t.Fatalf("Len()=%d, want %d", s.Len(), len(s.blocks))
@@ -112,14 +112,14 @@ func checkInvariants(t *testing.T, s *ChainSet[uint64]) {
 	wantChildren := make([]uint32, len(s.blocks))
 	wantWaiting := make(map[uint64]int32)
 	for i, b := range s.blocks {
-		if idx, ok := s.byKey[b.key]; !ok || int(idx) != i || !s.Contains(b.key) {
-			t.Fatalf("block[%d] key=%x maps to (%d, %v) in byKey", i, b.key, idx, ok)
+		if idx, ok := s.lookup(b.key); !ok || int(idx) != i || !s.Contains(b.key) {
+			t.Fatalf("block[%d] key=%x maps to (%d, %v) in the index", i, b.key, idx, ok)
 		}
 		if !b.isRoot {
 			if b.parentKey == b.key {
 				t.Fatalf("block[%d] key=%x has self-loop parentKey", i, b.key)
 			}
-			if pIdx, ok := s.byKey[b.parentKey]; ok {
+			if pIdx, ok := s.lookup(b.parentKey); ok {
 				wantChildren[pIdx]++
 			} else {
 				wantWaiting[b.parentKey]++
@@ -144,7 +144,7 @@ func checkInvariants(t *testing.T, s *ChainSet[uint64]) {
 		if b.isRoot {
 			return visVisible
 		}
-		pIdx, ok := s.byKey[b.parentKey]
+		pIdx, ok := s.lookup(b.parentKey)
 		if !ok {
 			return visDormant
 		}
@@ -171,6 +171,24 @@ func checkInvariants(t *testing.T, s *ChainSet[uint64]) {
 			}
 		} else if b.heapIdx != -1 {
 			t.Fatalf("non-leaf block[%d] (children=%d) has heapIdx=%d, want -1", i, b.children, b.heapIdx)
+		}
+	}
+
+	// The index entry of every block equals its recomputation from the slab.
+	for i, b := range s.blocks {
+		parent, meta, ok := s.index.Load(b.key)
+		want := uint64(i)
+		if b.vis == visVisible {
+			want |= metaVisible
+		}
+		if b.isRoot {
+			want |= metaRoot
+		}
+		if b.children > 0 {
+			want |= metaChildren
+		}
+		if !ok || meta != want || parent != b.parentKey {
+			t.Fatalf("block[%d] key=%x index entry (%x, %x, %v), want (%x, %x)", i, b.key, parent, meta, ok, b.parentKey, want)
 		}
 	}
 

@@ -72,6 +72,8 @@ limitations under the License.
 // external synchronization. Use [Index] for concurrent multi-endpoint routing.
 package prefixindex
 
+import "github.com/llm-d/llm-d-router/pkg/common/atomictable"
+
 const (
 	visUnvisited uint8 = 0
 	visDormant   uint8 = 1
@@ -105,10 +107,13 @@ type RootCallback[K ~uint64] func(rootKey K, held bool)
 // A ChainSet is not safe for concurrent use by multiple goroutines without
 // external synchronization; use [Index] for concurrent multi-endpoint routing.
 type ChainSet[K ~uint64] struct {
-	byKey     map[K]uint32 // key -> index in blocks (0 .. len(blocks)-1)
-	blocks    []block[K]   // dense slice of resident blocks
-	leaves    []uint32     // min-heap of indices into blocks with children == 0
-	waitingOn map[K]int32  // absent parentKey -> count of resident children waiting on it
+	// index maps each resident key to its slot in blocks and to what a probe
+	// needs (parent key, visible, root, has children); see publish. Readers
+	// may probe it without the endpoint lock and validate with a version.
+	index     atomictable.Table
+	blocks    []block[K]  // dense slice of resident blocks
+	leaves    []uint32    // min-heap of indices into blocks with children == 0
+	waitingOn map[K]int32 // absent parentKey -> count of resident children waiting on it
 
 	// classCount counts resident blocks per class; inUse lists the classes
 	// with a nonzero count. Classes are small integers, so counts index a slice.
@@ -136,14 +141,13 @@ func NewChainSet[K ~uint64](capacity int, onRoot RootCallback[K]) *ChainSet[K] {
 }
 
 func (s *ChainSet[K]) ensureInit() {
-	if s.byKey != nil {
+	if s.waitingOn != nil {
 		return
 	}
 	initCap := 256
 	if s.capacity > 0 {
 		initCap = min(s.capacity, initCap)
 	}
-	s.byKey = make(map[K]uint32, initCap)
 	s.blocks = make([]block[K], 0, initCap)
 	s.waitingOn = make(map[K]int32)
 }
@@ -159,10 +163,10 @@ func (s *ChainSet[K]) Clear() {
 			}
 		}
 	}
-	if s.byKey == nil {
+	if s.waitingOn == nil {
 		s.ensureInit()
 	} else {
-		clear(s.byKey)
+		s.index.Clear()
 		clear(s.blocks)
 		s.blocks = s.blocks[:0]
 		clear(s.waitingOn)
@@ -188,7 +192,7 @@ func (s *ChainSet[K]) Rebuilds() uint64 { return s.rebuilds }
 
 // Class returns the class of a resident key. New keys have class 0.
 func (s *ChainSet[K]) Class(key K) (uint32, bool) {
-	idx, ok := s.byKey[key]
+	idx, ok := s.lookup(key)
 	if !ok {
 		return 0, false
 	}
@@ -200,7 +204,7 @@ func (s *ChainSet[K]) Class(key K) (uint32, bool) {
 // such as an interned set of tiers, to blocks. Classes should be small
 // integers, since per-class counts index a slice.
 func (s *ChainSet[K]) SetClass(key K, class uint32) bool {
-	idx, ok := s.byKey[key]
+	idx, ok := s.lookup(key)
 	if !ok {
 		return false
 	}
@@ -249,7 +253,7 @@ func (s *ChainSet[K]) countClass(c uint32, delta int32) {
 // the deepest key a read reached is enough, since a parent inherits its
 // child's stamp when the child leaves.
 func (s *ChainSet[K]) Touch(key K) bool {
-	idx, ok := s.byKey[key]
+	idx, ok := s.lookup(key)
 	if !ok {
 		return false
 	}
@@ -270,7 +274,7 @@ func (s *ChainSet[K]) restamp(idx uint32, stamp uint64) {
 
 // Contains reports whether key is currently resident in s (Visible or Dormant).
 func (s *ChainSet[K]) Contains(key K) bool {
-	_, ok := s.byKey[key]
+	_, ok := s.lookup(key)
 	return ok
 }
 
@@ -304,7 +308,7 @@ func (s *ChainSet[K]) addSegment(parentKey K, isRoot bool, keys []K) {
 	stamp := s.seq
 
 	if !isRoot {
-		if pIdx, ok := s.byKey[parentKey]; ok {
+		if pIdx, ok := s.lookup(parentKey); ok {
 			s.restamp(pIdx, stamp)
 		}
 	}
@@ -314,7 +318,7 @@ func (s *ChainSet[K]) addSegment(parentKey K, isRoot bool, keys []K) {
 		if i > 0 {
 			parentKey, isRoot = keys[i-1], false
 		}
-		if idx, exists := s.byKey[k]; exists {
+		if idx, exists := s.lookup(k); exists {
 			s.restamp(idx, stamp)
 			continue
 		}
@@ -345,7 +349,7 @@ func (s *ChainSet[K]) createsCycle(k, parentKey K) bool {
 		return false
 	}
 	for cur := parentKey; ; {
-		idx, ok := s.byKey[cur]
+		idx, ok := s.lookup(cur)
 		if !ok || s.blocks[idx].isRoot {
 			return false
 		}
@@ -360,8 +364,9 @@ func (s *ChainSet[K]) insertBlock(k, parentKey K, isRoot bool, stamp uint64) (ne
 	vis := visVisible
 	if isRoot {
 		parentKey = 0
-	} else if pIdx, ok := s.byKey[parentKey]; ok {
+	} else if pIdx, ok := s.lookup(parentKey); ok {
 		s.blocks[pIdx].children++
+		s.publish(pIdx)
 		s.syncLeafHeap(pIdx)
 		vis = s.blocks[pIdx].vis
 	} else {
@@ -384,7 +389,7 @@ func (s *ChainSet[K]) insertBlock(k, parentKey K, isRoot bool, stamp uint64) (ne
 		isRoot:    isRoot,
 		vis:       vis,
 	})
-	s.byKey[k] = idx
+	s.publish(idx)
 	s.countClass(0, 1)
 	if vis == visDormant {
 		s.dormantCount++
@@ -421,7 +426,7 @@ func (s *ChainSet[K]) enforceCapacity() {
 // children are recorded as waiting on key in O(1). Remove reports whether key
 // was resident in s.
 func (s *ChainSet[K]) Remove(key K) bool {
-	idx, ok := s.byKey[key]
+	idx, ok := s.lookup(key)
 	if !ok {
 		return false
 	}
@@ -430,9 +435,10 @@ func (s *ChainSet[K]) Remove(key K) bool {
 		s.onRoot(removed.key, false)
 	}
 	if !removed.isRoot {
-		if pIdx, ok := s.byKey[removed.parentKey]; ok {
+		if pIdx, ok := s.lookup(removed.parentKey); ok {
 			p := &s.blocks[pIdx]
 			p.children--
+			s.publish(pIdx)
 			p.stamp = max(p.stamp, removed.stamp)
 			s.syncLeafHeap(pIdx)
 		} else if cnt := s.waitingOn[removed.parentKey]; cnt <= 1 {
@@ -459,13 +465,13 @@ func (s *ChainSet[K]) Remove(key K) bool {
 
 func (s *ChainSet[K]) deleteBlockAt(idx uint32) {
 	s.removeFromLeafHeap(idx)
-	delete(s.byKey, s.blocks[idx].key)
+	s.index.Delete(uint64(s.blocks[idx].key))
 
 	last := uint32(len(s.blocks) - 1) //#nosec G115 -- one endpoint holds far fewer than 2^32 blocks
 	if idx != last {
 		moved := s.blocks[last]
 		s.blocks[idx] = moved
-		s.byKey[moved.key] = idx
+		s.publish(idx)
 		if moved.heapIdx >= 0 {
 			s.leaves[moved.heapIdx] = idx
 		}
@@ -496,7 +502,7 @@ func (s *ChainSet[K]) EvictOldestLeaf() (K, bool) {
 // depth-0 root key and each subsequent keys[i] commits to parent keys[i-1].
 func (s *ChainSet[K]) RunLength(keys []K, hints []int) int {
 	L := len(keys)
-	if L == 0 || len(s.blocks) == 0 {
+	if L == 0 {
 		return 0
 	}
 	vis0, hasChildren0 := s.probeAt(keys, 0)
@@ -535,21 +541,48 @@ func (s *ChainSet[K]) RunLength(keys []K, hints []int) int {
 }
 
 func (s *ChainSet[K]) probeAt(keys []K, pos int) (visible bool, hasChildren bool) {
-	idx, ok := s.byKey[keys[pos]]
-	if !ok {
-		return false, false
-	}
-	b := &s.blocks[idx]
-	if b.vis != visVisible {
+	parent, meta, ok := s.index.Load(uint64(keys[pos]))
+	if !ok || meta&metaVisible == 0 {
 		return false, false
 	}
 	if pos == 0 {
-		return b.isRoot, b.children > 0
+		return meta&metaRoot != 0, meta&metaChildren != 0
 	}
-	if b.isRoot || b.parentKey != keys[pos-1] {
+	if meta&metaRoot != 0 || K(parent) != keys[pos-1] {
 		return false, false
 	}
-	return true, b.children > 0
+	return true, meta&metaChildren != 0
+}
+
+// Index entry meta bits above the slot.
+const (
+	metaVisible  = 1 << 32
+	metaRoot     = 1 << 33
+	metaChildren = 1 << 34
+)
+
+// lookup returns key's slot in blocks.
+func (s *ChainSet[K]) lookup(key K) (uint32, bool) {
+	_, meta, ok := s.index.Load(uint64(key))
+	return uint32(meta), ok //#nosec G115 -- the low 32 bits hold the slot
+}
+
+// publish writes block idx's index entry: its slot, parent, and the facts a
+// probe reads. Every change to a block's slot, visibility, root flag or
+// whether it has children goes through publish.
+func (s *ChainSet[K]) publish(idx uint32) {
+	b := &s.blocks[idx]
+	meta := uint64(idx)
+	if b.vis == visVisible {
+		meta |= metaVisible
+	}
+	if b.isRoot {
+		meta |= metaRoot
+	}
+	if b.children > 0 {
+		meta |= metaChildren
+	}
+	s.index.Store(uint64(b.key), uint64(b.parentKey), meta)
 }
 
 // rebuild recomputes all derived projections (children, vis, dormantCount,
@@ -571,7 +604,7 @@ func (s *ChainSet[K]) rebuild() {
 	for i := range s.blocks {
 		b := &s.blocks[i]
 		if !b.isRoot {
-			if pIdx, ok := s.byKey[b.parentKey]; ok {
+			if pIdx, ok := s.lookup(b.parentKey); ok {
 				s.blocks[pIdx].children++
 			} else {
 				s.waitingOn[b.parentKey]++
@@ -592,6 +625,9 @@ func (s *ChainSet[K]) rebuild() {
 	for i := len(s.leaves)/2 - 1; i >= 0; i-- {
 		s.siftDown(i)
 	}
+	for i := range s.blocks {
+		s.publish(uint32(i)) //#nosec G115 -- one endpoint holds far fewer than 2^32 blocks
+	}
 }
 
 func (s *ChainSet[K]) resolveVis(idx uint32) uint8 {
@@ -600,7 +636,7 @@ func (s *ChainSet[K]) resolveVis(idx uint32) uint8 {
 		return b.vis
 	}
 	b.vis = visDormant
-	if pIdx, ok := s.byKey[b.parentKey]; ok && s.resolveVis(pIdx) == visVisible {
+	if pIdx, ok := s.lookup(b.parentKey); ok && s.resolveVis(pIdx) == visVisible {
 		s.blocks[idx].vis = visVisible
 	}
 	return s.blocks[idx].vis
