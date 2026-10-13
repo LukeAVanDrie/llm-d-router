@@ -253,12 +253,12 @@ func TestZeroValueChainSetAndConfigBounds(t *testing.T) {
 
 	// Verify Config.Endpoints default and >MaxEndpoints overflow probing path.
 	idxDefault := NewIndex(Config{Endpoints: 0})
-	if len(idxDefault.endpoints) != 128 {
-		t.Fatalf("Endpoints=0 produced %d slots, want 128", len(idxDefault.endpoints))
+	if len(idxDefault.slots()) != 128 {
+		t.Fatalf("Endpoints=0 produced %d slots, want 128", len(idxDefault.slots()))
 	}
 	idxOverflow := NewIndex(Config{Endpoints: MaxEndpoints + 44})
-	if len(idxOverflow.endpoints) != MaxEndpoints+44 {
-		t.Fatalf("Endpoints=%d produced %d slots, want %d", MaxEndpoints+44, len(idxOverflow.endpoints), MaxEndpoints+44)
+	if len(idxOverflow.slots()) != MaxEndpoints+44 {
+		t.Fatalf("Endpoints=%d produced %d slots, want %d", MaxEndpoints+44, len(idxOverflow.slots()), MaxEndpoints+44)
 	}
 	ch := []uint64{100, 101, 102, 103}
 	idxOverflow.AddRootChain(5, ch[:2])

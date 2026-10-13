@@ -20,6 +20,7 @@ import (
 	"math/rand/v2"
 	"slices"
 	"strconv"
+	"sync"
 	"testing"
 )
 
@@ -278,4 +279,39 @@ func BenchmarkIndexSharedRootParallel(b *testing.B) {
 			idx.MatchInto(chain, candidates, out)
 		}
 	})
+}
+
+// Writes to ordinals beyond the initial table grow it, concurrently with
+// queries; ordinals outside the growth bound are ignored.
+func TestIndexGrowsEndpoints(t *testing.T) {
+	idx := NewIndex(Config{Endpoints: 2})
+	chain := makeChain(3, 16)
+	var wg sync.WaitGroup
+	for g := range 4 {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for ep := g; ep < 600; ep += 4 {
+				idx.AddRootChain(ep, chain[:1+ep%16])
+				idx.Match(chain, []int{ep, ep + 1, ep / 2})
+			}
+		}(g)
+	}
+	wg.Wait()
+	if n := len(idx.slots()); n < 600 {
+		t.Fatalf("table has %d slots after writes to ordinal 599", n)
+	}
+	got := idx.Match(chain, []int{0, 17, 300, 599, 100000, -1})
+	want := []int{1, 2, 13, 8, 0, 0}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Match = %v, want %v", got, want)
+	}
+	idx.AddRootChain(maxEndpointOrdinals, chain)
+	idx.AddRootChain(-1, chain)
+	if n := len(idx.slots()); n >= maxEndpointOrdinals {
+		t.Fatalf("an out-of-bound write grew the table to %d", n)
+	}
+	if st := idx.Stats(); st.HeldBlocks == 0 {
+		t.Fatal("Stats misses the grown endpoints")
+	}
 }

@@ -19,7 +19,12 @@ package prefixindex
 import (
 	"slices"
 	"sync"
+	"sync/atomic"
 )
+
+// maxEndpointOrdinals bounds how far writes grow the endpoint table, so a
+// corrupt ordinal cannot allocate without limit.
+const maxEndpointOrdinals = 1 << 16
 
 // MaxEndpoints is the bit-width of the shared root-holder bitmask filter
 // (256 endpoints represented as an inline [4]uint64 bitmask). Endpoints with
@@ -38,9 +43,10 @@ func (b endpointBitset) test(ep int) bool {
 
 // Config configures a concurrent multi-endpoint [Index].
 type Config struct {
-	// Endpoints is the number of endpoint slots (values <= 0 default to 128).
-	// Endpoints in [0, MaxEndpoints) are indexed in the shared root-holder
-	// bitmask; ordinals >= MaxEndpoints are probed directly.
+	// Endpoints is the initial number of endpoint slots (values <= 0 default
+	// to 128). Writes to a larger ordinal grow the table. Endpoints in
+	// [0, MaxEndpoints) are indexed in the shared root-holder bitmask;
+	// ordinals >= MaxEndpoints are probed directly.
 	Endpoints int
 
 	// PerEndpointCapacity is the maximum number of resident blocks per endpoint
@@ -85,11 +91,15 @@ type rootShard struct {
 // root-holder bitmask filter on k_0 and cross-endpoint threshold sharing on reads.
 //
 // Index is safe for concurrent use by multiple goroutines. Endpoints are
-// addressed by dense integer ordinals in [0, Endpoints); out-of-range ordinals
-// are ignored.
+// addressed by dense integer ordinals. A write to an ordinal beyond the table
+// grows it, up to 65536 endpoints; writes to negative or larger ordinals are
+// ignored, and queries treat ordinals without a slot as holding nothing.
+// Callers reusing an ordinal for a different endpoint call
+// [Index.ClearEndpoint] first.
 type Index struct {
 	cfg        Config
-	endpoints  []endpointSlot
+	endpoints  atomic.Pointer[[]*endpointSlot] // replaced whole under growMu
+	growMu     sync.Mutex
 	rootShards [64]rootShard
 }
 
@@ -99,24 +109,63 @@ func NewIndex(cfg Config) *Index {
 		cfg.Endpoints = 128
 	}
 
-	idx := &Index{
-		cfg:       cfg,
-		endpoints: make([]endpointSlot, cfg.Endpoints),
-	}
+	idx := &Index{cfg: cfg}
 	for i := range idx.rootShards {
 		idx.rootShards[i].holders = make(map[uint64]endpointBitset, 32)
 	}
-	for ep := range idx.endpoints {
-		endpointID := ep
-		var cb RootCallback
-		if !cfg.DisableRootFilter && ep < MaxEndpoints {
-			cb = func(rootKey uint64, held bool) {
-				idx.setRootHolder(endpointID, rootKey, held)
-			}
-		}
-		idx.endpoints[ep].set = NewChainSet(cfg.PerEndpointCapacity, cb)
+	slots := make([]*endpointSlot, cfg.Endpoints)
+	for ep := range slots {
+		slots[ep] = idx.newSlot(ep)
 	}
+	idx.endpoints.Store(&slots)
 	return idx
+}
+
+func (idx *Index) newSlot(ep int) *endpointSlot {
+	var cb RootCallback
+	if !idx.cfg.DisableRootFilter && ep < MaxEndpoints {
+		cb = func(rootKey uint64, held bool) {
+			idx.setRootHolder(ep, rootKey, held)
+		}
+	}
+	return &endpointSlot{set: NewChainSet(idx.cfg.PerEndpointCapacity, cb)}
+}
+
+// slots returns the current endpoint table.
+func (idx *Index) slots() []*endpointSlot {
+	return *idx.endpoints.Load()
+}
+
+// slot returns endpoint's slot, or nil when the table has none.
+func (idx *Index) slot(endpoint int) *endpointSlot {
+	if s := idx.slots(); uint(endpoint) < uint(len(s)) {
+		return s[endpoint]
+	}
+	return nil
+}
+
+// slotForWrite returns endpoint's slot, growing the table to hold it, or nil
+// for an ordinal outside [0, maxEndpointOrdinals).
+func (idx *Index) slotForWrite(endpoint int) *endpointSlot {
+	if es := idx.slot(endpoint); es != nil {
+		return es
+	}
+	if uint(endpoint) >= maxEndpointOrdinals {
+		return nil
+	}
+	idx.growMu.Lock()
+	defer idx.growMu.Unlock()
+	cur := idx.slots()
+	if endpoint < len(cur) {
+		return cur[endpoint]
+	}
+	next := make([]*endpointSlot, min(max(endpoint+1, 2*len(cur)), maxEndpointOrdinals))
+	copy(next, cur)
+	for ep := len(cur); ep < len(next); ep++ {
+		next[ep] = idx.newSlot(ep)
+	}
+	idx.endpoints.Store(&next)
+	return next[endpoint]
 }
 
 func rootShardIdx(rootKey uint64) uint64 {
@@ -153,10 +202,13 @@ func (idx *Index) rootHolders(rootKey uint64) endpointBitset {
 // root keys[0] on endpoint (used on both the approximate routing path and
 // root KV-event stores).
 func (idx *Index) AddRootChain(endpoint int, keys []uint64) {
-	if uint(endpoint) >= uint(len(idx.endpoints)) || len(keys) == 0 {
+	if len(keys) == 0 {
 		return
 	}
-	es := &idx.endpoints[endpoint]
+	es := idx.slotForWrite(endpoint)
+	if es == nil {
+		return
+	}
 	es.mu.Lock()
 	es.set.AddRootChain(keys)
 	es.mu.Unlock()
@@ -168,10 +220,13 @@ func (idx *Index) AddRootChain(endpoint int, keys []uint64) {
 // missing ancestor chain is restored. Segments that start at a root go through
 // [Index.AddRootChain]; see [ChainSet.AddChainUnder].
 func (idx *Index) AddChainUnder(endpoint int, parentKey uint64, keys []uint64) {
-	if uint(endpoint) >= uint(len(idx.endpoints)) || len(keys) == 0 {
+	if len(keys) == 0 {
 		return
 	}
-	es := &idx.endpoints[endpoint]
+	es := idx.slotForWrite(endpoint)
+	if es == nil {
+		return
+	}
 	es.mu.Lock()
 	es.set.AddChainUnder(parentKey, keys)
 	es.mu.Unlock()
@@ -180,10 +235,10 @@ func (idx *Index) AddChainUnder(endpoint int, parentKey uint64, keys []uint64) {
 // Remove deletes a single block key from endpoint (precise KV-event removal).
 // It reports whether key was resident on endpoint.
 func (idx *Index) Remove(endpoint int, key uint64) bool {
-	if uint(endpoint) >= uint(len(idx.endpoints)) {
+	es := idx.slot(endpoint)
+	if es == nil {
 		return false
 	}
-	es := &idx.endpoints[endpoint]
 	es.mu.Lock()
 	ok := es.set.Remove(key)
 	es.mu.Unlock()
@@ -193,10 +248,10 @@ func (idx *Index) Remove(endpoint int, key uint64) bool {
 // SetEndpointCapacity bounds the resident blocks on endpoint (0 means
 // unlimited), typically at the engine's reported block capacity.
 func (idx *Index) SetEndpointCapacity(endpoint, capacity int) {
-	if uint(endpoint) >= uint(len(idx.endpoints)) {
+	es := idx.slotForWrite(endpoint)
+	if es == nil {
 		return
 	}
-	es := &idx.endpoints[endpoint]
 	es.mu.Lock()
 	es.set.SetCapacity(capacity)
 	es.mu.Unlock()
@@ -205,10 +260,10 @@ func (idx *Index) SetEndpointCapacity(endpoint, capacity int) {
 // ClearEndpoint removes all resident blocks on endpoint and clears its root
 // bitmask bits across all shards.
 func (idx *Index) ClearEndpoint(endpoint int) {
-	if uint(endpoint) >= uint(len(idx.endpoints)) {
+	es := idx.slot(endpoint)
+	if es == nil {
 		return
 	}
-	es := &idx.endpoints[endpoint]
 	es.mu.Lock()
 	es.set.Clear()
 	es.mu.Unlock()
@@ -217,8 +272,7 @@ func (idx *Index) ClearEndpoint(endpoint int) {
 // Stats returns aggregate observability metrics across all endpoints and root shards.
 func (idx *Index) Stats() Stats {
 	var st Stats
-	for ep := range idx.endpoints {
-		es := &idx.endpoints[ep]
+	for _, es := range idx.slots() {
 		es.mu.RLock()
 		st.HeldBlocks += es.set.Len()
 		st.DormantBlocks += es.set.DormantCount()
@@ -258,11 +312,12 @@ func (idx *Index) MatchInto(keys []uint64, candidates []int, out []int) []int {
 		return out
 	}
 
+	slots := idx.slots()
 	var holders endpointBitset
 	useFilter := !idx.cfg.DisableRootFilter
 	if useFilter {
 		holders = idx.rootHolders(keys[0])
-		if holders == (endpointBitset{}) && len(idx.endpoints) <= MaxEndpoints {
+		if holders == (endpointBitset{}) && len(slots) <= MaxEndpoints {
 			return out
 		}
 	}
@@ -271,13 +326,13 @@ func (idx *Index) MatchInto(keys []uint64, candidates []int, out []int) []int {
 	numHints := 0
 
 	for i, ep := range candidates {
-		if uint(ep) >= uint(len(idx.endpoints)) {
+		if uint(ep) >= uint(len(slots)) {
 			continue
 		}
 		if useFilter && ep < MaxEndpoints && !holders.test(ep) {
 			continue
 		}
-		es := &idx.endpoints[ep]
+		es := slots[ep]
 		var hints []int
 		if !idx.cfg.DisableThresholdSharing {
 			hints = hintsBuf[:numHints]
