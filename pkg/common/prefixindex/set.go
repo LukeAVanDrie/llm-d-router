@@ -82,10 +82,10 @@ const (
 
 // block holds the authoritative lineage and recency of a resident KV block
 // alongside its derived closure and leaf-heap state (40 bytes, zero pointers).
-type block struct {
+type block[K ~uint64] struct {
 	// Authoritative facts (established on insertion; deleted on Remove).
-	key       uint64
-	parentKey uint64 // 0 when isRoot is true; stored by hash so swap-delete never invalidates parent links
+	key       K
+	parentKey K // 0 when isRoot is true; stored by hash so swap-delete never invalidates parent links
 	stamp     uint64
 
 	// class is the caller's label for the block; see [ChainSet.SetClass].
@@ -99,18 +99,18 @@ type block struct {
 }
 
 // RootCallback is invoked when a depth-0 root key's residency changes in a [ChainSet].
-type RootCallback func(rootKey uint64, held bool)
+type RootCallback[K ~uint64] func(rootKey K, held bool)
 
 // ChainSet tracks the prefix blocks resident on a single endpoint.
 //
 // The zero value of ChainSet is an empty set with unlimited capacity.
 // A ChainSet is not safe for concurrent use by multiple goroutines without
 // external synchronization; use [Index] for concurrent multi-endpoint routing.
-type ChainSet struct {
-	byKey     map[uint64]uint32 // key -> index in blocks (0 .. len(blocks)-1)
-	blocks    []block           // dense slice of resident blocks
-	leaves    []uint32          // min-heap of indices into blocks with children == 0
-	waitingOn map[uint64]int32  // absent parentKey -> count of resident children waiting on it
+type ChainSet[K ~uint64] struct {
+	byKey     map[K]uint32 // key -> index in blocks (0 .. len(blocks)-1)
+	blocks    []block[K]   // dense slice of resident blocks
+	leaves    []uint32     // min-heap of indices into blocks with children == 0
+	waitingOn map[K]int32  // absent parentKey -> count of resident children waiting on it
 
 	// classCount counts resident blocks per class; inUse lists the classes
 	// with a nonzero count. Classes are small integers, so counts index a slice.
@@ -122,14 +122,14 @@ type ChainSet struct {
 	evictions    uint64
 	rebuilds     uint64
 	capacity     int
-	onRoot       RootCallback
+	onRoot       RootCallback[K]
 }
 
 // NewChainSet returns a new [ChainSet] with an optional block capacity
 // (0 means unlimited) and an optional [RootCallback] notified when depth-0
 // root keys are added or removed.
-func NewChainSet(capacity int, onRoot RootCallback) *ChainSet {
-	s := &ChainSet{
+func NewChainSet[K ~uint64](capacity int, onRoot RootCallback[K]) *ChainSet[K] {
+	s := &ChainSet[K]{
 		capacity: capacity,
 		onRoot:   onRoot,
 	}
@@ -137,7 +137,7 @@ func NewChainSet(capacity int, onRoot RootCallback) *ChainSet {
 	return s
 }
 
-func (s *ChainSet) ensureInit() {
+func (s *ChainSet[K]) ensureInit() {
 	if s.byKey != nil {
 		return
 	}
@@ -145,15 +145,15 @@ func (s *ChainSet) ensureInit() {
 	if s.capacity > 0 {
 		initCap = min(s.capacity, initCap)
 	}
-	s.byKey = make(map[uint64]uint32, initCap)
-	s.blocks = make([]block, 0, initCap)
-	s.waitingOn = make(map[uint64]int32)
+	s.byKey = make(map[K]uint32, initCap)
+	s.blocks = make([]block[K], 0, initCap)
+	s.waitingOn = make(map[K]int32)
 }
 
 // Clear removes all resident blocks from s while retaining allocated backing
 // storage. If a [RootCallback] is configured, it is invoked with held=false for
 // every resident root block.
-func (s *ChainSet) Clear() {
+func (s *ChainSet[K]) Clear() {
 	if s.onRoot != nil {
 		for i := range s.blocks {
 			if s.blocks[i].isRoot {
@@ -176,20 +176,20 @@ func (s *ChainSet) Clear() {
 }
 
 // Len returns the number of resident blocks in s (Visible plus Dormant).
-func (s *ChainSet) Len() int { return len(s.blocks) }
+func (s *ChainSet[K]) Len() int { return len(s.blocks) }
 
 // DormantCount returns the number of resident blocks currently waiting on an
 // absent ancestor. Under leaf-first eviction and in-order stores, DormantCount is 0.
-func (s *ChainSet) DormantCount() int { return s.dormantCount }
+func (s *ChainSet[K]) DormantCount() int { return s.dormantCount }
 
 // Evictions returns the cumulative number of capacity evictions performed on s.
-func (s *ChainSet) Evictions() uint64 { return s.evictions }
+func (s *ChainSet[K]) Evictions() uint64 { return s.evictions }
 
 // Rebuilds returns the cumulative number of out-of-order closure rebuilds on s.
-func (s *ChainSet) Rebuilds() uint64 { return s.rebuilds }
+func (s *ChainSet[K]) Rebuilds() uint64 { return s.rebuilds }
 
 // Class returns the class of a resident key. New keys have class 0.
-func (s *ChainSet) Class(key uint64) (uint32, bool) {
+func (s *ChainSet[K]) Class(key K) (uint32, bool) {
 	idx, ok := s.byKey[key]
 	if !ok {
 		return 0, false
@@ -201,7 +201,7 @@ func (s *ChainSet) Class(key uint64) (uint32, bool) {
 // resident. Classes are opaque to s: callers use them to attach metadata,
 // such as an interned set of tiers, to blocks. Classes should be small
 // integers, since per-class counts index a slice.
-func (s *ChainSet) SetClass(key uint64, class uint32) bool {
+func (s *ChainSet[K]) SetClass(key K, class uint32) bool {
 	idx, ok := s.byKey[key]
 	if !ok {
 		return false
@@ -217,7 +217,7 @@ func (s *ChainSet) SetClass(key uint64, class uint32) bool {
 
 // UniformClass returns the class every resident block carries, when there is
 // exactly one.
-func (s *ChainSet) UniformClass() (uint32, bool) {
+func (s *ChainSet[K]) UniformClass() (uint32, bool) {
 	if len(s.inUse) != 1 {
 		return 0, false
 	}
@@ -225,7 +225,7 @@ func (s *ChainSet) UniformClass() (uint32, bool) {
 }
 
 // countClass adds delta to class c's count, keeping inUse current.
-func (s *ChainSet) countClass(c uint32, delta int32) {
+func (s *ChainSet[K]) countClass(c uint32, delta int32) {
 	if int(c) >= len(s.classCount) {
 		s.classCount = append(s.classCount, make([]int32, int(c)+1-len(s.classCount))...)
 	}
@@ -247,14 +247,14 @@ func (s *ChainSet) countClass(c uint32, delta int32) {
 }
 
 // Contains reports whether key is currently resident in s (Visible or Dormant).
-func (s *ChainSet) Contains(key uint64) bool {
+func (s *ChainSet[K]) Contains(key K) bool {
 	_, ok := s.byKey[key]
 	return ok
 }
 
 // AddRootChain records a prefix chain keys[0..L-1] starting at depth-0 root
 // keys[0], refreshing recency and evicting oldest leaves if capacity is exceeded.
-func (s *ChainSet) AddRootChain(keys []uint64) {
+func (s *ChainSet[K]) AddRootChain(keys []K) {
 	s.addSegment(0, true, keys)
 }
 
@@ -269,11 +269,11 @@ func (s *ChainSet) AddRootChain(keys []uint64) {
 // root goes through [ChainSet.AddRootChain]: a parentKey that never becomes
 // resident, such as 0 for an event without a parent, leaves the segment
 // Dormant until capacity evicts it.
-func (s *ChainSet) AddChainUnder(parentKey uint64, keys []uint64) {
+func (s *ChainSet[K]) AddChainUnder(parentKey K, keys []K) {
 	s.addSegment(parentKey, false, keys)
 }
 
-func (s *ChainSet) addSegment(parentKey uint64, isRoot bool, keys []uint64) {
+func (s *ChainSet[K]) addSegment(parentKey K, isRoot bool, keys []K) {
 	if len(keys) == 0 {
 		return
 	}
@@ -317,7 +317,7 @@ func (s *ChainSet) addSegment(parentKey uint64, isRoot bool, keys []uint64) {
 // inductively acyclic and k is not yet resident, a cycle can only form if
 // parentKey == k or if resident blocks are already waiting on k (waitingOn[k] > 0)
 // and parentKey walks up to k.
-func (s *ChainSet) createsCycle(k, parentKey uint64) bool {
+func (s *ChainSet[K]) createsCycle(k, parentKey K) bool {
 	if parentKey == k {
 		return true
 	}
@@ -336,7 +336,7 @@ func (s *ChainSet) createsCycle(k, parentKey uint64) bool {
 	}
 }
 
-func (s *ChainSet) insertBlock(k, parentKey uint64, isRoot bool, stamp uint64) (needRebuild bool) {
+func (s *ChainSet[K]) insertBlock(k, parentKey K, isRoot bool, stamp uint64) (needRebuild bool) {
 	vis := visVisible
 	if isRoot {
 		parentKey = 0
@@ -355,7 +355,7 @@ func (s *ChainSet) insertBlock(k, parentKey uint64, isRoot bool, stamp uint64) (
 	}
 
 	idx := uint32(len(s.blocks)) //#nosec G115 -- one endpoint holds far fewer than 2^32 blocks
-	s.blocks = append(s.blocks, block{
+	s.blocks = append(s.blocks, block[K]{
 		key:       k,
 		parentKey: parentKey,
 		stamp:     stamp,
@@ -382,12 +382,12 @@ func (s *ChainSet) insertBlock(k, parentKey uint64, isRoot bool, stamp uint64) (
 // SetCapacity changes the bound on resident blocks (0 means unlimited),
 // evicting the oldest leaves, Dormant first, when the new bound is below the
 // current count.
-func (s *ChainSet) SetCapacity(capacity int) {
+func (s *ChainSet[K]) SetCapacity(capacity int) {
 	s.capacity = capacity
 	s.enforceCapacity()
 }
 
-func (s *ChainSet) enforceCapacity() {
+func (s *ChainSet[K]) enforceCapacity() {
 	for s.capacity > 0 && len(s.blocks) > s.capacity {
 		if _, ok := s.EvictOldestLeaf(); !ok {
 			break
@@ -400,7 +400,7 @@ func (s *ChainSet) enforceCapacity() {
 // transition to Dormant via an O(N) rebuild; if key was already Dormant, its
 // children are recorded as waiting on key in O(1). Remove reports whether key
 // was resident in s.
-func (s *ChainSet) Remove(key uint64) bool {
+func (s *ChainSet[K]) Remove(key K) bool {
 	idx, ok := s.byKey[key]
 	if !ok {
 		return false
@@ -437,7 +437,7 @@ func (s *ChainSet) Remove(key uint64) bool {
 	return true
 }
 
-func (s *ChainSet) deleteBlockAt(idx uint32) {
+func (s *ChainSet[K]) deleteBlockAt(idx uint32) {
 	s.removeFromLeafHeap(idx)
 	delete(s.byKey, s.blocks[idx].key)
 
@@ -450,13 +450,13 @@ func (s *ChainSet) deleteBlockAt(idx uint32) {
 			s.leaves[moved.heapIdx] = idx
 		}
 	}
-	s.blocks[last] = block{}
+	s.blocks[last] = block[K]{}
 	s.blocks = s.blocks[:last]
 }
 
 // EvictOldestLeaf evicts the leaf block (children == 0) with the oldest recency
 // stamp, prioritizing Dormant leaves ahead of Visible leaves.
-func (s *ChainSet) EvictOldestLeaf() (uint64, bool) {
+func (s *ChainSet[K]) EvictOldestLeaf() (K, bool) {
 	if len(s.leaves) == 0 {
 		return 0, false
 	}
@@ -474,7 +474,7 @@ func (s *ChainSet) EvictOldestLeaf() (uint64, bool) {
 //
 // Precondition: keys must represent a valid prefix chain where keys[0] is a
 // depth-0 root key and each subsequent keys[i] commits to parent keys[i-1].
-func (s *ChainSet) RunLength(keys []uint64, hints []int) int {
+func (s *ChainSet[K]) RunLength(keys []K, hints []int) int {
 	L := len(keys)
 	if L == 0 || len(s.blocks) == 0 {
 		return 0
@@ -514,7 +514,7 @@ func (s *ChainSet) RunLength(keys []uint64, hints []int) int {
 	return lo
 }
 
-func (s *ChainSet) probeAt(keys []uint64, pos int) (visible bool, hasChildren bool) {
+func (s *ChainSet[K]) probeAt(keys []K, pos int) (visible bool, hasChildren bool) {
 	idx, ok := s.byKey[keys[pos]]
 	if !ok {
 		return false, false
@@ -535,7 +535,7 @@ func (s *ChainSet) probeAt(keys []uint64, pos int) (visible bool, hasChildren bo
 // rebuild recomputes all derived projections (children, vis, dormantCount,
 // waitingOn, and leaves) from the authoritative (key, parentKey, isRoot, stamp)
 // facts of s.blocks.
-func (s *ChainSet) rebuild() {
+func (s *ChainSet[K]) rebuild() {
 	s.rebuilds++
 	clear(s.waitingOn)
 	for i := range s.blocks {
@@ -574,7 +574,7 @@ func (s *ChainSet) rebuild() {
 	}
 }
 
-func (s *ChainSet) resolveVis(idx uint32) uint8 {
+func (s *ChainSet[K]) resolveVis(idx uint32) uint8 {
 	b := &s.blocks[idx]
 	if b.vis != visUnvisited {
 		return b.vis
@@ -586,7 +586,7 @@ func (s *ChainSet) resolveVis(idx uint32) uint8 {
 	return s.blocks[idx].vis
 }
 
-func (s *ChainSet) syncLeafHeap(idx uint32) {
+func (s *ChainSet[K]) syncLeafHeap(idx uint32) {
 	b := &s.blocks[idx]
 	if b.children > 0 {
 		s.removeFromLeafHeap(idx)
@@ -600,7 +600,7 @@ func (s *ChainSet) syncLeafHeap(idx uint32) {
 	s.siftDown(int(b.heapIdx))
 }
 
-func (s *ChainSet) removeFromLeafHeap(idx uint32) {
+func (s *ChainSet[K]) removeFromLeafHeap(idx uint32) {
 	i := int(s.blocks[idx].heapIdx)
 	if i < 0 {
 		return
@@ -620,7 +620,7 @@ func (s *ChainSet) removeFromLeafHeap(idx uint32) {
 // lessLeaf orders leaves by (vis, stamp, key): Dormant (1) before Visible (2),
 // then oldest stamp first, breaking ties on the immutable block key so
 // swap-delete in s.blocks never alters heap ordering.
-func (s *ChainSet) lessLeaf(a, b uint32) bool {
+func (s *ChainSet[K]) lessLeaf(a, b uint32) bool {
 	x, y := &s.blocks[a], &s.blocks[b]
 	return cmp.Or(
 		cmp.Compare(x.vis, y.vis),
@@ -629,7 +629,7 @@ func (s *ChainSet) lessLeaf(a, b uint32) bool {
 	) < 0
 }
 
-func (s *ChainSet) siftUp(i int) {
+func (s *ChainSet[K]) siftUp(i int) {
 	for i > 0 {
 		p := (i - 1) / 2
 		if !s.lessLeaf(s.leaves[i], s.leaves[p]) {
@@ -640,7 +640,7 @@ func (s *ChainSet) siftUp(i int) {
 	}
 }
 
-func (s *ChainSet) siftDown(i int) {
+func (s *ChainSet[K]) siftDown(i int) {
 	for n := len(s.leaves); 2*i+1 < n; {
 		c := 2*i + 1
 		if r := c + 1; r < n && s.lessLeaf(s.leaves[r], s.leaves[c]) {
@@ -654,7 +654,7 @@ func (s *ChainSet) siftDown(i int) {
 	}
 }
 
-func (s *ChainSet) swapHeap(i, j int) {
+func (s *ChainSet[K]) swapHeap(i, j int) {
 	a, b := s.leaves[i], s.leaves[j]
 	s.leaves[i], s.leaves[j] = b, a
 	s.blocks[a].heapIdx, s.blocks[b].heapIdx = int32(j), int32(i) //#nosec G115 -- heap positions are bounded by the resident block count

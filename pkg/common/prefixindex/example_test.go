@@ -23,7 +23,7 @@ import (
 )
 
 func ExampleChainSet() {
-	set := prefixindex.NewChainSet(4, nil)
+	set := prefixindex.NewChainSet[uint64](4, nil)
 
 	// Store a 3-block root chain [100, 101, 102], then extend it with [103]
 	// under parent 102.
@@ -54,7 +54,7 @@ func ExampleChainSet_twoTier() {
 	//   - primary and union (primary | secondary) are ChainSets queried via RunLength.
 	//   - secondary is a plain membership map guarding union.Remove when a block
 	//     is evicted from primary while still resident in secondary.
-	var primary, union prefixindex.ChainSet
+	var primary, union prefixindex.ChainSet[uint64]
 	secondary := make(map[uint64]struct{})
 
 	prompt := []uint64{10, 11, 12, 13}
@@ -83,7 +83,7 @@ func ExampleChainSet_twoTier() {
 }
 
 func ExampleIndex() {
-	idx := prefixindex.NewIndex(prefixindex.Config{
+	idx := prefixindex.NewIndex[uint64](prefixindex.Config{
 		Endpoints:           4,
 		PerEndpointCapacity: 1024,
 	})

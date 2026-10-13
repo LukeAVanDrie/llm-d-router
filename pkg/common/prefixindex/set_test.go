@@ -100,7 +100,7 @@ func (r refSet) runLength(keys []uint64) int {
 // dormantCount, waitingOn, and leaves heap) match a fresh recomputation from
 // the authoritative facts (key, parentKey, isRoot, stamp) of s.blocks, and
 // enforces the Forest Leaf Invariant (zero cycles; len(blocks) > 0 => len(leaves) > 0).
-func checkInvariants(t *testing.T, s *ChainSet) {
+func checkInvariants(t *testing.T, s *ChainSet[uint64]) {
 	t.Helper()
 	if len(s.blocks) != len(s.byKey) {
 		t.Fatalf("len(blocks)=%d != len(byKey)=%d", len(s.blocks), len(s.byKey))
@@ -221,11 +221,11 @@ func makeChain(seed uint64, length int) []uint64 {
 }
 
 func TestZeroPointersInBlockAndEndpointSlotAlignment(t *testing.T) {
-	blockType := reflect.TypeFor[block]()
+	blockType := reflect.TypeFor[block[uint64]]()
 	if blockType.Size() != 40 {
 		t.Fatalf("sizeof(block) = %d, want 40", blockType.Size())
 	}
-	if slotSize := reflect.TypeFor[endpointSlot]().Size(); slotSize != 64 {
+	if slotSize := reflect.TypeFor[endpointSlot[uint64]]().Size(); slotSize != 64 {
 		t.Fatalf("sizeof(endpointSlot) = %d, want 64", slotSize)
 	}
 	for i := range blockType.NumField() {
@@ -238,7 +238,7 @@ func TestZeroPointersInBlockAndEndpointSlotAlignment(t *testing.T) {
 }
 
 func TestZeroValueChainSetAndConfigBounds(t *testing.T) {
-	var s ChainSet
+	var s ChainSet[uint64]
 	if s.Len() != 0 || s.Contains(42) || s.RunLength([]uint64{42}, nil) != 0 {
 		t.Fatalf("unexpected non-empty state on zero-value ChainSet")
 	}
@@ -252,11 +252,11 @@ func TestZeroValueChainSetAndConfigBounds(t *testing.T) {
 	}
 
 	// Verify Config.Endpoints default and >MaxEndpoints overflow probing path.
-	idxDefault := NewIndex(Config{Endpoints: 0})
+	idxDefault := NewIndex[uint64](Config{Endpoints: 0})
 	if len(idxDefault.slots()) != 128 {
 		t.Fatalf("Endpoints=0 produced %d slots, want 128", len(idxDefault.slots()))
 	}
-	idxOverflow := NewIndex(Config{Endpoints: MaxEndpoints + 44})
+	idxOverflow := NewIndex[uint64](Config{Endpoints: MaxEndpoints + 44})
 	if len(idxOverflow.slots()) != MaxEndpoints+44 {
 		t.Fatalf("Endpoints=%d produced %d slots, want %d", MaxEndpoints+44, len(idxOverflow.slots()), MaxEndpoints+44)
 	}
@@ -277,7 +277,7 @@ func TestZeroValueChainSetAndConfigBounds(t *testing.T) {
 
 func TestAdversarialCyclesSelfLoopsAndParentLeafStampOrder(t *testing.T) {
 	// 1. Self-loop on empty set must be rejected and never create an un-evictable node.
-	s := NewChainSet(2, nil)
+	s := NewChainSet[uint64](2, nil)
 	s.AddChainUnder(50, []uint64{50})
 	checkInvariants(t, s)
 	if s.Len() != 0 {
@@ -303,7 +303,7 @@ func TestAdversarialCyclesSelfLoopsAndParentLeafStampOrder(t *testing.T) {
 	}
 
 	// 4. Duplicate key in a single chain [R, A, B, A] preserves A's original parent R.
-	s2 := NewChainSet(0, nil)
+	s2 := NewChainSet[uint64](0, nil)
 	s2.AddRootChain([]uint64{1, 2, 3, 2})
 	checkInvariants(t, s2)
 	if got := s2.RunLength([]uint64{1, 2, 3}, nil); got != 3 {
@@ -312,7 +312,7 @@ func TestAdversarialCyclesSelfLoopsAndParentLeafStampOrder(t *testing.T) {
 
 	// 5. Updating a leaf parentKey's stamp when keys[0] is already a resident root
 	// must maintain min-heap ordering in s.leaves.
-	s3 := NewChainSet(0, nil)
+	s3 := NewChainSet[uint64](0, nil)
 	s3.AddRootChain([]uint64{40})
 	s3.AddRootChain([]uint64{50})
 	s3.AddRootChain([]uint64{60})
@@ -323,8 +323,8 @@ func TestAdversarialCyclesSelfLoopsAndParentLeafStampOrder(t *testing.T) {
 
 func TestDifferentialLeafFirstAndHeadFirstCascades(t *testing.T) {
 	// Stage 1 ("Always-Rebuild" baseline) vs. Stage 2 (Incremental fast-path) vs. Reference Oracle.
-	sFast := NewChainSet(0, nil)
-	sRebuild := NewChainSet(0, nil)
+	sFast := NewChainSet[uint64](0, nil)
+	sRebuild := NewChainSet[uint64](0, nil)
 	ref := make(refSet)
 	rng := rand.New(rand.NewPCG(42, 99))
 
@@ -382,7 +382,7 @@ func TestDifferentialLeafFirstAndHeadFirstCascades(t *testing.T) {
 }
 
 func TestHeadFirstEvictionAndImmutableResidentLineage(t *testing.T) {
-	s := NewChainSet(0, nil)
+	s := NewChainSet[uint64](0, nil)
 	ch := makeChain(7, 20)
 	s.AddRootChain(ch)
 	checkInvariants(t, s)
@@ -433,7 +433,7 @@ func TestHeadFirstEvictionAndImmutableResidentLineage(t *testing.T) {
 func TestDormantEvictionZeroKeyAndHintBounds(t *testing.T) {
 	// 1. Key == 0 works natively without nonZero sentinel remapping, and
 	// restoring a missing root reconnects waiting dormant children.
-	idx := NewIndex(Config{Endpoints: 4, PerEndpointCapacity: 4})
+	idx := NewIndex[uint64](Config{Endpoints: 4, PerEndpointCapacity: 4})
 	ch := makeChain(99, 4)
 	ch[0] = 0
 	idx.AddChainUnder(0, ch[0], ch[1:2])
@@ -449,7 +449,7 @@ func TestDormantEvictionZeroKeyAndHintBounds(t *testing.T) {
 	}
 
 	// 2. Dormant leaves (visDormant) are evicted before Visible leaves even if newer.
-	s := NewChainSet(2, nil)
+	s := NewChainSet[uint64](2, nil)
 	s.AddRootChain(ch[:2])
 	s.AddChainUnder(0xDEAD, ch[2:3])
 	checkInvariants(t, s)
@@ -463,7 +463,7 @@ func TestDormantEvictionZeroKeyAndHintBounds(t *testing.T) {
 	// 3. A second root key appearing at pos > 0 after a missing block never overcounts,
 	// and multiple descending/ascending hints narrow [lo, hi] accurately.
 	otherRoot := makeChain(123, 1)
-	s2 := NewChainSet(0, nil)
+	s2 := NewChainSet[uint64](0, nil)
 	s2.AddRootChain(ch[:3])
 	s2.AddRootChain(otherRoot)
 	checkInvariants(t, s2)
@@ -475,7 +475,7 @@ func TestDormantEvictionZeroKeyAndHintBounds(t *testing.T) {
 
 func TestFrontierLeafStampingMatchesWholePathLRU(t *testing.T) {
 	const capBlocks = 64
-	s := NewChainSet(capBlocks, nil)
+	s := NewChainSet[uint64](capBlocks, nil)
 
 	var order []uint64
 	inCache := make(map[uint64]bool)
@@ -537,7 +537,7 @@ func TestFrontierLeafStampingMatchesWholePathLRU(t *testing.T) {
 
 func TestZeroAllocsOnSteadyStateQueries(t *testing.T) {
 	const endpoints = 16
-	idx := NewIndex(Config{Endpoints: endpoints, PerEndpointCapacity: 256})
+	idx := NewIndex[uint64](Config{Endpoints: endpoints, PerEndpointCapacity: 256})
 	ch := makeChain(1, 64)
 	idx.AddRootChain(0, ch[:32])
 	idx.AddRootChain(3, ch[:64])
@@ -561,7 +561,7 @@ func TestZeroAllocsOnSteadyStateQueries(t *testing.T) {
 
 func TestIndexConcurrentRaceAndThresholdSharing(t *testing.T) {
 	const endpoints = 32
-	idx := NewIndex(Config{Endpoints: endpoints, PerEndpointCapacity: 512})
+	idx := NewIndex[uint64](Config{Endpoints: endpoints, PerEndpointCapacity: 512})
 	candidates := make([]int, endpoints)
 	for i := range candidates {
 		candidates[i] = i
@@ -618,7 +618,7 @@ func FuzzChainSet(f *testing.F) {
 	f.Add([]byte{0, 0, 4, 1, 1, 3, 2, 2, 3, 0, 0, 2, 5, 10, 20, 5, 20, 10})
 	f.Fuzz(func(t *testing.T, ops []byte) {
 		const capBlocks = 16
-		s := NewChainSet(capBlocks, nil)
+		s := NewChainSet[uint64](capBlocks, nil)
 		chains := [4][]uint64{
 			{10, 11, 12, 13, 14, 15},
 			{10, 11, 22, 23, 24, 25},
@@ -659,7 +659,7 @@ func FuzzChainSet(f *testing.F) {
 }
 
 func BenchmarkChainSetRunLengthByPrefixLen(b *testing.B) {
-	s := NewChainSet(16384, nil)
+	s := NewChainSet[uint64](16384, nil)
 	full := makeChain(1, 512)
 	s.AddRootChain(full)
 
@@ -692,7 +692,7 @@ func BenchmarkChainSetWriteAndEvict(b *testing.B) {
 		chains[i] = makeChain(uint64(i), 32)
 	}
 	b.Run("LeafFirst_AddRootChain_Cap2048", func(b *testing.B) {
-		s := NewChainSet(2048, nil)
+		s := NewChainSet[uint64](2048, nil)
 		b.ReportAllocs()
 		i := 0
 		for b.Loop() {
@@ -713,7 +713,7 @@ func BenchmarkChainSetRebuildByEndpointSize(b *testing.B) {
 	} {
 		b.Run(tc.name, func(b *testing.B) {
 			const chainLen = 64
-			s := NewChainSet(tc.blocks, nil)
+			s := NewChainSet[uint64](tc.blocks, nil)
 			numChains := tc.blocks / chainLen
 			for c := range numChains {
 				s.AddRootChain(makeChain(uint64(c+1), chainLen))
@@ -749,7 +749,7 @@ func BenchmarkIndexQuery128Endpoints(b *testing.B) {
 		{"Naive_NoRootFilter_NoSharing", Config{Endpoints: endpoints, PerEndpointCapacity: 16384, DisableRootFilter: true, DisableThresholdSharing: true}},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
-			idx := NewIndex(tc.cfg)
+			idx := NewIndex[uint64](tc.cfg)
 			for ep := range holders {
 				depth := 256
 				if ep%5 == 0 {
@@ -768,7 +768,7 @@ func BenchmarkIndexQuery128Endpoints(b *testing.B) {
 
 func BenchmarkIndexConcurrentReadWrite(b *testing.B) {
 	const endpoints = 128
-	idx := NewIndex(Config{Endpoints: endpoints, PerEndpointCapacity: 4096})
+	idx := NewIndex[uint64](Config{Endpoints: endpoints, PerEndpointCapacity: 4096})
 	chains := make([][]uint64, 32)
 	for i := range chains {
 		chains[i] = makeChain(uint64(i), 128)
@@ -809,7 +809,7 @@ func BenchmarkRetainedGCHeap(b *testing.B) {
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
 
-	idx := NewIndex(Config{Endpoints: endpoints, PerEndpointCapacity: blocksPerEndpoint})
+	idx := NewIndex[uint64](Config{Endpoints: endpoints, PerEndpointCapacity: blocksPerEndpoint})
 	for ep := range endpoints {
 		for c := range blocksPerEndpoint / blocksPerChain {
 			ch := makeChain(uint64(ep*1000+c), blocksPerChain)

@@ -28,7 +28,7 @@ import (
 // is a miss: the run stops before it rather than counting a prefix the
 // endpoint does not hold.
 func TestRunLengthRejectsWrongParent(t *testing.T) {
-	s := NewChainSet(0, nil)
+	s := NewChainSet[uint64](0, nil)
 	s.AddRootChain([]uint64{1, 2})
 	s.AddChainUnder(1, []uint64{9}) // 9 is a child of 1, not of 2
 	if got := s.RunLength([]uint64{1, 2, 9}, nil); got != 2 {
@@ -38,7 +38,7 @@ func TestRunLengthRejectsWrongParent(t *testing.T) {
 		t.Fatalf("RunLength([1 9]) = %d, want 2", got)
 	}
 
-	idx := NewIndex(Config{Endpoints: 2})
+	idx := NewIndex[uint64](Config{Endpoints: 2})
 	idx.AddRootChain(0, []uint64{1, 2})
 	idx.AddChainUnder(0, 1, []uint64{9})
 	if got := idx.Match([]uint64{1, 2, 9}, []int{0}); got[0] != 2 {
@@ -51,7 +51,7 @@ func TestRunLengthRejectsWrongParent(t *testing.T) {
 // AddChainUnder stamps the parent it names, so the inheritance shows two
 // levels above the write.
 func TestRemoveInheritsChildStamp(t *testing.T) {
-	s := NewChainSet(6, nil)
+	s := NewChainSet[uint64](6, nil)
 	s.AddRootChain([]uint64{1, 2, 3, 4})     // stamp 1
 	s.AddRootChain([]uint64{11, 12})         // stamp 2
 	s.AddChainUnder(2, []uint64{3, 4})       // stamp 3 on 2, 3, 4; 1 keeps stamp 1
@@ -73,7 +73,7 @@ func TestRemoveInheritsChildStamp(t *testing.T) {
 func TestEvictOldestLeafMatchesBruteForce(t *testing.T) {
 	for seed := range uint64(100) {
 		rng := rand.New(rand.NewPCG(seed, 0x51))
-		s := NewChainSet(0, nil)
+		s := NewChainSet[uint64](0, nil)
 		var chains [][]uint64
 		for op := range 400 {
 			c := makeChain(rng.Uint64N(12), 1+rng.IntN(24))
@@ -104,8 +104,8 @@ func TestEvictOldestLeafMatchesBruteForce(t *testing.T) {
 	}
 }
 
-func bruteOldestLeaf(s *ChainSet) (uint64, bool) {
-	best, found := block{}, false
+func bruteOldestLeaf(s *ChainSet[uint64]) (uint64, bool) {
+	best, found := block[uint64]{}, false
 	for _, b := range s.blocks {
 		if b.children != 0 {
 			continue
@@ -143,7 +143,7 @@ func TestRootChainCapacityMatchesKeyLRU(t *testing.T) {
 		t.Run(strconv.FormatUint(seed, 10), func(t *testing.T) {
 			rng := rand.New(rand.NewPCG(seed, 0x52))
 			capacity := []int{3, 8, 20, 64}[seed%4]
-			s := NewChainSet(capacity, nil)
+			s := NewChainSet[uint64](capacity, nil)
 			m := &lruModel{capacity: capacity}
 			for op := range 300 {
 				// Prompts share prefixes: a few roots, short alphabets.
@@ -176,7 +176,7 @@ func TestRootChainCapacityMatchesKeyLRU(t *testing.T) {
 func TestClassesMatchModel(t *testing.T) {
 	for seed := range uint64(100) {
 		rng := rand.New(rand.NewPCG(seed, 0x53))
-		s := NewChainSet([]int{0, 16, 64}[seed%3], nil)
+		s := NewChainSet[uint64]([]int{0, 16, 64}[seed%3], nil)
 		model := map[uint64]uint32{}
 		var chains [][]uint64
 		for op := range 400 {
@@ -235,7 +235,7 @@ func TestClassesMatchModel(t *testing.T) {
 // Shrinking the capacity evicts oldest leaves until the bound holds; zero
 // removes the bound.
 func TestSetCapacity(t *testing.T) {
-	s := NewChainSet(0, nil)
+	s := NewChainSet[uint64](0, nil)
 	s.AddRootChain([]uint64{1, 2, 3})    // stamp 1
 	s.AddRootChain([]uint64{11, 12, 13}) // stamp 2
 	s.SetCapacity(4)
@@ -250,7 +250,7 @@ func TestSetCapacity(t *testing.T) {
 		t.Fatalf("unbounded set holds %d, want 8", s.Len())
 	}
 
-	idx := NewIndex(Config{Endpoints: 2})
+	idx := NewIndex[uint64](Config{Endpoints: 2})
 	idx.AddRootChain(1, []uint64{1, 2, 3, 4})
 	idx.SetEndpointCapacity(1, 2)
 	if got := idx.Match([]uint64{1, 2, 3, 4}, []int{1}); got[0] != 2 {
@@ -263,7 +263,7 @@ func TestSetCapacity(t *testing.T) {
 // root shard and the same endpoints' locks.
 func BenchmarkIndexSharedRootParallel(b *testing.B) {
 	const endpoints, holders = 128, 19
-	idx := NewIndex(Config{Endpoints: endpoints})
+	idx := NewIndex[uint64](Config{Endpoints: endpoints})
 	chain := makeChain(7, 320)
 	for ep := range holders {
 		idx.AddRootChain(ep*6, chain[:256+ep])
@@ -284,7 +284,7 @@ func BenchmarkIndexSharedRootParallel(b *testing.B) {
 // Writes to ordinals beyond the initial table grow it, concurrently with
 // queries; ordinals outside the growth bound are ignored.
 func TestIndexGrowsEndpoints(t *testing.T) {
-	idx := NewIndex(Config{Endpoints: 2})
+	idx := NewIndex[uint64](Config{Endpoints: 2})
 	chain := makeChain(3, 16)
 	var wg sync.WaitGroup
 	for g := range 4 {
