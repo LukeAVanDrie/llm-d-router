@@ -93,9 +93,12 @@ func (k *Indexer) MatchBlockKeys(ctx context.Context, keys []kvblock.BlockHash,
 
 	var matches map[string]PodMatch
 	var err error
-	if k.keyWalker != nil {
+	switch {
+	case k.chainWalker != nil:
+		matches, err = matchChains(ctx, k.chainWalker, keys, k.tierWeights, podFilter)
+	case k.keyWalker != nil:
 		matches, err = matchWalk(ctx, k.keyWalker, keys, k.tierWeights, podFilter)
-	} else {
+	default:
 		matches, err = matchLookup(ctx, k.kvBlockIndex, keys, k.tierWeights, podFilter)
 	}
 	if err != nil {
@@ -141,6 +144,56 @@ func matchWalk(ctx context.Context, walker kvblock.KeyWalker, keys []kvblock.Blo
 		return nil, err
 	}
 	return acc.result(), nil
+}
+
+// matchChains builds each pod's match from its held prefix. A pod whose keys
+// all hold one entry set gets that set's one-key match, computed once per
+// call, extended over the run; any other pod's run is folded key by key.
+func matchChains(ctx context.Context, walker kvblock.ChainWalker, keys []kvblock.BlockHash,
+	weights map[string]float64, filter sets.Set[string],
+) (map[string]PodMatch, error) {
+	out := map[string]PodMatch{}
+	units := map[uint32]PodMatch{}
+	err := walker.WalkChains(ctx, keys, filter, func(c *kvblock.PodChain) {
+		if c.Uniform == nil {
+			acc := acquireAccumulator(weights, filter)
+			defer releaseAccumulator(acc)
+			for i := 0; i < c.Run; i++ {
+				if !acc.key(c.Entries(i)) {
+					break
+				}
+			}
+			out[c.Pod] = acc.result()[c.Pod]
+			return
+		}
+		unit, ok := units[c.UniformClass]
+		if !ok {
+			acc := acquireAccumulator(weights, filter)
+			acc.key(c.Uniform)
+			unit = acc.result()[c.Pod]
+			releaseAccumulator(acc)
+			units[c.UniformClass] = unit
+		}
+		// Summed per key, as the fold does, so the score is bit-exact.
+		score := 0.0
+		for range c.Run {
+			score += unit.WeightedScore
+		}
+		byTier := make(map[string]int, len(unit.BlocksByTier))
+		for t := range unit.BlocksByTier {
+			byTier[t] = c.Run
+		}
+		out[c.Pod] = PodMatch{
+			WeightedScore:   score,
+			MatchedBlocks:   c.Run,
+			ConfirmedBlocks: unit.ConfirmedBlocks * c.Run,
+			BlocksByTier:    byTier,
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // matchLookup feeds the accumulator from a materialized Lookup result, for

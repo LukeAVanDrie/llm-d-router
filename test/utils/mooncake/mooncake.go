@@ -29,6 +29,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 
@@ -37,6 +38,11 @@ import (
 
 // TraceEnv names the environment variable holding the trace path.
 const TraceEnv = "MOONCAKE_TRACE_PATH"
+
+// TailFirstEnv, when set, touches each query tail first, so the simulated
+// worker LRU evicts descendants before ancestors as vLLM's reverse free order
+// does. PROTOTYPE (fork only).
+const TailFirstEnv = "MOONCAKE_TAIL_FIRST"
 
 const (
 	// Workers is the number of simulated inference workers.
@@ -109,6 +115,7 @@ func Build(path string) (*Replay, error) {
 		return nil, err
 	}
 
+	tailFirst := os.Getenv(TailFirstEnv) != ""
 	var removed []uint64
 	caches := make([]*simplelru.LRU[uint64, struct{}], Workers)
 	for w := range caches {
@@ -127,10 +134,21 @@ func Build(path string) (*Replay, error) {
 			t := Turn{Worker: worker(dup, uint64(i), ids), Query: keys(dup, ids)}
 			removed = nil
 			cache := caches[t.Worker]
-			for _, k := range t.Query {
-				if _, ok := cache.Get(k); !ok {
-					t.Stored = append(t.Stored, k)
-					cache.Add(k, struct{}{})
+			if tailFirst {
+				for i := len(t.Query) - 1; i >= 0; i-- {
+					k := t.Query[i]
+					if _, ok := cache.Get(k); !ok {
+						t.Stored = append(t.Stored, k)
+						cache.Add(k, struct{}{})
+					}
+				}
+				slices.Reverse(t.Stored)
+			} else {
+				for _, k := range t.Query {
+					if _, ok := cache.Get(k); !ok {
+						t.Stored = append(t.Stored, k)
+						cache.Add(k, struct{}{})
+					}
 				}
 			}
 			t.Removed = removed
