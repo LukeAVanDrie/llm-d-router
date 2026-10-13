@@ -129,6 +129,7 @@ func (pc *PodCache) visitEntries(pos int, visit func(int, bool, []EntryRef) bool
 type interner struct {
 	mu    sync.Mutex
 	ids   map[string]uint32
+	names []string
 	limit int
 }
 
@@ -162,5 +163,35 @@ func (in *interner) internLocked(s string) uint32 {
 	}
 	id := uint32(len(in.ids)) //#nosec G115 -- fitsLocked caps len(in.ids) at the interner limit, at most 1<<20
 	in.ids[s] = id
+	in.names = append(in.names, s)
 	return id
+}
+
+// intern returns the ordinal for s, assigning one when s fits under the
+// limit.
+func (in *interner) intern(s string) (uint32, bool) {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if id, ok := in.ids[s]; ok {
+		return id, true
+	}
+	if len(in.ids) >= in.limit {
+		return 0, false
+	}
+	return in.internLocked(s), true
+}
+
+// lookup returns the ordinal already assigned to s.
+func (in *interner) lookup(s string) (uint32, bool) {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	id, ok := in.ids[s]
+	return id, ok
+}
+
+// name returns the string an ordinal was assigned to.
+func (in *interner) name(id uint32) string {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return in.names[id]
 }
