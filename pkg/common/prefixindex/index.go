@@ -269,6 +269,17 @@ func (idx *Index[K]) ClearEndpoint(endpoint int) {
 	es.mu.Unlock()
 }
 
+// Len returns the number of resident blocks on endpoint.
+func (idx *Index[K]) Len(endpoint int) int {
+	es := idx.slot(endpoint)
+	if es == nil {
+		return 0
+	}
+	es.mu.RLock()
+	defer es.mu.RUnlock()
+	return es.set.Len()
+}
+
 // Stats returns aggregate observability metrics across all endpoints and root shards.
 func (idx *Index[K]) Stats() Stats {
 	var st Stats

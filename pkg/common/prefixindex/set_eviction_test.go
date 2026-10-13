@@ -311,6 +311,9 @@ func TestIndexGrowsEndpoints(t *testing.T) {
 	if n := len(idx.slots()); n >= maxEndpointOrdinals {
 		t.Fatalf("an out-of-bound write grew the table to %d", n)
 	}
+	if idx.Len(599) != 8 || idx.Len(100000) != 0 {
+		t.Fatalf("Len(599) = %d, Len(100000) = %d; want 8 and 0", idx.Len(599), idx.Len(100000))
+	}
 	if st := idx.Stats(); st.HeldBlocks == 0 {
 		t.Fatal("Stats misses the grown endpoints")
 	}
