@@ -47,20 +47,20 @@ type array struct {
 	slots []slot
 	mask  uint64 // len(slots) - 1
 	shift uint   // 64 - log2(len(slots))
+	seed  uint64 // hash seed, so crafted keys cannot collide on every table
 }
 
 // Table maps uint64 keys to (val, meta) pairs. The zero value is an empty
 // table. Store and Delete must not run concurrently with each other.
 type Table struct {
 	arr   atomic.Pointer[array]
-	seed  uint64 // per-table hash seed, so crafted keys cannot collide on every table
-	count int    // entries, written by the writer only
+	count int // entries, written by the writer only
 }
 
 const minSlots = 16
 
-func (t *Table) home(a *array, key uint64) uint64 {
-	return ((key ^ t.seed) * 0x9e3779b97f4a7c15) >> a.shift
+func home(a *array, key uint64) uint64 {
+	return ((key ^ a.seed) * 0x9e3779b97f4a7c15) >> a.shift
 }
 
 // Load returns the pair stored for key. It is safe to call concurrently with
@@ -71,7 +71,7 @@ func (t *Table) Load(key uint64) (val, meta uint64, ok bool) {
 		return 0, 0, false
 	}
 	mask := a.mask
-	i := t.home(a, key)
+	i := home(a, key)
 	for range len(a.slots) {
 		s := &a.slots[i]
 		m := s.meta.Load()
@@ -96,7 +96,7 @@ func (t *Table) Store(key, val, meta uint64) {
 		a = t.grow(a)
 	}
 	mask := a.mask
-	i := t.home(a, key)
+	i := home(a, key)
 	for {
 		s := &a.slots[i]
 		m := s.meta.Load()
@@ -125,7 +125,7 @@ func (t *Table) Delete(key uint64) bool {
 		return false
 	}
 	mask := a.mask
-	i := t.home(a, key)
+	i := home(a, key)
 	for {
 		s := &a.slots[i]
 		if s.meta.Load() == 0 {
@@ -147,7 +147,7 @@ func (t *Table) Delete(key uint64) bool {
 			break
 		}
 		k := s.key.Load()
-		h := t.home(a, k)
+		h := home(a, k)
 		if (j-h)&mask >= (j-hole)&mask {
 			d := &a.slots[hole]
 			d.key.Store(k)
@@ -177,13 +177,14 @@ func (t *Table) Range(fn func(key, val, meta uint64) bool) {
 // Clear removes every entry, keeping the current capacity. Writer only.
 func (t *Table) Clear() {
 	if a := t.arr.Load(); a != nil {
-		t.arr.Store(newArray(len(a.slots)))
+		t.arr.Store(newArray(len(a.slots), a.seed))
 	}
 	t.count = 0
 }
 
-func newArray(n int) *array {
+func newArray(n int, seed uint64) *array {
 	return &array{
+		seed:  seed,
 		slots: make([]slot, n),
 		mask:  uint64(n - 1),                          //#nosec G115 -- n is a positive power of two
 		shift: uint(64 - bits.TrailingZeros(uint(n))), //#nosec G115 -- n is a power of two
@@ -193,14 +194,11 @@ func newArray(n int) *array {
 // grow publishes a table twice the size, or the initial one. Readers holding
 // the old array keep reading it safely.
 func (t *Table) grow(old *array) *array {
-	if t.seed == 0 {
-		t.seed = rand.Uint64() | 1 //#nosec G404 -- hash seed, not a secret
-	}
-	n := minSlots
+	n, seed := minSlots, rand.Uint64()|1 //#nosec G404 -- hash seed, not a secret
 	if old != nil {
-		n = 2 * len(old.slots)
+		n, seed = 2*len(old.slots), old.seed
 	}
-	a := newArray(n)
+	a := newArray(n, seed)
 	mask := a.mask
 	if old != nil {
 		for i := range old.slots {
@@ -210,7 +208,7 @@ func (t *Table) grow(old *array) *array {
 				continue
 			}
 			k := s.key.Load()
-			j := t.home(a, k)
+			j := home(a, k)
 			for a.slots[j].meta.Load() != 0 {
 				j = (j + 1) & mask
 			}
