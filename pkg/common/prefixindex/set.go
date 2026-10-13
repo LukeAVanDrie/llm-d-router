@@ -88,6 +88,9 @@ type block struct {
 	parentKey uint64 // 0 when isRoot is true; stored by hash so swap-delete never invalidates parent links
 	stamp     uint64
 
+	// class is the caller's label for the block; see [ChainSet.SetClass].
+	class uint32
+
 	// Derived projections (deterministic function of the resident block set).
 	heapIdx  int32  // index in leaves min-heap, or -1 when children > 0
 	children uint32 // resident child count
@@ -108,6 +111,11 @@ type ChainSet struct {
 	blocks    []block           // dense slice of resident blocks
 	leaves    []uint32          // min-heap of indices into blocks with children == 0
 	waitingOn map[uint64]int32  // absent parentKey -> count of resident children waiting on it
+
+	// classCount counts resident blocks per class; inUse lists the classes
+	// with a nonzero count. Classes are small integers, so counts index a slice.
+	classCount []int32
+	inUse      []uint32
 
 	seq          uint64
 	dormantCount int
@@ -163,6 +171,8 @@ func (s *ChainSet) Clear() {
 	}
 	s.leaves = s.leaves[:0]
 	s.dormantCount = 0
+	clear(s.classCount)
+	s.inUse = s.inUse[:0]
 }
 
 // Len returns the number of resident blocks in s (Visible plus Dormant).
@@ -177,6 +187,64 @@ func (s *ChainSet) Evictions() uint64 { return s.evictions }
 
 // Rebuilds returns the cumulative number of out-of-order closure rebuilds on s.
 func (s *ChainSet) Rebuilds() uint64 { return s.rebuilds }
+
+// Class returns the class of a resident key. New keys have class 0.
+func (s *ChainSet) Class(key uint64) (uint32, bool) {
+	idx, ok := s.byKey[key]
+	if !ok {
+		return 0, false
+	}
+	return s.blocks[idx].class, true
+}
+
+// SetClass labels a resident key with class and reports whether the key is
+// resident. Classes are opaque to s: callers use them to attach metadata,
+// such as an interned set of tiers, to blocks. Classes should be small
+// integers, since per-class counts index a slice.
+func (s *ChainSet) SetClass(key uint64, class uint32) bool {
+	idx, ok := s.byKey[key]
+	if !ok {
+		return false
+	}
+	b := &s.blocks[idx]
+	if b.class != class {
+		s.countClass(b.class, -1)
+		s.countClass(class, 1)
+		b.class = class
+	}
+	return true
+}
+
+// UniformClass returns the class every resident block carries, when there is
+// exactly one.
+func (s *ChainSet) UniformClass() (uint32, bool) {
+	if len(s.inUse) != 1 {
+		return 0, false
+	}
+	return s.inUse[0], true
+}
+
+// countClass adds delta to class c's count, keeping inUse current.
+func (s *ChainSet) countClass(c uint32, delta int32) {
+	if int(c) >= len(s.classCount) {
+		s.classCount = append(s.classCount, make([]int32, int(c)+1-len(s.classCount))...)
+	}
+	s.classCount[c] += delta
+	switch s.classCount[c] {
+	case delta:
+		if delta > 0 {
+			s.inUse = append(s.inUse, c)
+		}
+	case 0:
+		for j, u := range s.inUse {
+			if u == c {
+				s.inUse[j] = s.inUse[len(s.inUse)-1]
+				s.inUse = s.inUse[:len(s.inUse)-1]
+				break
+			}
+		}
+	}
+}
 
 // Contains reports whether key is currently resident in s (Visible or Dormant).
 func (s *ChainSet) Contains(key uint64) bool {
@@ -297,6 +365,7 @@ func (s *ChainSet) insertBlock(k, parentKey uint64, isRoot bool, stamp uint64) (
 		vis:       vis,
 	})
 	s.byKey[k] = idx
+	s.countClass(0, 1)
 	if vis == visDormant {
 		s.dormantCount++
 	}
@@ -347,6 +416,7 @@ func (s *ChainSet) Remove(key uint64) bool {
 	if removed.vis == visDormant {
 		s.dormantCount--
 	}
+	s.countClass(removed.class, -1)
 
 	s.deleteBlockAt(idx)
 	if removed.children > 0 {

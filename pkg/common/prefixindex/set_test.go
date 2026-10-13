@@ -178,6 +178,23 @@ func checkInvariants(t *testing.T, s *ChainSet) {
 	if len(s.blocks) > 0 && len(s.leaves) == 0 {
 		t.Fatalf("forest leaf invariant violated: len(blocks)=%d > 0 but len(leaves)=0", len(s.blocks))
 	}
+	wantClass := map[uint32]int32{}
+	for _, b := range s.blocks {
+		wantClass[b.class]++
+	}
+	for c, n := range s.classCount {
+		if n != wantClass[uint32(c)] { //#nosec G115 -- test indices are small
+			t.Fatalf("classCount[%d]=%d, want %d", c, n, wantClass[uint32(c)]) //#nosec G115 -- test
+		}
+	}
+	if len(s.inUse) != len(wantClass) {
+		t.Fatalf("inUse=%v, want the classes of %v", s.inUse, wantClass)
+	}
+	for _, c := range s.inUse {
+		if wantClass[c] == 0 {
+			t.Fatalf("class %d listed in use without blocks", c)
+		}
+	}
 	if s.dormantCount != wantDormant {
 		t.Fatalf("dormantCount=%d, want %d", s.dormantCount, wantDormant)
 	}

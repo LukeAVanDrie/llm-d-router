@@ -169,3 +169,64 @@ func TestRootChainCapacityMatchesKeyLRU(t *testing.T) {
 		})
 	}
 }
+
+// Classes follow their keys through stores, removals, swap-delete moves,
+// rebuilds, and capacity eviction; counts and UniformClass match a model.
+func TestClassesMatchModel(t *testing.T) {
+	for seed := range uint64(100) {
+		rng := rand.New(rand.NewPCG(seed, 0x53))
+		s := NewChainSet([]int{0, 16, 64}[seed%3], nil)
+		model := map[uint64]uint32{}
+		var chains [][]uint64
+		for op := range 400 {
+			c := makeChain(rng.Uint64N(10), 1+rng.IntN(20))
+			switch r := rng.IntN(10); {
+			case r < 3:
+				s.AddRootChain(c)
+				chains = append(chains, c)
+			case r < 5 && len(chains) > 0:
+				p := chains[rng.IntN(len(chains))]
+				if i := rng.IntN(len(p)); i > 0 {
+					s.AddChainUnder(p[i-1], p[i:])
+				}
+			case r < 7 && len(chains) > 0:
+				p := chains[rng.IntN(len(chains))]
+				s.Remove(p[rng.IntN(len(p))])
+			default:
+				if len(chains) == 0 {
+					continue
+				}
+				p := chains[rng.IntN(len(chains))]
+				k, cls := p[rng.IntN(len(p))], uint32(rng.IntN(5))
+				if s.SetClass(k, cls) != s.Contains(k) {
+					t.Fatalf("seed %d op %d: SetClass result disagrees with residency", seed, op)
+				}
+				if s.Contains(k) {
+					model[k] = cls
+				}
+			}
+			checkInvariants(t, s)
+			for k := range model {
+				if !s.Contains(k) {
+					delete(model, k)
+				}
+			}
+			distinct := map[uint32]bool{}
+			for _, b := range s.blocks {
+				want, labeled := model[b.key]
+				if !labeled {
+					want = 0 // stored since the last check: new keys carry class 0
+					model[b.key] = 0
+				}
+				if got, ok := s.Class(b.key); !ok || got != want {
+					t.Fatalf("seed %d op %d: Class(%x) = (%d, %v), want %d", seed, op, b.key, got, ok, want)
+				}
+				distinct[want] = true
+			}
+			u, ok := s.UniformClass()
+			if ok != (len(distinct) == 1) || (ok && !distinct[u]) {
+				t.Fatalf("seed %d op %d: UniformClass = (%d, %v), classes %v", seed, op, u, ok, distinct)
+			}
+		}
+	}
+}
