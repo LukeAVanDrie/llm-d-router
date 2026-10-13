@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package prefixindex
 
 import (
@@ -188,15 +204,15 @@ func makeChain(seed uint64, length int) []uint64 {
 }
 
 func TestZeroPointersInBlockAndEndpointSlotAlignment(t *testing.T) {
-	typ := reflect.TypeFor[block]()
-	if typ.Size() != 40 {
-		t.Fatalf("sizeof(block) = %d, want 40", typ.Size())
+	blockType := reflect.TypeFor[block]()
+	if blockType.Size() != 40 {
+		t.Fatalf("sizeof(block) = %d, want 40", blockType.Size())
 	}
 	if slotSize := reflect.TypeFor[endpointSlot]().Size(); slotSize != 64 {
 		t.Fatalf("sizeof(endpointSlot) = %d, want 64", slotSize)
 	}
-	for i := range typ.NumField() {
-		f := typ.Field(i)
+	for i := range blockType.NumField() {
+		f := blockType.Field(i)
 		switch f.Type.Kind() {
 		case reflect.Pointer, reflect.Slice, reflect.Map, reflect.String, reflect.Interface, reflect.Chan, reflect.Func, reflect.UnsafePointer:
 			t.Fatalf("block field %s contains a GC-scannable pointer type %v", f.Name, f.Type)

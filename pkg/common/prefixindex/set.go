@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 // Package prefixindex implements a pointer-free prefix residency set ([ChainSet])
 // and a concurrent multi-endpoint router index ([Index]) for LLM request routing.
 //
@@ -38,6 +54,16 @@
 // in O(1) / O(log N) time. When a Visible interior block is removed or a
 // gap-filling Visible block wakes waiting descendants, [ChainSet] recomputes
 // derived projections from the authoritative facts in a single O(N) linear pass.
+//
+// # Contracts
+//
+//   - Queries are read-only: [ChainSet.RunLength], [Index.Match] and
+//     [Index.MatchInto] never change recency. On the approximate path the
+//     caller records the routed prompt with [Index.AddRootChain] after
+//     choosing an endpoint.
+//   - Remove has set semantics: it removes the block whatever its copy count,
+//     and any Visible descendants become Dormant. Callers that receive one
+//     event per physical copy deduplicate before calling Remove.
 //
 // # Concurrency and Zero Value
 //
@@ -255,13 +281,13 @@ func (s *ChainSet) insertBlock(k, parentKey uint64, isRoot bool, stamp uint64) (
 		delete(s.waitingOn, k)
 	}
 
-	idx := uint32(len(s.blocks))
+	idx := uint32(len(s.blocks)) //#nosec G115 -- one endpoint holds far fewer than 2^32 blocks
 	s.blocks = append(s.blocks, block{
 		key:       k,
 		parentKey: parentKey,
 		stamp:     stamp,
 		heapIdx:   -1,
-		children:  uint32(waitCnt),
+		children:  uint32(waitCnt), //#nosec G115 -- a positive count of resident blocks
 		isRoot:    isRoot,
 		vis:       vis,
 	})
@@ -324,7 +350,7 @@ func (s *ChainSet) Remove(key uint64) bool {
 		if removed.vis == visVisible {
 			s.rebuild()
 		} else {
-			s.waitingOn[removed.key] = int32(removed.children)
+			s.waitingOn[removed.key] = int32(removed.children) //#nosec G115 -- bounded by the resident block count, far below 2^31
 		}
 	}
 	return true
@@ -334,7 +360,7 @@ func (s *ChainSet) deleteBlockAt(idx uint32) {
 	s.removeFromLeafHeap(idx)
 	delete(s.byKey, s.blocks[idx].key)
 
-	last := uint32(len(s.blocks) - 1)
+	last := uint32(len(s.blocks) - 1) //#nosec G115 -- one endpoint holds far fewer than 2^32 blocks
 	if idx != last {
 		moved := s.blocks[last]
 		s.blocks[idx] = moved
@@ -458,7 +484,7 @@ func (s *ChainSet) rebuild() {
 			s.dormantCount++
 		}
 		if s.blocks[i].children == 0 {
-			s.blocks[i].heapIdx = int32(len(s.leaves))
+			s.blocks[i].heapIdx = int32(len(s.leaves)) //#nosec G115 -- heap positions are bounded by the resident block count
 			s.leaves = append(s.leaves, uint32(i))
 		}
 	}
@@ -486,7 +512,7 @@ func (s *ChainSet) syncLeafHeap(idx uint32) {
 		return
 	}
 	if b.heapIdx < 0 {
-		b.heapIdx = int32(len(s.leaves))
+		b.heapIdx = int32(len(s.leaves)) //#nosec G115 -- heap positions are bounded by the resident block count
 		s.leaves = append(s.leaves, idx)
 	}
 	s.siftUp(int(b.heapIdx))
@@ -504,7 +530,7 @@ func (s *ChainSet) removeFromLeafHeap(idx uint32) {
 	s.leaves = s.leaves[:last]
 	if i < last {
 		moved := s.leaves[i]
-		s.blocks[moved].heapIdx = int32(i)
+		s.blocks[moved].heapIdx = int32(i) //#nosec G115 -- heap positions are bounded by the resident block count
 		s.siftUp(i)
 		s.siftDown(int(s.blocks[moved].heapIdx))
 	}
@@ -514,11 +540,11 @@ func (s *ChainSet) removeFromLeafHeap(idx uint32) {
 // then oldest stamp first, breaking ties on the immutable block key so
 // swap-delete in s.blocks never alters heap ordering.
 func (s *ChainSet) lessLeaf(a, b uint32) bool {
-	ba, bb := &s.blocks[a], &s.blocks[b]
+	x, y := &s.blocks[a], &s.blocks[b]
 	return cmp.Or(
-		cmp.Compare(ba.vis, bb.vis),
-		cmp.Compare(ba.stamp, bb.stamp),
-		cmp.Compare(ba.key, bb.key),
+		cmp.Compare(x.vis, y.vis),
+		cmp.Compare(x.stamp, y.stamp),
+		cmp.Compare(x.key, y.key),
 	) < 0
 }
 
@@ -550,5 +576,5 @@ func (s *ChainSet) siftDown(i int) {
 func (s *ChainSet) swapHeap(i, j int) {
 	a, b := s.leaves[i], s.leaves[j]
 	s.leaves[i], s.leaves[j] = b, a
-	s.blocks[a].heapIdx, s.blocks[b].heapIdx = int32(j), int32(i)
+	s.blocks[a].heapIdx, s.blocks[b].heapIdx = int32(j), int32(i) //#nosec G115 -- heap positions are bounded by the resident block count
 }
