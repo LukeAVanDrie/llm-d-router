@@ -76,10 +76,48 @@ type Stats struct {
 
 // endpointSlot is padded to 64 bytes so neighboring endpoints' locks do not
 // share a cache line.
+//
+// Writers hold mu and advance version before and after each write, so the
+// version is odd while a write is in progress. Readers may run a query without
+// mu and keep the result only when the version was even and unchanged across
+// it; see tryRun.
 type endpointSlot[K ~uint64] struct {
-	mu  sync.RWMutex
-	set *ChainSet[K]
-	_   [32]byte
+	mu      sync.RWMutex
+	version atomic.Uint64
+	set     *ChainSet[K]
+	_       [24]byte
+}
+
+func (es *endpointSlot[K]) lockWrite() {
+	es.mu.Lock()
+	es.version.Add(1)
+}
+
+func (es *endpointSlot[K]) unlockWrite() {
+	es.version.Add(1)
+	es.mu.Unlock()
+}
+
+// optimisticAttempts bounds the lock-free tries before a query falls back to
+// the read lock.
+const optimisticAttempts = 2
+
+// tryRun matches keys without the endpoint lock. It reports ok, and the
+// version the match reflects, only when no write overlapped it; the result is
+// then exactly what the read lock would have given at that version. RunLength
+// reads only the set's index, whose words are atomic.
+func (es *endpointSlot[K]) tryRun(keys []K, hints []int) (run int, version uint64, ok bool) {
+	for range optimisticAttempts {
+		v := es.version.Load()
+		if v&1 != 0 {
+			return 0, 0, false
+		}
+		d := es.set.RunLength(keys, hints)
+		if es.version.Load() == v {
+			return d, v, true
+		}
+	}
+	return 0, 0, false
 }
 
 type rootShard[K ~uint64] struct {
@@ -209,9 +247,9 @@ func (idx *Index[K]) AddRootChain(endpoint int, keys []K) {
 	if es == nil {
 		return
 	}
-	es.mu.Lock()
+	es.lockWrite()
 	es.set.AddRootChain(keys)
-	es.mu.Unlock()
+	es.unlockWrite()
 }
 
 // AddChainUnder records a continuation segment keys[0..L-1] under parentKey on
@@ -227,9 +265,9 @@ func (idx *Index[K]) AddChainUnder(endpoint int, parentKey K, keys []K) {
 	if es == nil {
 		return
 	}
-	es.mu.Lock()
+	es.lockWrite()
 	es.set.AddChainUnder(parentKey, keys)
-	es.mu.Unlock()
+	es.unlockWrite()
 }
 
 // Remove deletes a single block key from endpoint (precise KV-event removal).
@@ -239,9 +277,9 @@ func (idx *Index[K]) Remove(endpoint int, key K) bool {
 	if es == nil {
 		return false
 	}
-	es.mu.Lock()
+	es.lockWrite()
 	ok := es.set.Remove(key)
-	es.mu.Unlock()
+	es.unlockWrite()
 	return ok
 }
 
@@ -252,9 +290,9 @@ func (idx *Index[K]) SetEndpointCapacity(endpoint, capacity int) {
 	if es == nil {
 		return
 	}
-	es.mu.Lock()
+	es.lockWrite()
 	es.set.SetCapacity(capacity)
-	es.mu.Unlock()
+	es.unlockWrite()
 }
 
 // ClearEndpoint removes all resident blocks on endpoint and clears its root
@@ -264,9 +302,9 @@ func (idx *Index[K]) ClearEndpoint(endpoint int) {
 	if es == nil {
 		return
 	}
-	es.mu.Lock()
+	es.lockWrite()
 	es.set.Clear()
-	es.mu.Unlock()
+	es.unlockWrite()
 }
 
 // Update runs fn on endpoint's ChainSet under the endpoint's write lock,
@@ -278,8 +316,8 @@ func (idx *Index[K]) Update(endpoint int, fn func(s *ChainSet[K])) {
 	if es == nil {
 		return
 	}
-	es.mu.Lock()
-	defer es.mu.Unlock()
+	es.lockWrite()
+	defer es.unlockWrite()
 	fn(es.set)
 }
 
@@ -410,9 +448,12 @@ func (idx *Index[K]) MatchVisit(keys []K, candidates []int, out []int, visit fun
 		}
 		var d int
 		if visit == nil {
-			es.mu.RLock()
-			d = es.set.RunLength(keys, hints)
-			es.mu.RUnlock()
+			var ok bool
+			if d, _, ok = es.tryRun(keys, hints); !ok {
+				es.mu.RLock()
+				d = es.set.RunLength(keys, hints)
+				es.mu.RUnlock()
+			}
 		} else {
 			d = es.runAndVisit(keys, hints, i, visit)
 		}
