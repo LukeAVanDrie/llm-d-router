@@ -20,7 +20,6 @@ package approximateprefix
 import (
 	"context"
 	"fmt"
-	"maps"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -238,16 +237,9 @@ type podSet map[ServerID]struct{}
 
 // Get returns the pods holding hash. It scans every pod and exists for tests.
 func (i *indexer) Get(hash blockHash) podSet {
-	i.mu.RLock()
-	caches := maps.Clone(i.pods)
-	i.mu.RUnlock()
-
 	var res podSet
-	for id, pc := range caches {
-		pc.mu.RLock()
-		ok := pc.lru.Contains(hash)
-		pc.mu.RUnlock()
-		if ok {
+	for id, ord := range i.snapshot() {
+		if i.idx.Contains(ord, hash) {
 			if res == nil {
 				res = make(podSet)
 			}
