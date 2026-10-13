@@ -72,8 +72,6 @@ limitations under the License.
 // external synchronization. Use [Index] for concurrent multi-endpoint routing.
 package prefixindex
 
-import "cmp"
-
 const (
 	visUnvisited uint8 = 0
 	visDormant   uint8 = 1
@@ -246,6 +244,16 @@ func (s *ChainSet[K]) countClass(c uint32, delta int32) {
 	}
 }
 
+// restamp raises a resident block's stamp. A leaf can then only move down the
+// min-heap, and a block with children is not in it.
+func (s *ChainSet[K]) restamp(idx uint32, stamp uint64) {
+	b := &s.blocks[idx]
+	b.stamp = stamp
+	if b.heapIdx >= 0 {
+		s.siftDown(int(b.heapIdx))
+	}
+}
+
 // Contains reports whether key is currently resident in s (Visible or Dormant).
 func (s *ChainSet[K]) Contains(key K) bool {
 	_, ok := s.byKey[key]
@@ -283,8 +291,7 @@ func (s *ChainSet[K]) addSegment(parentKey K, isRoot bool, keys []K) {
 
 	if !isRoot {
 		if pIdx, ok := s.byKey[parentKey]; ok {
-			s.blocks[pIdx].stamp = stamp
-			s.syncLeafHeap(pIdx)
+			s.restamp(pIdx, stamp)
 		}
 	}
 
@@ -294,8 +301,7 @@ func (s *ChainSet[K]) addSegment(parentKey K, isRoot bool, keys []K) {
 			parentKey, isRoot = keys[i-1], false
 		}
 		if idx, exists := s.byKey[k]; exists {
-			s.blocks[idx].stamp = stamp
-			s.syncLeafHeap(idx)
+			s.restamp(idx, stamp)
 			continue
 		}
 		if !isRoot && s.createsCycle(k, parentKey) {
@@ -622,11 +628,13 @@ func (s *ChainSet[K]) removeFromLeafHeap(idx uint32) {
 // swap-delete in s.blocks never alters heap ordering.
 func (s *ChainSet[K]) lessLeaf(a, b uint32) bool {
 	x, y := &s.blocks[a], &s.blocks[b]
-	return cmp.Or(
-		cmp.Compare(x.vis, y.vis),
-		cmp.Compare(x.stamp, y.stamp),
-		cmp.Compare(x.key, y.key),
-	) < 0
+	if x.vis != y.vis {
+		return x.vis < y.vis
+	}
+	if x.stamp != y.stamp {
+		return x.stamp < y.stamp
+	}
+	return x.key < y.key
 }
 
 func (s *ChainSet[K]) siftUp(i int) {
