@@ -244,6 +244,20 @@ func (s *ChainSet[K]) countClass(c uint32, delta int32) {
 	}
 }
 
+// Touch records a read of key without inserting it: a resident key takes a
+// fresh recency stamp, and Touch reports whether key is resident. Touching
+// the deepest key a read reached is enough, since a parent inherits its
+// child's stamp when the child leaves.
+func (s *ChainSet[K]) Touch(key K) bool {
+	idx, ok := s.byKey[key]
+	if !ok {
+		return false
+	}
+	s.seq++
+	s.restamp(idx, s.seq)
+	return true
+}
+
 // restamp raises a resident block's stamp. A leaf can then only move down the
 // min-heap, and a block with children is not in it.
 func (s *ChainSet[K]) restamp(idx uint32, stamp uint64) {

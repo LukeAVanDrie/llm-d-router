@@ -269,6 +269,46 @@ func (idx *Index[K]) ClearEndpoint(endpoint int) {
 	es.mu.Unlock()
 }
 
+// Update runs fn on endpoint's ChainSet under the endpoint's write lock,
+// growing the table to hold endpoint. Callers use it to apply several
+// mutations, and to change their own per-endpoint state, atomically with
+// respect to queries. fn must not call back into idx.
+func (idx *Index[K]) Update(endpoint int, fn func(s *ChainSet[K])) {
+	es := idx.slotForWrite(endpoint)
+	if es == nil {
+		return
+	}
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	fn(es.set)
+}
+
+// View runs fn on endpoint's ChainSet under the endpoint's read lock. fn
+// must not mutate the set or call back into idx. View reports whether the
+// endpoint has a slot.
+func (idx *Index[K]) View(endpoint int, fn func(s *ChainSet[K])) bool {
+	es := idx.slot(endpoint)
+	if es == nil {
+		return false
+	}
+	es.mu.RLock()
+	defer es.mu.RUnlock()
+	fn(es.set)
+	return true
+}
+
+// runAndVisit matches keys on es and calls visit for a nonzero match, under
+// es's read lock, which a panicking visit still releases.
+func (es *endpointSlot[K]) runAndVisit(keys []K, hints []int, i int, visit func(i, run int, s *ChainSet[K])) int {
+	es.mu.RLock()
+	defer es.mu.RUnlock()
+	d := es.set.RunLength(keys, hints)
+	if d > 0 {
+		visit(i, d, es.set)
+	}
+	return d
+}
+
 // Contains reports whether key is resident on endpoint (Visible or Dormant).
 func (idx *Index[K]) Contains(endpoint int, key K) bool {
 	es := idx.slot(endpoint)
@@ -323,6 +363,15 @@ func (idx *Index[K]) Match(keys []K, candidates []int) []int {
 // where out[i] corresponds to candidates[i]. MatchInto is read-only and does
 // not update recency stamps.
 func (idx *Index[K]) MatchInto(keys []K, candidates []int, out []int) []int {
+	return idx.MatchVisit(keys, candidates, out, nil)
+}
+
+// MatchVisit is [Index.MatchInto] that also calls visit, when non-nil, for
+// each candidate with a nonzero match, under that endpoint's read lock. visit
+// receives the candidate's position in candidates, its match length, and its
+// ChainSet, from which it may read classes; it must not mutate the set or
+// call back into idx.
+func (idx *Index[K]) MatchVisit(keys []K, candidates []int, out []int, visit func(i, run int, s *ChainSet[K])) []int {
 	n := len(candidates)
 	if cap(out) < n {
 		out = make([]int, n)
@@ -359,9 +408,14 @@ func (idx *Index[K]) MatchInto(keys []K, candidates []int, out []int) []int {
 		if !idx.cfg.DisableThresholdSharing {
 			hints = hintsBuf[:numHints]
 		}
-		es.mu.RLock()
-		d := es.set.RunLength(keys, hints)
-		es.mu.RUnlock()
+		var d int
+		if visit == nil {
+			es.mu.RLock()
+			d = es.set.RunLength(keys, hints)
+			es.mu.RUnlock()
+		} else {
+			d = es.runAndVisit(keys, hints, i, visit)
+		}
 		out[i] = d
 
 		if d > 0 && !idx.cfg.DisableThresholdSharing && numHints < len(hintsBuf) {

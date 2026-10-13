@@ -321,3 +321,61 @@ func TestIndexGrowsEndpoints(t *testing.T) {
 		t.Fatal("Stats misses the grown endpoints")
 	}
 }
+
+// Touch refreshes a resident key's recency without inserting absent keys.
+func TestTouch(t *testing.T) {
+	s := NewChainSet[uint64](4, nil)
+	s.AddRootChain([]uint64{1, 2}) // stamp 1
+	s.AddRootChain([]uint64{3, 4}) // stamp 2
+	if s.Touch(9) {
+		t.Fatal("Touch reported an absent key resident")
+	}
+	if !s.Touch(2) { // 2 is now the most recent leaf
+		t.Fatal("Touch missed a resident key")
+	}
+	s.AddRootChain([]uint64{5}) // one over capacity: the stalest leaf is 4
+	checkInvariants(t, s)
+	if s.Contains(9) || !s.Contains(2) || s.Contains(4) {
+		t.Fatalf("after Touch(2): 9=%v 2=%v 4=%v", s.Contains(9), s.Contains(2), s.Contains(4))
+	}
+}
+
+// Update and View run under the endpoint's locks; MatchVisit reports every
+// candidate with a nonzero match, and a panicking visit releases its lock.
+func TestUpdateViewMatchVisit(t *testing.T) {
+	idx := NewIndex[uint64](Config{Endpoints: 2})
+	chain := []uint64{1, 2, 3, 4}
+	idx.Update(5, func(s *ChainSet[uint64]) { // grows the table
+		s.AddRootChain(chain)
+		s.SetClass(3, 7)
+	})
+	idx.Update(1, func(s *ChainSet[uint64]) { s.AddRootChain(chain[:2]) })
+	var cls uint32
+	if !idx.View(5, func(s *ChainSet[uint64]) { cls, _ = s.Class(3) }) || cls != 7 {
+		t.Fatalf("View saw class %d, want 7", cls)
+	}
+	if idx.View(1000, func(*ChainSet[uint64]) {}) {
+		t.Fatal("View ran for an endpoint without a slot")
+	}
+
+	type hit struct{ i, run int }
+	var hits []hit
+	out := idx.MatchVisit(chain, []int{0, 1, 5, 9}, nil, func(i, run int, s *ChainSet[uint64]) {
+		hits = append(hits, hit{i, run})
+		if _, uniform := s.UniformClass(); uniform == (i == 2) {
+			t.Errorf("candidate %d: unexpected UniformClass result", i)
+		}
+	})
+	if !slices.Equal(out, []int{0, 2, 4, 0}) || !slices.Equal(hits, []hit{{1, 2}, {2, 4}}) {
+		t.Fatalf("MatchVisit = %v, visits %v", out, hits)
+	}
+
+	func() {
+		defer func() { _ = recover() }()
+		idx.MatchVisit(chain, []int{5}, nil, func(int, int, *ChainSet[uint64]) { panic("visit") })
+	}()
+	idx.Update(5, func(s *ChainSet[uint64]) { s.Remove(4) }) // deadlocks if the read lock leaked
+	if got := idx.Match(chain, []int{5}); got[0] != 3 {
+		t.Fatalf("Match after Remove = %v, want [3]", got)
+	}
+}
