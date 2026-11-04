@@ -761,3 +761,40 @@ func TestUtilizationDetectorFactory_StalenessWarning(t *testing.T) {
 		})
 	}
 }
+
+func TestUtilizationDetectorFactory_NilHandle(t *testing.T) {
+	t.Parallel()
+
+	plugin, err := UtilizationDetectorFactory("test", nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, plugin)
+	require.Equal(t, UtilizationDetectorType, plugin.TypedName().Type)
+}
+
+func TestDetector_NilEndpointInList(t *testing.T) {
+	t.Parallel()
+
+	config := Config{
+		QueueDepthThreshold:       4,
+		KVCacheUtilThreshold:      0.90,
+		MetricsStalenessThreshold: time.Hour,
+		StalenessPolicy:           StalenessSaturated,
+	}
+	d := NewDetector("nil-test", config, logr.Discard())
+	now := time.Now()
+
+	sat := d.Saturation(t.Context(), []fwkdl.Endpoint{nil})
+	require.InDelta(t, 1.0, sat, 1e-9, "all-nil slice has 0 capacity and must fail closed")
+
+	halfLoaded := makePodMetric("half", 2, 0.45, now)
+	sat = d.Saturation(t.Context(), []fwkdl.Endpoint{nil, halfLoaded})
+	require.InDelta(t, 0.5, sat, 1e-9, "nil endpoint must be excluded from the capacity denominator")
+
+	filtered := d.Filter(t.Context(), nil, []fwksched.Endpoint{nil})
+	require.Empty(t, filtered, "all-nil slice must filter to empty")
+
+	saturated := makeSchedulingEndpoint("full", 10, 0.99, now)
+	filtered = d.Filter(t.Context(), nil, []fwksched.Endpoint{nil, saturated})
+	require.Equal(t, []fwksched.Endpoint{saturated}, filtered,
+		"fail-open fallback must return non-nil endpoints without nil elements")
+}

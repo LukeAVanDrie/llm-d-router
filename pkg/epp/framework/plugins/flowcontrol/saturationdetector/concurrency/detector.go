@@ -59,7 +59,11 @@ func ConcurrencyDetectorFactory(
 	if err != nil {
 		return nil, err
 	}
-	return newDetector(name, *cfg, log.FromContext(handle.Context())), nil
+	logger := logr.Discard()
+	if handle != nil {
+		logger = log.FromContext(handle.Context())
+	}
+	return newDetector(name, *cfg, logger), nil
 }
 
 var (

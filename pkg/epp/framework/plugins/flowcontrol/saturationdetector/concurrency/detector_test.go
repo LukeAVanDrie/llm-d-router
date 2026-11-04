@@ -1056,6 +1056,15 @@ func (e *nilMetadataEndpoint) Put(fwkplugin.DataKey, datalayer.Cloneable)       
 func (e *nilMetadataEndpoint) Keys() []fwkplugin.DataKey                         { return nil }
 func (e *nilMetadataEndpoint) Clone() datalayer.AttributeMap                     { return e }
 
+func TestConcurrencyDetectorFactory_NilHandle(t *testing.T) {
+	t.Parallel()
+
+	plugin, err := ConcurrencyDetectorFactory("test", nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, plugin)
+	require.Equal(t, ConcurrencyDetectorType, plugin.TypedName().Type)
+}
+
 func TestDetector_NilEndpointInList(t *testing.T) {
 	t.Parallel()
 	cfg := config{mode: modeRequests, maxConcurrency: 10}
