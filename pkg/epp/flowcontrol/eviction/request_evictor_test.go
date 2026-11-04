@@ -30,6 +30,7 @@ import (
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/flowcontrol"
+	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requestcontrol"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
@@ -369,4 +370,74 @@ func TestRequestEvictor_EvictN_PriorityBound(t *testing.T) {
 	inFlight, evictable := re.Stats()
 	assert.Equal(t, 1, inFlight, "the at-bound victim must remain tracked")
 	assert.Equal(t, 1, evictable, "the at-bound victim must remain evictable for future decisions")
+}
+
+type countingFilter struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func (f *countingFilter) TypedName() fwkplugin.TypedName {
+	return fwkplugin.TypedName{Type: "counting-filter", Name: "test"}
+}
+
+func (f *countingFilter) Accept(item *flowcontrol.EvictionItem) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.counts[item.RequestID]++
+	return true
+}
+
+func (f *countingFilter) count(requestID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.counts[requestID]
+}
+
+func TestRequestEvictor_EvictN_PriorityBoundDoesNotPopAndReTrack(t *testing.T) {
+	t.Parallel()
+	filter := &countingFilter{counts: make(map[string]int)}
+	re := NewRequestEvictor(&testOrdering{}, filter, NewImmediateResponseEvictor())
+
+	ctx := context.Background()
+	req := makeInferenceRequest("req-at-bound", -1)
+	require.NoError(t, re.PreRequest(ctx, req, makeSchedulingResult()))
+	require.Equal(t, 1, filter.count("req-at-bound"))
+
+	evicted, err := re.EvictN(ctx, 1, -1)
+	require.NoError(t, err)
+	assert.Empty(t, evicted)
+	assert.Equal(t, 1, filter.count("req-at-bound"),
+		"EvictN must not pop and re-track an item whose priority is >= priorityBound")
+
+	// Also verify concurrent EvictN with a lower priorityBound and ResponseBody completion
+	// never leaves a zombie entry in the queue.
+	const iterations = 200
+	stopCh := make(chan struct{})
+	var evictWG sync.WaitGroup
+	evictWG.Add(1)
+	go func() {
+		defer evictWG.Done()
+		for {
+			select {
+			case <-stopCh:
+				return
+			default:
+				_, _ = re.EvictN(ctx, 1, -5)
+			}
+		}
+	}()
+
+	re.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	for i := range iterations {
+		r := makeInferenceRequest("req-concurrent-"+string(rune('a'+(i%26))), -1)
+		require.NoError(t, re.PreRequest(ctx, r, makeSchedulingResult()))
+		re.ResponseBody(ctx, r, &requestcontrol.Response{EndOfStream: true}, nil)
+	}
+	close(stopCh)
+	evictWG.Wait()
+
+	inFlight, evictable := re.Stats()
+	assert.Equal(t, 0, inFlight, "completed requests must not remain in flight after concurrent EvictN")
+	assert.Equal(t, 0, evictable, "completed requests must not remain evictable after concurrent EvictN")
 }

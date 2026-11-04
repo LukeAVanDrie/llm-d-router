@@ -41,6 +41,8 @@ type RequestEvictor struct {
 
 	// mu guards the fields below.
 	mu sync.Mutex
+	// cancelFuncs holds the context.AfterFunc stop callbacks keyed by request ID.
+	cancelFuncs map[string]func() bool
 	// pendingEvictions holds the IDs of requests whose eviction has been issued but whose stream has
 	// not yet terminated. Populated by EvictN before the eviction signal is sent; consumed exactly
 	// once by cleanupRequest when the stream terminates.
@@ -65,6 +67,7 @@ func NewRequestEvictor(
 		queue:            NewEvictionQueue(ordering, filter),
 		evictor:          evictor,
 		evictionRegistry: registry,
+		cancelFuncs:      make(map[string]func() bool),
 		pendingEvictions: make(map[string]struct{}),
 	}
 }
@@ -134,10 +137,16 @@ func (p *RequestEvictor) PreRequest(
 	// Bind untrack to the request context's lifetime as a safety net.
 	// If the client disconnects and ResponseBody(EndOfStream) never fires,
 	// ctx.Done() ensures the request is still cleaned up. Untrack is idempotent.
-	go func() {
-		<-ctx.Done()
+	p.mu.Lock()
+	prevStop := p.cancelFuncs[requestID]
+	stop := context.AfterFunc(ctx, func() {
 		p.cleanupRequest(requestID)
-	}()
+	})
+	p.cancelFuncs[requestID] = stop
+	p.mu.Unlock()
+	if prevStop != nil {
+		prevStop()
+	}
 
 	log.FromContext(ctx).V(logutil.DEBUG).Info("Tracked in-flight request",
 		"requestID", requestID,
@@ -176,9 +185,9 @@ func (p *RequestEvictor) ResponseBody(
 
 // EvictN attempts to evict up to n requests from the eviction queue, in victim-policy order,
 // stopping at the first victim whose priority is not strictly below priorityBound. The bound
-// enforces strict priority dominance across a whole multi-revocation decision: the victim head
+// enforces strict priority dominance across a whole multi-revocation decision: the victim top
 // check alone does not cover later victims, which come off the heap at priorities at or above the
-// head's. Each request is only removed from tracking after a successful eviction. If the eviction
+// top's. Each request is only removed from tracking after a successful eviction. If the eviction
 // fails, the request remains in the queue for a future eviction attempt.
 // Returns the request IDs that were successfully evicted.
 func (p *RequestEvictor) EvictN(ctx context.Context, n int, priorityBound int) ([]string, error) {
@@ -186,19 +195,8 @@ func (p *RequestEvictor) EvictN(ctx context.Context, n int, priorityBound int) (
 	evicted := make([]string, 0, n)
 
 	for range n {
-		items := p.queue.PopN(1)
-		if len(items) == 0 {
-			break
-		}
-		item := items[0]
-
-		if item.Priority >= priorityBound {
-			// The heap orders victims lowest-priority first, so no remaining victim can be below the
-			// bound either. Re-tracking races a concurrent completion: if cleanupRequest ran between
-			// the pop and this Track, the entry is re-inserted dead and survives until a future
-			// decision evicts it, which then stalls the pacing gate for one ConfirmationTimeout. The
-			// window is sub-microsecond and the cost is bounded, so it is tolerated.
-			p.queue.Track(item)
+		item := p.queue.PopIfBelow(priorityBound)
+		if item == nil {
 			break
 		}
 
@@ -208,7 +206,6 @@ func (p *RequestEvictor) EvictN(ctx context.Context, n int, priorityBound int) (
 		if err := p.evictor.Evict(ctx, item); err != nil {
 			logger.Error(err, "Failed to evict request, re-tracking", "requestID", item.RequestID, "targetURL", item.TargetURL)
 			p.unmarkPendingEviction(item.RequestID)
-			// Same tolerated re-track-vs-completion window as the bound branch above.
 			p.queue.Track(item)
 			continue
 		}
@@ -231,6 +228,16 @@ func (p *RequestEvictor) Stats() (inFlight int, evictable int) {
 // cleans up evictor-internal state to prevent unbounded map growth.
 // If the request had been evicted, the eviction-terminated listener is notified exactly once.
 func (p *RequestEvictor) cleanupRequest(requestID string) {
+	p.mu.Lock()
+	stop, ok := p.cancelFuncs[requestID]
+	if ok {
+		delete(p.cancelFuncs, requestID)
+	}
+	p.mu.Unlock()
+	if ok {
+		stop()
+	}
+
 	p.queue.Untrack(requestID)
 	p.evictionRegistry.Deregister(requestID)
 	if c, ok := p.evictor.(EvictorWithCleanup); ok {
