@@ -66,13 +66,16 @@ func UtilizationDetectorFactory(
 	if err != nil {
 		return nil, err
 	}
-	logger := log.FromContext(handle.Context())
-	if refresh := handle.RefreshMetricsInterval(); refresh > cfg.MetricsStalenessThreshold {
-		logger.Info("Warning: refresh-metrics-interval exceeds metricsStalenessThreshold; "+
-			"metrics will be stale between polls",
-			"detector", name,
-			"refreshMetricsInterval", refresh.String(),
-			"metricsStalenessThreshold", cfg.MetricsStalenessThreshold.String())
+	logger := logr.Discard()
+	if handle != nil {
+		logger = log.FromContext(handle.Context())
+		if refresh := handle.RefreshMetricsInterval(); refresh > cfg.MetricsStalenessThreshold {
+			logger.Info("Warning: refresh-metrics-interval exceeds metricsStalenessThreshold; "+
+				"metrics will be stale between polls",
+				"detector", name,
+				"refreshMetricsInterval", refresh.String(),
+				"metricsStalenessThreshold", cfg.MetricsStalenessThreshold.String())
+		}
 	}
 	return NewDetector(name, *cfg, logger), nil
 }
@@ -187,17 +190,14 @@ func (d *Detector) TypedName() fwkplugin.TypedName {
 // the assumptions the compensation rests on.
 func (d *Detector) Saturation(ctx context.Context, candidates []datalayer.Endpoint) float64 {
 	stage := flowcontrol.SaturationStageFromContext(ctx)
-	if len(candidates) == 0 {
-		// No candidates means no stale endpoints. Keeping the gauge current here prevents a stale
-		// reading from a previous evaluation misattributing an empty-pool stall to a metrics
-		// collection failure.
-		metrics.RecordFlowControlStaleEndpoints(d.typedName.Name, stage, 0)
-		return 1.0
-	}
 
 	var totalScore float64
-	staleCount := 0
+	var endpointCount, staleCount int
 	for _, e := range candidates {
+		if e == nil {
+			continue
+		}
+		endpointCount++
 		podMetrics := e.GetMetrics()
 
 		if podMetrics == nil || time.Since(podMetrics.UpdateTime) > d.config.MetricsStalenessThreshold {
@@ -220,22 +220,30 @@ func (d *Detector) Saturation(ctx context.Context, candidates []datalayer.Endpoi
 		totalScore += max(qRatio, kvRatio)
 	}
 
+	if endpointCount == 0 {
+		// No candidates means no stale endpoints. Keeping the gauge current here prevents a stale
+		// reading from a previous evaluation misattributing an empty-pool stall to a metrics
+		// collection failure.
+		metrics.RecordFlowControlStaleEndpoints(d.typedName.Name, stage, 0)
+		return 1.0
+	}
+
 	metrics.RecordFlowControlStaleEndpoints(d.typedName.Name, stage, staleCount)
 	if staleCount > 0 {
-		d.maybeLogStaleEndpoints(staleCount, len(candidates))
+		d.maybeLogStaleEndpoints(staleCount, endpointCount)
 	}
 
 	// Under ignore, stale endpoints are out of the average; if every candidate is stale the pool
 	// scores 0.0 and dispatch continues, consistent with Filter's fail-open fallback.
 	if d.config.StalenessPolicy == StalenessIgnore {
-		fresh := len(candidates) - staleCount
+		fresh := endpointCount - staleCount
 		if fresh == 0 {
 			return 0.0
 		}
 		return totalScore / float64(fresh)
 	}
 
-	return totalScore / float64(len(candidates))
+	return totalScore / float64(endpointCount)
 }
 
 // maybeLogStaleEndpoints logs the stale-metrics condition at most once per staleWarnInterval.
@@ -273,6 +281,9 @@ func (d *Detector) Filter(
 	filtered := make([]fwksched.Endpoint, 0, len(endpoints))
 
 	for _, endpoint := range endpoints {
+		if endpoint == nil {
+			continue
+		}
 		podMetrics := endpoint.GetMetrics()
 		if podMetrics == nil || time.Since(podMetrics.UpdateTime) > d.config.MetricsStalenessThreshold {
 			continue
@@ -283,7 +294,11 @@ func (d *Detector) Filter(
 		}
 	}
 	if len(filtered) == 0 {
-		return endpoints
+		for _, endpoint := range endpoints {
+			if endpoint != nil {
+				filtered = append(filtered, endpoint)
+			}
+		}
 	}
 	return filtered
 }

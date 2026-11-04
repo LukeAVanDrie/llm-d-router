@@ -742,3 +742,34 @@ func TestUtilizationDetectorFactory_StalenessWarning(t *testing.T) {
 		})
 	}
 }
+
+func TestUtilizationDetectorFactory_NilHandle(t *testing.T) {
+	t.Parallel()
+
+	plugin, err := UtilizationDetectorFactory("test", nil, nil)
+	require.NoError(t, err)
+	require.NotNil(t, plugin)
+	require.Equal(t, UtilizationDetectorType, plugin.TypedName().Type)
+}
+
+func TestDetector_NilEndpointInList(t *testing.T) {
+	t.Parallel()
+
+	config := Config{
+		QueueDepthThreshold:       5,
+		KVCacheUtilThreshold:      0.90,
+		MetricsStalenessThreshold: time.Hour,
+		StalenessPolicy:           StalenessSaturated,
+	}
+	d := NewDetector("nil-test", config, logr.Discard())
+
+	require.NotPanics(t, func() {
+		sat := d.Saturation(t.Context(), []fwkdl.Endpoint{nil})
+		require.InDelta(t, 1.0, sat, 1e-9, "nil endpoint skipped, 0 capacity = fail closed")
+	})
+
+	require.NotPanics(t, func() {
+		filtered := d.Filter(t.Context(), nil, []fwksched.Endpoint{nil})
+		require.Empty(t, filtered, "nil endpoint should be skipped by filter")
+	})
+}
